@@ -52,6 +52,10 @@ class AgentSession:
     _suppress_emit: bool = field(default=False, init=False)
     available_models: list[dict] = field(default_factory=list, init=False)
     current_model: Optional[str] = field(default=None, init=False)
+    # True when the model list came from the ACP `configOptions` model select
+    # rather than the legacy top-level `models` field; picks the right write path
+    # in `set_model` (set_config_option vs. set_session_model).
+    _model_via_config_option: bool = field(default=False, init=False)
 
     @property
     def acp_session_id(self) -> Optional[str]:
@@ -65,28 +69,63 @@ class AgentSession:
             self._client.case_id = case_id
 
     def _capture_models(self, response: Any) -> None:
-        """Record the advertised model list and current model from a session response."""
+        """Record the advertised model list and current model from a session response.
+
+        Backends expose their models one of two ways. The legacy top-level `models`
+        field is preferred when present; otherwise we fall back to the `model`
+        select in ACP `configOptions` (what claude-agent-acp uses — it leaves
+        `models` null). Either way we normalize to the same `{model_id, name,
+        description}` shape the coordinator and UI already consume.
+        """
         state = getattr(response, "models", None)
-        if state is None:
-            self.available_models = []
-            self.current_model = None
+        if state is not None and (state.available_models or []):
+            self._model_via_config_option = False
+            self.available_models = [
+                {
+                    "model_id": model.model_id,
+                    "name": model.name,
+                    "description": getattr(model, "description", None),
+                }
+                for model in (state.available_models or [])
+            ]
+            self.current_model = getattr(state, "current_model_id", None)
             return
-        self.available_models = [
-            {
-                "model_id": model.model_id,
-                "name": model.name,
-                "description": getattr(model, "description", None),
-            }
-            for model in (state.available_models or [])
-        ]
-        self.current_model = getattr(state, "current_model_id", None)
+        option = self._model_config_option(response)
+        if option is not None:
+            self._model_via_config_option = True
+            self.available_models = [
+                {
+                    "model_id": choice.value,
+                    "name": choice.name,
+                    "description": getattr(choice, "description", None),
+                }
+                for choice in (option.options or [])
+            ]
+            self.current_model = option.current_value
+            return
+        self._model_via_config_option = False
+        self.available_models = []
+        self.current_model = None
+
+    @staticmethod
+    def _model_config_option(response: Any) -> Any:
+        """The `model` select from a session response's configOptions, or None."""
+        for option in getattr(response, "config_options", None) or []:
+            if getattr(option, "category", None) == "model" and getattr(option, "options", None):
+                return option
+        return None
 
     async def set_model(self, model_id: str) -> None:
         if self._conn is None or self._acp_session_id is None:
             return
-        await self._conn.set_session_model(
-            model_id=model_id, session_id=self._acp_session_id
-        )
+        if self._model_via_config_option:
+            await self._conn.set_config_option(
+                config_id="model", value=model_id, session_id=self._acp_session_id
+            )
+        else:
+            await self._conn.set_session_model(
+                model_id=model_id, session_id=self._acp_session_id
+            )
         self.current_model = model_id
 
     def _guarded_emit(self, event: dict) -> None:
