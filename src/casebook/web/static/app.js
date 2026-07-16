@@ -50,7 +50,6 @@ const state = {
   hotkeyByKey: new Map(),
   widths: [],
   widthIndex: -1,
-  caseColors: {},
   projectName: null,  // for tab titles; set from /ui
   caseTitle: null,    // resolved title of the case page, for the tab title
   prevUsage: new Map(),  // agent_id → {input_tokens, output_tokens, total_tokens} for computing deltas
@@ -1108,7 +1107,12 @@ async function loadUi() {
   if (ui.session_min_width) style.setProperty("--session-min-width", ui.session_min_width);
   if (ui.session_max_width) style.setProperty("--session-max-width", ui.session_max_width);
   state.widths = Array.isArray(ui.session_widths) ? ui.session_widths : [];
-  state.caseColors = ui.case_colors || {};
+  // Publish case colors as CSS variables rather than resolving them in JS: the
+  // case list may already be rendered (loadCases races this fetch), and driving
+  // the color through a variable lets those links restyle live once it lands.
+  for (const [status, color] of Object.entries(ui.case_colors || {})) {
+    style.setProperty(`--case-color-${status}`, color);
+  }
   const saved = localStorage.getItem("casebook.sessionWidth");
   const width = saved || ui.session_width;
   if (width) style.setProperty("--session-width", width);
@@ -1189,8 +1193,9 @@ async function loadCases() {
     link.href = caseUrl(caseEntry.case_id);
     link.title = caseEntry.title;
     link.textContent = caseEntry.title;
-    const statusColor = (state.caseColors || {})[caseEntry.status];
-    if (statusColor) link.style.color = statusColor;
+    // A status with no configured color leaves the variable undefined, so the
+    // declaration is invalid and the link inherits the default text color.
+    link.style.color = `var(--case-color-${caseEntry.status})`;
     link.onclick = (event) => {
       if (event.metaKey || event.ctrlKey || event.shiftKey) return;
       event.preventDefault();
