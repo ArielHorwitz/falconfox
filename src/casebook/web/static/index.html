@@ -38,19 +38,6 @@
           </div>
           <ul id="case-list"></ul>
         </div>
-        <!-- Case/scratch sidebar -->
-        <div id="case-nav" hidden>
-          <div class="sidebar-head">
-            <h2>Sessions</h2>
-            <button id="add-agent" title="new session">+</button>
-          </div>
-          <select id="backend-select" title="backend for new sessions" hidden></select>
-          <ul id="session-list"></ul>
-          <div id="files-section">
-            <div class="sidebar-head files-head"><h2>Files</h2></div>
-            <ul id="file-list"></ul>
-          </div>
-        </div>
       </aside>
       <main id="workspace">
         <!-- Project browser main -->
@@ -67,7 +54,7 @@
         <!-- Case browser main (project home) -->
         <section id="agents" hidden>
           <div id="agent-panes"></div>
-          <p id="no-open-sessions" hidden>No open sessions — add one with + or open a closed session from the sidebar.</p>
+          <p id="no-open-sessions" hidden>No open sessions — press Tab to open the session navigator and add or resume one.</p>
         </section>
         <section id="case-detail" hidden>
           <h1 id="cd-title"></h1>
@@ -87,6 +74,25 @@
     </div>
 
     <div id="toasts"></div>
+
+    <!-- Case/scratch session navigator (centered modal on session pages) -->
+    <div id="case-modal" hidden>
+      <div class="modal-body">
+        <header>
+          <span>Sessions</span>
+          <button id="add-agent" title="new session">+</button>
+          <button id="case-modal-close" title="close (Esc)">&#xd7;</button>
+        </header>
+        <div id="case-nav">
+          <select id="backend-select" title="backend for new sessions" hidden></select>
+          <ul id="session-list"></ul>
+          <div id="files-section">
+            <div class="sidebar-head files-head"><h2>Files</h2></div>
+            <ul id="file-list"></ul>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <div id="hotkey-help" hidden>
       <div class="modal-body">

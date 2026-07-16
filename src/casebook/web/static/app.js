@@ -193,6 +193,8 @@ function applySnapshot(snapshot) {
   state.sidebarFocusedAgent = ids[0] || null;
   const pids = paneIds();
   state.paneFocusedAgent = pids[0] || null;
+  // Open the navigator on arrival only when there's no live session to work in.
+  state.focusRegion = state.panes.size === 0 ? "sidebar" : "panes";
   renderSessionList();
   applyFocusVisibility();
   scrollSidebarToFocused();
@@ -212,16 +214,20 @@ function upsertAgent(agent) {
   const shouldFocus = !state._snapshotLoading && (isNew || (agent.live && agent.agent_id === state.sidebarFocusedAgent));
   if (shouldFocus) {
     state.sidebarFocusedAgent = agent.agent_id;
-    if (agent.live) state.paneFocusedAgent = agent.agent_id;
+    // Opening a live session moves into its pane, dismissing the navigator.
+    if (agent.live) {
+      state.paneFocusedAgent = agent.agent_id;
+      state.focusRegion = "panes";
+    }
   } else {
     if (!state.sidebarFocusedAgent) state.sidebarFocusedAgent = agent.agent_id;
     if (!state.paneFocusedAgent && agent.live) state.paneFocusedAgent = agent.agent_id;
   }
+  autoOpenCaseNavIfEmpty();
   renderSessionList();
   applyFocusVisibility();
   if (shouldFocus && agent.live) {
     scrollSidebarToFocused();
-    state.focusRegion = "panes";
     const pane = state.panes.get(agent.agent_id);
     if (pane) {
       pane.root.scrollIntoView({ inline: "nearest", block: "nearest" });
@@ -246,6 +252,7 @@ function removeAgent(agentId) {
   state.prevUsage.delete(agentId);
   if (state.sidebarFocusedAgent === agentId) state.sidebarFocusedAgent = sessionIds()[0] || null;
   if (state.paneFocusedAgent === agentId) state.paneFocusedAgent = paneIds()[0] || null;
+  autoOpenCaseNavIfEmpty();
   renderSessionList();
   applyFocusVisibility();
 }
@@ -761,6 +768,55 @@ function applyFocusVisibility() {
   if (panes) panes.classList.toggle("active-region", state.focusRegion === "panes");
   const hint = el("no-open-sessions");
   if (hint) hint.hidden = state.panes.size > 0;
+  syncCaseModal();
+}
+
+// The session navigator is a centered modal on session pages, shown whenever the
+// focus region is the sidebar. It stays open while there are no live panes, since
+// there's nothing behind it to work in. The close control hides in that case.
+function syncCaseModal() {
+  const modal = el("case-modal");
+  if (!modal) return;
+  modal.hidden = !(isSessionPage() && state.focusRegion === "sidebar");
+  el("case-modal-close").hidden = state.panes.size === 0;
+}
+
+function focusActivePaneInput() {
+  const pane = state.paneFocusedAgent && state.panes.get(state.paneFocusedAgent);
+  if (pane) pane.input.focus();
+}
+
+// Open the navigator. Stealing focus off the composer is deliberate: it lets the
+// keyboard nav (arrows / Enter, which bail out while typing) work the instant the
+// modal appears, even when it was popped open from the prompt box via Tab.
+function openCaseNav() {
+  state.focusRegion = "sidebar";
+  if (isTyping()) document.activeElement.blur();
+  applyFocusVisibility();
+  scrollSidebarToFocused();
+}
+
+// Toggle the navigator: open it, or close it into the panes — unless there are
+// none, in which case it stays open (there's nothing behind it to work in).
+function toggleCaseNav() {
+  if (state.focusRegion === "sidebar") closeCaseNav();
+  else openCaseNav();
+}
+
+function closeCaseNav() {
+  if (state.panes.size === 0) return;
+  state.focusRegion = "panes";
+  applyFocusVisibility();
+  focusActivePaneInput();
+}
+
+// When the last live pane goes away there's nothing to work in, so surface the
+// navigator automatically.
+function autoOpenCaseNavIfEmpty() {
+  if (!isSessionPage() || state._snapshotLoading) return;
+  if (state.panes.size === 0 && state.focusRegion !== "sidebar") {
+    openCaseNav();
+  }
 }
 
 function scrollSidebarToFocused() {
@@ -952,21 +1008,10 @@ function openFocused() {
     if (pane) pane.input.focus();
     return;
   }
-  // Sidebar region: activate the focused sidebar session.
+  // Sidebar region: activate the focused session — activateSession dismisses the
+  // navigator into the pane (live) or resumes a closed session.
   const agentId = state.sidebarFocusedAgent;
-  const agent = agentId && state.agents.get(agentId);
-  if (!agent) return;
-  if (agent.live) {
-    state.paneFocusedAgent = agentId;
-    const pane = state.panes.get(agentId);
-    if (pane) {
-      pane.root.scrollIntoView({ inline: "nearest", block: "nearest" });
-      pane.input.focus();
-    }
-    applyFocusVisibility();
-  } else {
-    activateSession(agentId);
-  }
+  if (agentId && state.agents.get(agentId)) activateSession(agentId);
 }
 
 function runAction(action) {
@@ -1021,15 +1066,15 @@ function onKeydown(event) {
   if (event.key === "Escape") {
     if (!el("file-modal").hidden) return (el("file-modal").hidden = true);
     if (!el("hotkey-help").hidden) return toggleHelp();
+    if (isSessionPage() && state.focusRegion === "sidebar" && state.panes.size > 0) return closeCaseNav();
     if (isTyping()) return document.activeElement.blur();
   }
-  if (isTyping()) return;
+  // Tab pops the session navigator in and out — usable even while composing.
   if (event.key === "Tab" && isSessionPage()) {
     event.preventDefault();
-    state.focusRegion = state.focusRegion === "sidebar" ? "panes" : "sidebar";
-    applyFocusVisibility();
-    return;
+    return toggleCaseNav();
   }
+  if (isTyping()) return;
   const action = state.hotkeyByKey.get(event.key);
   if (!action) return;
   event.preventDefault();
@@ -1263,7 +1308,10 @@ function applyRoute() {
   document.body.classList.toggle("home", isHome);
   document.body.classList.toggle("case", isCase || isScratch);
 
-  // Sidebar sections
+  // Sidebar sections. The session navigator lives in #case-modal (a centered
+  // modal) rather than the inline sidebar, so the sidebar itself only serves the
+  // project and case browsers — hide it entirely on session pages.
+  el("sidebar").hidden = isCase || isScratch;
   el("projects-nav").hidden = !isProjects;
   el("cases-nav").hidden = !isHome;
   el("case-nav").hidden = !(isCase || isScratch);
@@ -1301,6 +1349,10 @@ el("new-case").onclick = newCase;
 el("file-modal-close").onclick = () => (el("file-modal").hidden = true);
 el("file-modal").onclick = (event) => {
   if (event.target.id === "file-modal") el("file-modal").hidden = true;
+};
+el("case-modal-close").onclick = closeCaseNav;
+el("case-modal").onclick = (event) => {
+  if (event.target.id === "case-modal") closeCaseNav();
 };
 el("hotkey-help-close").onclick = toggleHelp;
 el("hotkey-hint").onclick = toggleHelp;
