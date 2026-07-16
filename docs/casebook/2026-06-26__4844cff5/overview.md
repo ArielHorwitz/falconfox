@@ -34,10 +34,11 @@ writing, install streaming, etc. is not justified.
   endpoint, reload button (↻) in the topbar. The frontend handles the
   `config_changed` WebSocket event to refetch hotkeys, UI, and backends.
 
-**Remaining:** Expand `docs/configuration/backends.md` with full
-install-and-configure walkthroughs for 2-3 common backends. See
-`handoff-backends-guide-config-reload-and-per-backend-model.md` (item 3) for
-details.
+**Done:** `docs/configuration/backends.md` now covers the built-in backends,
+worked config examples (Claude, Gemini, npx, custom), and a Models section with
+install notes. See
+`handoff-backends-guide-config-reload-and-per-backend-model.md` (item 3) for the
+original scope.
 
 ### 3. Settings page and first-time onboarding — DROPPED
 **Original decision:** An in-app settings page covering backends, defaults,

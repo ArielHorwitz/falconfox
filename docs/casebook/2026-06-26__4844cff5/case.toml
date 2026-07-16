@@ -1,4 +1,4 @@
 title = "UX: app launching, backend docs, config reload, per-backend model, friendly installation"
-status = "open"
+status = "closed"
 created = "2026-06-26T19:54:59.492530"
 keywords = ["ux", "cli", "daemon", "backends", "documentation", "onboarding", "configuration", "config-reload", "readme"]
