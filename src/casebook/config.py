@@ -7,14 +7,14 @@ Casebook reads a single global config at
 available ACP agent *backends* — a backend is just a command to launch plus
 environment — and which one is the default.
 
-Backends are installed explicitly: casebook never fetches one on the fly. Two
-backends are built in:
+Exactly one backend is built in:
 
   - ``echo``: a tiny in-tree ACP agent that reflects messages back. Always
     available, so the app is runnable with no setup (useful for development).
-  - ``claude``: the ``claude-agent-acp`` adapter, but *only* when its binary is
-    found on PATH. If you want it, install it (``npm install -g
-    @agentclientprotocol/claude-agent-acp``); casebook will not run it via npx.
+
+A real agent such as ``claude`` (the ``claude-agent-acp`` adapter) is declared
+under ``[backends.*]`` — run it via ``npx``, or install it and point ``command``
+at the binary. See docs/configuration/backends.md.
 
 This module knows nothing about cases.
 """
@@ -22,7 +22,6 @@ This module knows nothing about cases.
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -33,14 +32,10 @@ from . import logsetup
 
 log = logsetup.get_logger("config")
 
-CLAUDE_ACP_PACKAGE = "@agentclientprotocol/claude-agent-acp"
-CLAUDE_ACP_BIN = "claude-agent-acp"
-
 CONFIG_FILENAME = "config.toml"
 PROJECT_CONFIG_RELATIVE_PATH = ".casebook/config.toml"
 
 ECHO_BACKEND_NAME = "echo"
-CLAUDE_BACKEND_NAME = "claude"
 
 # Default logging verbosity. Override with a top-level `log_level = "DEBUG"` in
 # the global config, or the CASEBOOK_LOG_LEVEL environment variable.
@@ -126,16 +121,9 @@ def echo_backend() -> Backend:
 
 
 def builtin_backends() -> dict[str, Backend]:
-    """Backends available without any config: echo always, claude if installed."""
-    backends = {ECHO_BACKEND_NAME: echo_backend()}
-    claude_binary = shutil.which(CLAUDE_ACP_BIN)
-    if claude_binary is not None:
-        backends[CLAUDE_BACKEND_NAME] = Backend(
-            name=CLAUDE_BACKEND_NAME, command=[claude_binary]
-        )
-    else:
-        log.debug("claude backend not detected (%s not on PATH)", CLAUDE_ACP_BIN)
-    return backends
+    """The backends present without any config. Only echo is built in; real
+    agents like claude are declared explicitly under ``[backends.*]``."""
+    return {ECHO_BACKEND_NAME: echo_backend()}
 
 
 @dataclass(frozen=True)
@@ -222,8 +210,10 @@ def load_config(project_root: Optional[Path] = None) -> Config:
 
     default = data.get("default_backend")
     if default is None:
-        # Prefer a real backend (claude) when present; fall back to echo.
-        default = CLAUDE_BACKEND_NAME if CLAUDE_BACKEND_NAME in backends else ECHO_BACKEND_NAME
+        # No preference set: default to the first real backend the user declared,
+        # falling back to the built-in echo if they declared none.
+        default = next((name for name in backends if name != ECHO_BACKEND_NAME),
+                       ECHO_BACKEND_NAME)
     log.debug("config loaded (project=%s): backends=%s default=%s",
               project_root, sorted(backends), default)
     return Config(
