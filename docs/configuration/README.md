@@ -1,8 +1,8 @@
 # Configuration
 
 Casebook is configured with a single TOML file. Everything is optional — with no
-config at all, the app runs on the built-in `echo` backend (and the `claude`
-backend too, if `claude-agent-acp` is on your `PATH`).
+config at all, the app runs on the built-in `echo` backend. A real agent like
+`claude` is declared explicitly (see [backends.md](backends.md)).
 
 ## Where the config lives
 
@@ -21,11 +21,11 @@ a backend without redefining the global ones).
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `default_backend` | string | `"claude"` if available, else `"echo"` | Which backend new sessions use unless one is picked in the UI. |
+| `default_backend` | string | first declared backend, else `"echo"` | Which backend new sessions use unless one is picked in the UI. |
 | `naming_prompt` | string | (built-in) | Instructions handed to the model by the "name session" button. |
 | `naming_backend` | string | the session's own backend | Which backend names sessions. `echo` is never used for naming. See [backends.md](backends.md#naming). |
 | `naming_model` | string | — | Model to use for naming (loose match on model id or name). |
-| `[backends.<name>]` | table | echo + claude (built-in) | Define a launchable ACP agent. Full detail: **[backends.md](backends.md)**. |
+| `[backends.<name>]` | table | built-in `echo` only | Define a launchable ACP agent. Full detail: **[backends.md](backends.md)**. |
 | `[hotkeys]` | table | (built-in) | Rebind keyboard shortcuts. Full detail: **[hotkeys.md](hotkeys.md)**. |
 | `[ui]` | table | `50%`/`320px`/`none` | Session-column sizing — see [UI sizing](#ui-sizing). |
 
@@ -42,9 +42,11 @@ naming_prompt = "Reply with a concise title of at most six words for this sessio
 naming_backend = "claude"
 naming_model = "sonnet"
 
+# Claude via npx (needs Claude Code installed + signed in). To skip npx, install
+# claude-agent-acp and use command = ["claude-agent-acp"]. See backends.md.
 [backends.claude]
-command = ["claude-agent-acp"]
-default_model = "sonnet"
+command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
+default_model = "opus"
 
 [backends.gemini]
 command = ["gemini", "--experimental-acp"]
@@ -82,8 +84,8 @@ scrolls horizontally.
 
 ## See also
 
-- **[backends.md](backends.md)** — what a backend is, the schema, the built-ins,
-  worked examples, environment, and how to pin a specific model.
+- **[backends.md](backends.md)** — what a backend is, the schema, the built-in
+  `echo`, models, and copy-paste quick-setup recipes (Claude, Gemini, and more).
 - **[hotkeys.md](hotkeys.md)** — every bindable action, the default keys, and the
   key-name syntax. (The app also lists the *active* bindings live — press `?` or
   click the ⌨ button.)

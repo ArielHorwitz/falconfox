@@ -41,20 +41,27 @@ cd casebook
 uv pip install -e .
 ```
 
-### Install a backend
+### Add a backend
 
-Casebook ships a built-in `echo` backend (reflects your messages back) so the
-app always runs, but you'll want a real agent. The most common backend is
-Claude via the `claude-agent-acp` adapter:
+Casebook ships one built-in backend, `echo` (it just reflects your messages
+back), so the app always runs — but you'll want a real agent. The quickest is
+Claude, via the `claude-agent-acp` adapter.
 
-```bash
-npm install -g @agentclientprotocol/claude-agent-acp
+First, make sure [Claude Code](https://docs.claude.com/en/docs/claude-code/overview)
+is installed and you're signed in — the adapter uses its login, so run `claude`
+once and follow the prompt (no separate API key needed). Then point a backend at
+the adapter through `npx`, which fetches it on first use with nothing to install.
+Add this to `~/.config/casebook/config.toml`:
+
+```toml
+default_backend = "claude"
+
+[backends.claude]
+command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
 ```
 
-Once `claude-agent-acp` is on your `PATH`, casebook detects it automatically —
-no configuration needed. It uses your ambient Anthropic credentials.
-
-For other backends (Gemini, custom agents, etc.), see
+Prefer to install the adapter (and skip `npx`), pin a specific model, or set up
+Gemini or another ACP agent? See
 [docs/configuration/backends.md](docs/configuration/backends.md).
 
 ### Run casebook
@@ -104,8 +111,7 @@ overridden per-project in `.casebook/config.toml`.
 default_backend = "claude"
 
 [backends.claude]
-command = ["claude-agent-acp"]
-default_model = "sonnet"
+command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
 
 [backends.gemini]
 command = ["gemini", "--experimental-acp"]
@@ -117,7 +123,7 @@ Full reference:
 
 - **[Configuration overview](docs/configuration/README.md)** — all keys, merge
   rules, and a complete example.
-- **[Backends](docs/configuration/backends.md)** — defining backends, the
-  built-ins, environment, models, and worked examples.
+- **[Backends](docs/configuration/backends.md)** — the built-in `echo`, models,
+  and copy-paste quick-setup recipes (Claude, Gemini, and more).
 - **[Hotkeys](docs/configuration/hotkeys.md)** — every bindable action, defaults,
   and key-name syntax.
