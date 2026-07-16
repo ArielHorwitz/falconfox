@@ -634,6 +634,23 @@ class CaseCoordinator:
                 self._emit({"type": "notice", "agent_id": agent_id,
                             "case_id": self._agents[agent_id]["case_id"],
                             "level": "error", "message": f"could not select default model: {error}"})
+        elif backend.default_model and desired is None:
+            # A preference that goes nowhere used to vanish silently — whether it's
+            # a full model id hitting coarse buckets, or any default_model on a
+            # backend that exposes no models at all. Both leave the user expecting
+            # something that never happens, so say what happened either way.
+            if session.available_models:
+                offered = ", ".join(model["model_id"] for model in session.available_models)
+                message = (f"default_model {backend.default_model!r} matched no "
+                           f"model this backend offers: {offered}")
+            else:
+                message = (f"default_model {backend.default_model!r} was set, but this "
+                           f"backend advertises no models to select from")
+            self.log.debug("default_model %r not applied for agent=%s (available=%d)",
+                           backend.default_model, agent_id, len(session.available_models))
+            self._emit({"type": "notice", "agent_id": agent_id,
+                        "case_id": self._agents[agent_id]["case_id"],
+                        "level": "error", "message": message})
         self._models[agent_id] = session.available_models
         self._agents[agent_id]["model"] = session.current_model
         self._emit({"type": "models", "agent_id": agent_id,
