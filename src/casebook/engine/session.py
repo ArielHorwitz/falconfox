@@ -23,7 +23,7 @@ from acp.schema import FileSystemCapabilities
 
 from .. import logsetup
 from ..config import Backend
-from .client import AgentClient, Emit, PermissionRequester
+from .client import AgentClient, Emit, PermissionRequester, capture_config_options
 
 log = logsetup.get_logger("engine.session")
 
@@ -50,12 +50,10 @@ class AgentSession:
     _busy: bool = field(default=False, init=False)
     _supports_load: bool = field(default=False, init=False)
     _suppress_emit: bool = field(default=False, init=False)
-    available_models: list[dict] = field(default_factory=list, init=False)
-    current_model: Optional[str] = field(default=None, init=False)
-    # True when the model list came from the ACP `configOptions` model select
-    # rather than the legacy top-level `models` field; picks the right write path
-    # in `set_model` (set_config_option vs. set_session_model).
-    _model_via_config_option: bool = field(default=False, init=False)
+    # Every option the backend advertises via ACP `configOptions` — model,
+    # reasoning effort, mode, toggles — all treated identically (the model is not
+    # special; see client.capture_config_options).
+    config_options: list[dict] = field(default_factory=list, init=False)
 
     @property
     def acp_session_id(self) -> Optional[str]:
@@ -68,65 +66,24 @@ class AgentSession:
         if self._client is not None:
             self._client.case_id = case_id
 
-    def _capture_models(self, response: Any) -> None:
-        """Record the advertised model list and current model from a session response.
+    def _capture_config_options(self, response: Any) -> None:
+        """Record all advertised options (model, reasoning effort, toggles, …).
 
-        Backends expose their models one of two ways. The legacy top-level `models`
-        field is preferred when present; otherwise we fall back to the `model`
-        select in ACP `configOptions` (what claude-agent-acp uses — it leaves
-        `models` null). Either way we normalize to the same `{model_id, name,
-        description}` shape the coordinator and UI already consume.
+        Normalized to the same dict shape a live `config_option_update` produces,
+        so both feed one UI path.
         """
-        state = getattr(response, "models", None)
-        if state is not None and (state.available_models or []):
-            self._model_via_config_option = False
-            self.available_models = [
-                {
-                    "model_id": model.model_id,
-                    "name": model.name,
-                    "description": getattr(model, "description", None),
-                }
-                for model in (state.available_models or [])
-            ]
-            self.current_model = getattr(state, "current_model_id", None)
-            return
-        option = self._model_config_option(response)
-        if option is not None:
-            self._model_via_config_option = True
-            self.available_models = [
-                {
-                    "model_id": choice.value,
-                    "name": choice.name,
-                    "description": getattr(choice, "description", None),
-                }
-                for choice in (option.options or [])
-            ]
-            self.current_model = option.current_value
-            return
-        self._model_via_config_option = False
-        self.available_models = []
-        self.current_model = None
+        self.config_options = capture_config_options(response)
 
-    @staticmethod
-    def _model_config_option(response: Any) -> Any:
-        """The `model` select from a session response's configOptions, or None."""
-        for option in getattr(response, "config_options", None) or []:
-            if getattr(option, "category", None) == "model" and getattr(option, "options", None):
-                return option
-        return None
-
-    async def set_model(self, model_id: str) -> None:
+    async def set_config_option(self, config_id: str, value: Any) -> None:
         if self._conn is None or self._acp_session_id is None:
             return
-        if self._model_via_config_option:
-            await self._conn.set_config_option(
-                config_id="model", value=model_id, session_id=self._acp_session_id
-            )
-        else:
-            await self._conn.set_session_model(
-                model_id=model_id, session_id=self._acp_session_id
-            )
-        self.current_model = model_id
+        # ACP requires the agent to echo back the full, updated option list, so
+        # adopt that as authoritative rather than assuming our value stuck — the
+        # agent may clamp or adjust related options.
+        response = await self._conn.set_config_option(
+            config_id=config_id, value=value, session_id=self._acp_session_id
+        )
+        self._capture_config_options(response)
 
     def _guarded_emit(self, event: dict) -> None:
         # Dropped while replaying a loaded session — that history is already on
@@ -191,7 +148,7 @@ class AgentSession:
             cwd=str(self.project_root), mcp_servers=[]
         )
         self._acp_session_id = session.session_id
-        self._capture_models(session)
+        self._capture_config_options(session)
         self._set_state("idle")
 
     async def resume(self, acp_session_id: Optional[str]) -> bool:
@@ -216,14 +173,14 @@ class AgentSession:
                 )
             finally:
                 self._suppress_emit = False
-            self._capture_models(loaded)
+            self._capture_config_options(loaded)
             self._set_state("idle")
             return True
         session = await self._conn.new_session(
             cwd=str(self.project_root), mcp_servers=[]
         )
         self._acp_session_id = session.session_id
-        self._capture_models(session)
+        self._capture_config_options(session)
         self._set_state("idle")
         return False
 

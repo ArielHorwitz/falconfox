@@ -23,8 +23,7 @@ a backend without redefining the global ones).
 |---|---|---|---|
 | `default_backend` | string | first declared backend, else `"echo"` | Which backend new sessions use unless one is picked in the UI. |
 | `naming_prompt` | string | (built-in) | Instructions handed to the model by the "name session" button. |
-| `naming_backend` | string | the session's own backend | Which backend names sessions. `echo` is never used for naming. See [backends.md](backends.md#naming). |
-| `naming_model` | string | — | Model to use for naming (loose match on model id or name). |
+| `naming_backend` | string | — | Which backend names sessions. **Required** for the "name session" button — if unset, naming is disabled. Its model comes from its own `config_options`. See [backends.md](backends.md#naming). |
 | `[backends.<name>]` | table | built-in `echo` only | Define a launchable ACP agent. Full detail: **[backends.md](backends.md)**. |
 | `[hotkeys]` | table | (built-in) | Rebind keyboard shortcuts. Full detail: **[hotkeys.md](hotkeys.md)**. |
 | `[ui]` | table | `50%`/`320px`/`none` | Session-column sizing — see [UI sizing](#ui-sizing). |
@@ -36,22 +35,25 @@ a backend without redefining the global ones).
 
 default_backend = "claude"
 
-# The "name session" button (✨). naming_backend defaults to the session's own
-# backend; echo is never used for naming.
+# The "name session" button (✨). Required to enable naming — its model comes
+# from that backend's own config_options (point it at a small, cheap model).
 naming_prompt = "Reply with a concise title of at most six words for this session."
 naming_backend = "claude"
-naming_model = "sonnet"
 
 # Claude via npx (needs Claude Code installed + signed in). To skip npx, install
 # claude-agent-acp and use command = ["claude-agent-acp"]. See backends.md.
 [backends.claude]
 command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
-default_model = "opus"
+# Default values for the options this backend advertises (read exact keys/values
+# from the session-options ⚙ popover). The model is just one of them.
+[backends.claude.config_options]
+model = "opus"
 
 [backends.gemini]
 command = ["gemini", "--experimental-acp"]
-default_model = "gemini-2.5-pro"
 env = { GEMINI_API_KEY = "..." }
+[backends.gemini.config_options]
+model = "gemini-2.5-pro"
 
 [hotkeys]
 new_session = "n"
@@ -85,7 +87,8 @@ scrolls horizontally.
 ## See also
 
 - **[backends.md](backends.md)** — what a backend is, the schema, the built-in
-  `echo`, models, and copy-paste quick-setup recipes (Claude, Gemini, and more).
+  `echo`, session options (model, effort, mode) and their defaults, and copy-paste
+  quick-setup recipes (Claude, Codex, Gemini, and more).
 - **[hotkeys.md](hotkeys.md)** — every bindable action, the default keys, and the
   key-name syntax. (The app also lists the *active* bindings live — press `?` or
   click the ⌨ button.)

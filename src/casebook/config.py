@@ -98,7 +98,11 @@ class Backend:
     name: str
     command: list[str]
     env: dict[str, str] = field(default_factory=dict)
-    default_model: Optional[str] = None
+    # Default values for the backend's ACP config options, keyed by option id
+    # (e.g. {"model": "opus", "reasoning_effort": "high"}). Applied at session
+    # start; the ids/values are the ones the backend advertises — visible in the
+    # UI's session-options popover so a user knows what to write here.
+    config_options: dict = field(default_factory=dict)
 
 
 def global_config_dir() -> Path:
@@ -133,10 +137,10 @@ class Config:
     backends: dict[str, Backend]
     default_backend: str
     naming_prompt: str = DEFAULT_NAMING_PROMPT
-    # Which backend/model names sessions. `echo` is never used for naming (it has
-    # no language model); when this resolves to echo, naming is unavailable.
+    # Which backend names sessions. Required for the naming feature — if unset,
+    # naming is disabled. The naming backend's model (and any other option) comes
+    # from its own [backends.<name>.config_options], like any backend.
     naming_backend: Optional[str] = None
-    naming_model: Optional[str] = None
     # Whether new sessions start with always-allow enabled.
     default_always_allow: bool = False
     # Action -> key, or a list of keys (the browser binds each to that action).
@@ -170,7 +174,7 @@ def _parse_backends(raw: dict) -> dict[str, Backend]:
             name=name,
             command=list(spec["command"]),
             env=dict(spec.get("env", {})),
-            default_model=spec.get("default_model"),
+            config_options=dict(spec.get("config_options", {})),
         )
         for name, spec in raw.items()
     }
@@ -190,7 +194,7 @@ def load_config(project_root: Optional[Path] = None) -> Config:
 
     Config format (``config.toml``):
 
-        default = "claude"
+        default_backend = "claude"
 
         [backends.claude]
         command = ["claude-agent-acp"]
@@ -221,7 +225,6 @@ def load_config(project_root: Optional[Path] = None) -> Config:
         default_backend=default,
         naming_prompt=data.get("naming_prompt", DEFAULT_NAMING_PROMPT),
         naming_backend=data.get("naming_backend"),
-        naming_model=data.get("naming_model"),
         default_always_allow=bool(data.get("default_always_allow", False)),
         hotkeys={**DEFAULT_HOTKEYS, **data.get("hotkeys", {})},
         ui=_merge_ui(data.get("ui", {})),

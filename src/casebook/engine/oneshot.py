@@ -13,7 +13,7 @@ import os
 import uuid
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from acp import PROTOCOL_VERSION, RequestPermissionResponse, spawn_agent_process, text_block
 from acp.interfaces import Client, ClientCapabilities, Implementation
@@ -21,6 +21,7 @@ from acp.schema import DeniedOutcome, FileSystemCapabilities
 
 from .. import logsetup
 from ..config import Backend
+from .client import capture_config_options, resolve_config_value
 
 log = logsetup.get_logger("engine.oneshot")
 
@@ -51,32 +52,35 @@ class _CollectingClient(Client):
         raise PermissionError("filesystem unavailable for one-shot queries")
 
 
-def _resolve_model(preference: Optional[str], session_response: Any) -> Optional[str]:
-    """Match a loose model preference against what this session advertises (ACP)."""
-    state = getattr(session_response, "models", None)
-    if not preference or state is None:
-        return None
-    available = getattr(state, "available_models", None) or []
-    ids = [model.model_id for model in available]
-    if preference in ids:
-        return preference
-    lowered = preference.lower()
-    for model in available:
-        if lowered in model.model_id.lower() or lowered in (model.name or "").lower():
-            return model.model_id
-    return None
+async def _apply_defaults(conn: Any, session: Any, backend: Backend) -> None:
+    """Best-effort: set the backend's configured config-option defaults on the
+    one-shot session. Failures are logged, not raised — a naming query should
+    proceed on the backend's own defaults rather than error."""
+    if not backend.config_options:
+        return
+    options = capture_config_options(session)
+    for config_id, preference in backend.config_options.items():
+        option = next((o for o in options if o["id"] == config_id), None)
+        if option is None:
+            continue
+        value = resolve_config_value(option, preference)
+        if value is None or value == option["current_value"]:
+            continue
+        try:
+            await conn.set_config_option(
+                config_id=config_id, value=value, session_id=session.session_id
+            )
+        except Exception:
+            log.debug("one-shot set_config_option(%s=%r) failed, using default",
+                      config_id, value, exc_info=True)
 
 
-async def one_shot(
-    backend: Backend,
-    project_root: Path,
-    prompt: str,
-    model: Optional[str] = None,
-) -> str:
+async def one_shot(backend: Backend, project_root: Path, prompt: str) -> str:
     """Spawn `backend`, send one prompt, and return the agent's concatenated reply.
 
-    If `model` is given and matches a model the backend advertises, it is selected
-    via ACP `session/set_model` before prompting.
+    The backend's `config_options` defaults (e.g. a cheap naming model, or a lower
+    reasoning effort) are applied before prompting — the same mechanism a live
+    session uses, so a naming backend is configured just like any other.
     """
     client = _CollectingClient()
     environment = {**os.environ, **backend.env}
@@ -100,16 +104,7 @@ async def one_shot(
             client_info=Implementation(name="casebook", version="0.1.0"),
         )
         session = await conn.new_session(cwd=str(project_root), mcp_servers=[])
-        chosen = _resolve_model(model, session)
-        if chosen is not None:
-            try:
-                await conn.set_session_model(
-                    model_id=chosen, session_id=session.session_id
-                )
-            except Exception:
-                # Backend may not support set_model; proceed with its default.
-                log.debug("one-shot set_model(%s) failed, using default",
-                          chosen, exc_info=True)
+        await _apply_defaults(conn, session, backend)
         await conn.prompt(
             prompt=[text_block(prompt)],
             session_id=session.session_id,

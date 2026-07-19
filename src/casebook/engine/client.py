@@ -31,6 +31,79 @@ def _block_text(content: Any) -> str:
     return getattr(content, "text", None) or ""
 
 
+def capture_config_options(response: Any) -> list[dict]:
+    """Normalize a session response (or a live update) to a uniform option list.
+
+    ACP's `config_options` is the stable mechanism for every knob — model,
+    reasoning effort, mode, toggles — and casebook treats them all identically
+    (the model is not special; it's just the option with `category == "model"`).
+
+    The ACP `models` field / `session/set_model` (marked UNSTABLE in the spec) is
+    deliberately ignored: claude and codex both expose the model through
+    `config_options`, so relying on the stable path costs us nothing and avoids
+    codex's redundant model×effort cross-product.
+    """
+    return [_config_option_dict(option)
+            for option in getattr(response, "config_options", None) or []]
+
+
+def resolve_config_value(option: dict, preference: Any) -> Optional[Any]:
+    """Resolve a config-file preference to a valid value for `option`, or None.
+
+    Booleans pass through only if actually a bool. Selects match `preference`
+    against choice values (exact first, then value/name substring), so a loose
+    `"opus"` resolves to the full model id. Returns None when nothing matches, so
+    callers can report a preference that went nowhere.
+    """
+    if option.get("type") == "boolean":
+        return preference if isinstance(preference, bool) else None
+    if preference is None:
+        return None
+    choices = option.get("options") or []
+    values = [choice["value"] for choice in choices]
+    if preference in values:
+        return preference
+    lowered = str(preference).lower()
+    for choice in choices:
+        if lowered in choice["value"].lower() or lowered in (choice.get("name") or "").lower():
+            return choice["value"]
+    return None
+
+
+def _config_option_dict(option: Any) -> dict:
+    result = {
+        "id": option.id,
+        "name": option.name,
+        "type": getattr(option, "type", None),
+        "category": getattr(option, "category", None),
+        "description": getattr(option, "description", None),
+        "current_value": option.current_value,
+    }
+    if getattr(option, "type", None) == "select":
+        result["options"] = _select_choices(getattr(option, "options", None))
+    return result
+
+
+def _select_choices(options: Any) -> list[dict]:
+    """Flatten a select's options — flat or grouped — to `{value, name, description}`."""
+    choices = []
+    for entry in options or []:
+        if getattr(entry, "value", None) is not None:  # a plain SessionConfigSelectOption
+            choices.append({
+                "value": entry.value,
+                "name": entry.name,
+                "description": getattr(entry, "description", None),
+            })
+        else:  # a SessionConfigSelectGroup: {group, name, options}
+            for choice in getattr(entry, "options", None) or []:
+                choices.append({
+                    "value": choice.value,
+                    "name": choice.name,
+                    "description": getattr(choice, "description", None),
+                })
+    return choices
+
+
 class AgentClient(Client):
     def __init__(
         self,
@@ -72,6 +145,8 @@ class AgentClient(Client):
                 tool_kind=getattr(update, "kind", None),
                 status=getattr(update, "status", None),
             )
+        elif kind == "config_option_update":
+            self._event(type="config_options", options=capture_config_options(update))
         elif kind == "agent_plan":
             self._event(type="plan", raw=_dump(update))
         elif kind == "usage_update":
@@ -83,7 +158,7 @@ class AgentClient(Client):
                 cost_amount=getattr(cost, "amount", None) if cost else None,
                 cost_currency=getattr(cost, "currency", None) if cost else None,
             )
-        # Other update kinds (modes, models, commands) are ignored for now.
+        # Other update kinds (modes, live model changes, commands) are ignored for now.
 
     # --- agent → user: permission prompts ---------------------------------
     async def request_permission(

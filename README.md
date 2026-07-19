@@ -115,15 +115,17 @@ command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
 
 [backends.gemini]
 command = ["gemini", "--experimental-acp"]
-default_model = "gemini-2.5-pro"
 env = { GEMINI_API_KEY = "..." }
+[backends.gemini.config_options]
+model = "gemini-2.5-pro"
 ```
 
 Full reference:
 
 - **[Configuration overview](docs/configuration/README.md)** — all keys, merge
   rules, and a complete example.
-- **[Backends](docs/configuration/backends.md)** — the built-in `echo`, models,
-  and copy-paste quick-setup recipes (Claude, Gemini, and more).
+- **[Backends](docs/configuration/backends.md)** — the built-in `echo`, session
+  options (model, effort, mode) and their defaults, and copy-paste quick-setup
+  recipes (Claude, Codex, Gemini, and more).
 - **[Hotkeys](docs/configuration/hotkeys.md)** — every bindable action, defaults,
   and key-name syntax.

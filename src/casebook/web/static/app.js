@@ -36,7 +36,7 @@ const state = {
   activeCase: route.caseId,
   agents: new Map(),
   transcripts: new Map(),
-  models: new Map(),
+  configOptions: new Map(),
   usage: new Map(),
   panes: new Map(),
   sidebarFocusedAgent: null,
@@ -139,9 +139,9 @@ function handleEvent(event) {
       return upsertAgent(event);
     case "agent_removed":
       return removeAgent(event.agent_id);
-    case "models":
-      state.models.set(event.agent_id, { available: event.available || [], current: event.current });
-      return renderModel(event.agent_id);
+    case "config_options":
+      state.configOptions.set(event.agent_id, event.options || []);
+      return renderConfigOptions(event.agent_id);
     case "usage": {
       const usage = state.usage.get(event.agent_id) || {};
       for (const key of ["used", "size", "input_tokens", "output_tokens", "total_tokens", "cost_amount", "cost_currency"]) {
@@ -170,16 +170,16 @@ function applySnapshot(snapshot) {
   state.agents.clear();
   state.transcripts.clear();
   state.eventCounts.clear();
-  state.models.clear();
+  state.configOptions.clear();
   state.prevUsage.clear();
   for (const [agentId, pane] of state.panes) pane.root.remove();
   state.panes.clear();
   state._snapshotLoading = true;
   for (const agent of snapshot.agents) upsertAgent(agent);
   state._snapshotLoading = false;
-  for (const [agentId, models] of Object.entries(snapshot.models || {})) {
-    state.models.set(agentId, { available: models, current: (state.agents.get(agentId) || {}).model });
-    renderModel(agentId);
+  for (const [agentId, options] of Object.entries(snapshot.config_options || {})) {
+    state.configOptions.set(agentId, options);
+    renderConfigOptions(agentId);
   }
   for (const [agentId, usage] of Object.entries(snapshot.usage || {})) {
     state.usage.set(agentId, usage);
@@ -246,7 +246,7 @@ function removeAgent(agentId) {
   state.agents.delete(agentId);
   state.transcripts.delete(agentId);
   state.eventCounts.delete(agentId);
-  state.models.delete(agentId);
+  state.configOptions.delete(agentId);
   state.usage.delete(agentId);
   state.prevUsage.delete(agentId);
   if (state.sidebarFocusedAgent === agentId) state.sidebarFocusedAgent = sessionIds()[0] || null;
@@ -405,7 +405,10 @@ function buildPane(agent) {
       <div class="agent-head-title"><span class="label"></span></div>
       <div class="agent-head-controls">
         <span class="state"></span>
-        <select class="model" title="model" hidden></select>
+        <div class="config-wrap">
+          <button class="config-btn" title="session options" hidden>&#x2699;</button>
+          <div class="config-popover" hidden></div>
+        </div>
         <label class="allow" title="auto-allow this session's permission requests"><input type="checkbox" /> allow</label>
         <button class="rename" title="rename session">&#x270E;</button>
         <button class="autoname" title="autoname session">&#x2728;</button>
@@ -455,8 +458,6 @@ function buildPane(agent) {
   root.querySelector(".rename").onclick = () => sessionRename(agent.agent_id);
   root.querySelector(".autoname").onclick = () => send({ action: "name_agent", agent_id: agent.agent_id });
   root.querySelector(".fork").onclick = () => send({ action: "fork_agent", agent_id: agent.agent_id });
-  const modelSelect = root.querySelector(".model");
-  modelSelect.onchange = () => send({ action: "set_model", agent_id: agent.agent_id, model_id: modelSelect.value });
   root.querySelector(".resume").onclick = () => send({ action: "resume_agent", agent_id: agent.agent_id });
   root.querySelector(".close").onclick = () => send({ action: "close_agent", agent_id: agent.agent_id });
   root.querySelector(".delete").onclick = () => sessionDelete(agent.agent_id);
@@ -478,11 +479,16 @@ function buildPane(agent) {
     cancelBtn,
     composer: root.querySelector(".composer"),
     resumeBtn: root.querySelector(".resume"),
-    modelSelect,
+    configBtn: root.querySelector(".config-btn"),
+    configPopover: root.querySelector(".config-popover"),
     allowInput,
     usageEl: root.querySelector(".agent-usage"),
     stateEl: root.querySelector(".state"),
     labelEl: root.querySelector(".label"),
+  };
+  pane.configBtn.onclick = (event) => {
+    event.stopPropagation();
+    toggleConfigPopover(agent.agent_id);
   };
   pane.scrollBottomBtn.onclick = () => {
     pane.transcript.scrollTop = pane.transcript.scrollHeight;
@@ -494,7 +500,7 @@ function buildPane(agent) {
   state.panes.set(agent.agent_id, pane);
   applyFocusVisibility();
   renderTranscript(agent.agent_id);
-  renderModel(agent.agent_id);
+  renderConfigOptions(agent.agent_id);
   renderUsage(agent.agent_id);
 }
 
@@ -524,25 +530,94 @@ function renderUsage(agentId) {
   pane.usageEl.hidden = parts.length === 0;
 }
 
-function renderModel(agentId) {
+// All config options — model included, no special case — collapse behind a
+// single gear button (the header is crowded and bare dropdowns give no hint what
+// they control); the popover gives each a visible label + a copy-ready config
+// snippet next to its control.
+function renderConfigOptions(agentId) {
   const pane = state.panes.get(agentId);
   if (!pane) return;
-  const models = state.models.get(agentId);
-  const select = pane.modelSelect;
-  const available = (models && models.available) || [];
-  if (available.length === 0) {
-    select.hidden = true;
-    return;
+  const options = state.configOptions.get(agentId) || [];
+  pane.configBtn.hidden = options.length === 0;
+  if (options.length === 0) pane.configPopover.hidden = true;
+  pane.configPopover.replaceChildren(
+    ...options.map((option) => buildConfigRow(agentId, option))
+  );
+}
+
+function toggleConfigPopover(agentId) {
+  const pane = state.panes.get(agentId);
+  if (!pane) return;
+  const show = pane.configPopover.hidden;
+  // Only one popover open at a time.
+  for (const other of state.panes.values()) other.configPopover.hidden = true;
+  pane.configPopover.hidden = !show;
+  if (show) {
+    const close = (event) => {
+      if (pane.configPopover.contains(event.target) || pane.configBtn.contains(event.target)) return;
+      pane.configPopover.hidden = true;
+      document.removeEventListener("mousedown", close, true);
+    };
+    document.addEventListener("mousedown", close, true);
   }
-  select.replaceChildren(...available.map((model) => {
-    const option = document.createElement("option");
-    option.value = model.model_id;
-    option.textContent = model.name || model.model_id;
-    if (model.description) option.title = model.description;
-    return option;
+}
+
+function buildConfigRow(agentId, option) {
+  const row = document.createElement("div");
+  row.className = "config-row";
+  const top = document.createElement("div");
+  top.className = "config-row-top";
+  const label = document.createElement("span");
+  label.className = "config-label";
+  label.textContent = option.name;
+  if (option.description) label.title = option.description;
+  top.append(label, buildConfigControl(agentId, option));
+  // The exact, copy-ready config.toml line for the current value — so a user can
+  // set it in the UI, read off the key/value, and paste it as a default.
+  const hint = document.createElement("code");
+  hint.className = "config-hint";
+  hint.textContent = configHint(option);
+  row.append(top, hint);
+  return row;
+}
+
+// A TOML-valid `id = value` snippet for the option's current value.
+function configHint(option) {
+  const value = option.type === "boolean"
+    ? String(!!option.current_value)
+    : JSON.stringify(option.current_value == null ? "" : String(option.current_value));
+  return `${option.id} = ${value}`;
+}
+
+function buildConfigControl(agentId, option) {
+  if (option.type === "boolean") {
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.className = "config-control";
+    input.title = configHint(option);
+    input.checked = !!option.current_value;
+    input.onchange = () => send({
+      action: "set_config_option", agent_id: agentId,
+      config_id: option.id, value: input.checked,
+    });
+    return input;
+  }
+  const select = document.createElement("select");
+  select.className = "config-control";
+  select.title = configHint(option);
+  select.replaceChildren(...(option.options || []).map((choice) => {
+    const el = document.createElement("option");
+    el.value = choice.value;
+    el.textContent = choice.name || choice.value;
+    if (choice.description) el.title = choice.description;
+    return el;
   }));
-  if (models.current) select.value = models.current;
-  select.hidden = false;
+  if (option.current_value != null) select.value = option.current_value;
+  select.onchange = () => send({
+    action: "set_config_option", agent_id: agentId,
+    config_id: option.id, value: select.value,
+  });
+  return select;
 }
 
 function updateHead(agentId) {

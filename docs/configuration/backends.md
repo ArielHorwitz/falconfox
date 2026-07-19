@@ -30,13 +30,16 @@ the backend picker and can set as `default_backend`.
 |---|---|---|---|
 | `command` | array of strings | yes | The program and its arguments, e.g. `["claude-agent-acp"]` or `["gemini", "--experimental-acp"]`. The first element is resolved on `PATH`. |
 | `env` | table of strings | no | Extra environment variables for the subprocess, overlaid on the inherited environment. Use it for an API key, a model override, or a gateway URL. |
-| `default_model` | string | no | Preferred model, applied at session start when the backend advertises a match (loose match on model id or name). See [Models](#models). |
+| `[backends.<name>.config_options]` | table | no | Default values for the backend's ACP config options (model, reasoning effort, mode, …), applied at session start. Keys are option **ids** and values are choice **values** the backend advertises — read the exact ones from the session-options (⚙) popover. See [Session options](#session-options). |
 
 ```toml
 [backends.example]
 command = ["my-acp-agent", "--flag", "value"]
-default_model = "best-model-3"
 env = { MY_API_KEY = "sk-...", MY_REGION = "eu" }
+
+[backends.example.config_options]
+model = "best-model-3"
+reasoning_effort = "high"
 ```
 
 ## The built-in backend
@@ -60,29 +63,38 @@ the UI. If you don't set it, casebook uses the **first backend you declare**, or
 default_backend = "claude"
 ```
 
-## Models
+## Session options
 
-Once a session is running, the model dropdown lists exactly the models the backend
-**advertises over ACP**; switching models uses ACP under the hood.
+Backends advertise **config options** over ACP — the model, reasoning effort,
+approval mode, feature toggles, whatever that agent exposes. Casebook treats them
+all the same: a running session shows them in the **session-options (⚙) popover**,
+and changes are applied over ACP. The model is just one of these options, not a
+special case.
 
-Each backend can set a `default_model` — a preferred model applied at session
-start, matched case-insensitively against the advertised models' id or name:
+**Setting defaults.** Give a backend a `[backends.<name>.config_options]` table to
+apply values at session start:
 
 ```toml
-[backends.gemini]
-command = ["gemini", "--experimental-acp"]
-default_model = "gemini-2.5-pro"
+[backends.example.config_options]
+model = "opus"
+reasoning_effort = "high"
 ```
 
-If `default_model` is set but can't be applied — it matches nothing the backend
-advertises, or the backend exposes no models at all — casebook emits a notice
-saying so, rather than silently dropping the preference.
+The **keys are option ids** and the **values are choice values** — both defined by
+the backend, not by casebook. Don't guess them: open the ⚙ popover on a running
+session and each row shows a copy-ready snippet (e.g. `reasoning_effort = "high"`)
+for exactly what to paste here. Set the option in the UI to see the value you want,
+then copy the line.
 
-Casebook cannot offer a model the backend doesn't expose, and some backends
-advertise only **coarse buckets** rather than exact model ids (see
+If a default can't be applied — the backend advertises no such option id, or the
+value matches none of its choices — casebook emits a notice saying so (and lists
+what's available), rather than silently dropping it.
+
+Casebook cannot offer an option a backend doesn't expose, and some backends
+advertise only **coarse model buckets** rather than exact ids (see
 [Claude](#claude)). For finer control, define **separate backends**, each launched
-with that backend's own model-selection flags or env — the vendor-specific value
-lives in your config, and casebook stays agnostic:
+with that backend's own selection flags or env — the vendor-specific value lives in
+your config, and casebook stays agnostic:
 
 ```toml
 [backends.assistant-fast]
@@ -96,10 +108,24 @@ Then pick the backend you want from the picker (or set `default_backend`).
 
 ## Naming
 
-The "name session" button runs a short one-shot query on `naming_backend` (or the
-session's own backend if unset), optionally pinned to `naming_model`. The built-in
-`echo` backend is **never** used for naming — it has no language model — so if
-naming would resolve to `echo`, the app tells you to set `naming_backend`.
+The "name session" button (✨) runs a short one-shot query on the backend named by
+the top-level `naming_backend` key. **It's required for the feature**: if
+`naming_backend` is unset, session naming is disabled (there is no fallback to the
+session's own backend). The naming backend's model — and any other option — comes
+from its own `[backends.<naming_backend>.config_options]`, so point it at a small,
+cheap model:
+
+```toml
+naming_backend = "namer"
+
+[backends.namer]
+command = ["some-acp-agent"]
+[backends.namer.config_options]
+model = "<a small, fast model>"
+```
+
+(The built-in `echo` backend only reflects your prompt back, so it can't produce
+useful names.)
 
 ## Verifying
 
@@ -148,12 +174,14 @@ command = ["claude-agent-acp"]
 
 **Pick a model.** The adapter exposes coarse buckets — `default`, `sonnet`,
 `opus`, `haiku` — not exact ids, with `opus` (the latest Opus) as the default. Set
-the initial one with `default_model`:
+the initial one (and any other advertised option, e.g. reasoning effort) under
+`config_options`:
 
 ```toml
 [backends.claude]
 command = ["claude-agent-acp"]
-default_model = "opus"
+[backends.claude.config_options]
+model = "opus"
 ```
 
 To pin an **exact** model id instead of a bucket, set `ANTHROPIC_MODEL` (a
@@ -171,6 +199,28 @@ through a proxy/gateway), and more. Full list: the Claude Code
 [environment variables reference](https://docs.claude.com/en/docs/claude-code/settings#environment-variables).
 Put any of them in `env`.
 
+### Codex
+
+OpenAI's Codex via the [`codex-acp`](https://www.npmjs.com/package/@agentclientprotocol/codex-acp)
+adapter. Install `codex` and `codex-acp`, then authenticate once (`codex login`
+for ChatGPT sign-in, or `printenv OPENAI_API_KEY | codex login --with-api-key`) —
+until then a session errors with "Authentication required".
+
+```toml
+[backends.codex]
+command = ["codex-acp"]
+```
+
+Codex advertises its **model**, **reasoning effort**, and approval **mode** as
+session options (visible in the ⚙ popover). Set defaults with:
+
+```toml
+[backends.codex.config_options]
+model = "gpt-5.5"
+reasoning_effort = "high"
+mode = "read-only"
+```
+
 ### Gemini
 
 Google's Gemini CLI in its experimental ACP mode:
@@ -178,8 +228,10 @@ Google's Gemini CLI in its experimental ACP mode:
 ```toml
 [backends.gemini]
 command = ["gemini", "--experimental-acp"]
-default_model = "gemini-2.5-pro"
 env = { GEMINI_API_KEY = "..." }
+
+[backends.gemini.config_options]
+model = "gemini-2.5-pro"
 ```
 
 ### Any other ACP agent

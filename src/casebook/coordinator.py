@@ -20,6 +20,7 @@ from watchfiles import awatch
 
 from . import cases, config, logsetup, storage, templates
 from .engine import oneshot
+from .engine.client import resolve_config_value
 from .engine.events import EventBus
 from .engine.session import AgentSession, SessionManager
 
@@ -34,7 +35,7 @@ SCRATCH_CASE_ID = "scratch"
 
 # Event types logged at INFO — the lifecycle/audit trail worth seeing at the
 # default level. Everything else emitted (streaming message chunks, agent_state,
-# tool_call, usage, models, files_changed, agent_updated) is logged at DEBUG.
+# tool_call, usage, config_options, files_changed, agent_updated) is logged at DEBUG.
 # Notices and agent_state turn-boundaries get their own handling in _log_event.
 _LOG_INFO_EVENTS = {
     "agent_added", "agent_removed", "case_created", "case_deleted",
@@ -45,20 +46,6 @@ _LOG_INFO_EVENTS = {
 
 def _now_iso() -> str:
     return datetime.datetime.now().isoformat()
-
-
-def _match_model(preference: Optional[str], available: list[dict]) -> Optional[str]:
-    """Resolve a loose model preference (id or name substring) to an available id."""
-    if not preference or not available:
-        return None
-    ids = [model["model_id"] for model in available]
-    if preference in ids:
-        return preference
-    lowered = preference.lower()
-    for model in available:
-        if lowered in model["model_id"].lower() or lowered in (model.get("name") or "").lower():
-            return model["model_id"]
-    return None
 
 
 def _clean_name(reply: str) -> str:
@@ -89,7 +76,9 @@ class CaseCoordinator:
         self._transcripts: dict[str, list[dict]] = {}
         self._acp_ids: dict[str, Optional[str]] = {}
         self._created: dict[str, Optional[str]] = {}
-        self._models: dict[str, list[dict]] = {}
+        # All config options (model, reasoning effort, toggles) per session, kept in
+        # sync from new/load responses and live config_option_update events.
+        self._config_options: dict[str, list[dict]] = {}
         # Transcript to prepend to a resumed session's next message, for backends
         # that lack native session/load. Keyed by agent_id, consumed once.
         self._pending_context: dict[str, str] = {}
@@ -123,7 +112,6 @@ class CaseCoordinator:
                 "case_id": meta["case_id"],
                 "label": meta.get("label", agent_id),
                 "backend": meta.get("backend", ""),
-                "model": meta.get("model"),
                 "always_allow": bool(meta.get("always_allow", False)),
                 "state": "stored",
                 "live": False,
@@ -187,6 +175,10 @@ class CaseCoordinator:
             for key, value in event.items():
                 if key not in ("type", "agent_id", "case_id") and value is not None:
                     merged[key] = value
+        # Single store for config options — whether the event came from a session
+        # open (_publish_config_options) or a live update the client forwarded.
+        if event_type == "config_options" and agent_id in self._agents:
+            self._config_options[agent_id] = event.get("options", [])
         if agent_id in self._agents and event_type in _REPLAYABLE:
             self._agents[agent_id]["last_active"] = _now_iso()
             self._transcripts.setdefault(agent_id, []).append(event)
@@ -265,7 +257,6 @@ class CaseCoordinator:
                 "case_id": agent["case_id"],
                 "label": agent["label"],
                 "backend": agent["backend"],
-                "model": agent.get("model"),
                 "always_allow": agent.get("always_allow", False),
                 "named": not self._auto_named.get(agent_id, True),
                 "acp_session_id": self._acp_ids.get(agent_id),
@@ -387,7 +378,6 @@ class CaseCoordinator:
             "case_id": cid,
             "label": label,
             "backend": backend.name,
-            "model": None,
             "always_allow": self.config.default_always_allow,
             "state": "starting",
             "live": True,
@@ -413,7 +403,7 @@ class CaseCoordinator:
                         "level": "error", "message": f"failed to start agent: {error}"})
             raise
         self._acp_ids[agent_id] = session.acp_session_id
-        await self._apply_models(agent_id, session)
+        await self._apply_config_options(agent_id, session)
         # Case sessions get the directive prepended to their first message; a
         # caseless (scratch) session gets nothing — it's a plain agent.
         if not scratch:
@@ -467,7 +457,7 @@ class CaseCoordinator:
                         "level": "error", "message": f"failed to resume session: {error}"})
             raise
         self._acp_ids[agent_id] = session.acp_session_id
-        await self._apply_models(agent_id, session)
+        await self._apply_config_options(agent_id, session)
         self._persist_meta(agent_id)
         # The client drops a stored session's transcript to keep connect light, so
         # replay it now that the session is opening and its pane exists. Loading it
@@ -550,7 +540,7 @@ class CaseCoordinator:
                 await session.stop()
             agent["state"] = "stored"
             agent["live"] = False
-            self._models.pop(agent_id, None)
+            self._config_options.pop(agent_id, None)
             self._pending_context.pop(agent_id, None)
         # Force a fresh ACP session on resume — the old one has stale history.
         self._acp_ids[agent_id] = None
@@ -590,7 +580,6 @@ class CaseCoordinator:
             "case_id": case_id,
             "label": label,
             "backend": source["backend"],
-            "model": source.get("model"),
             "always_allow": source.get("always_allow", False),
             "state": "stored",
             "live": False,
@@ -607,7 +596,6 @@ class CaseCoordinator:
             "case_id": case_id,
             "label": label,
             "backend": source["backend"],
-            "model": source.get("model"),
             "always_allow": source.get("always_allow", False),
             "named": True,
             "acp_session_id": None,
@@ -621,60 +609,73 @@ class CaseCoordinator:
                      "case_id": case_id, "transcript": transcript})
         return new_agent_id
 
-    async def _apply_models(self, agent_id: str, session: AgentSession) -> None:
-        """Apply the backend's default-model preference and publish the model list."""
-        backend = self.config.select_backend(self._agents[agent_id]["backend"] or None)
-        desired = _match_model(backend.default_model, session.available_models)
-        if desired and desired != session.current_model:
-            try:
-                await session.set_model(desired)
-            except Exception as error:
-                self.log.debug("default model selection failed for agent=%s",
-                               agent_id, exc_info=True)
-                self._emit({"type": "notice", "agent_id": agent_id,
-                            "case_id": self._agents[agent_id]["case_id"],
-                            "level": "error", "message": f"could not select default model: {error}"})
-        elif backend.default_model and desired is None:
-            # A preference that goes nowhere used to vanish silently — whether it's
-            # a full model id hitting coarse buckets, or any default_model on a
-            # backend that exposes no models at all. Both leave the user expecting
-            # something that never happens, so say what happened either way.
-            if session.available_models:
-                offered = ", ".join(model["model_id"] for model in session.available_models)
-                message = (f"default_model {backend.default_model!r} matched no "
-                           f"model this backend offers: {offered}")
-            else:
-                message = (f"default_model {backend.default_model!r} was set, but this "
-                           f"backend advertises no models to select from")
-            self.log.debug("default_model %r not applied for agent=%s (available=%d)",
-                           backend.default_model, agent_id, len(session.available_models))
-            self._emit({"type": "notice", "agent_id": agent_id,
-                        "case_id": self._agents[agent_id]["case_id"],
-                        "level": "error", "message": message})
-        self._models[agent_id] = session.available_models
-        self._agents[agent_id]["model"] = session.current_model
-        self._emit({"type": "models", "agent_id": agent_id,
-                    "case_id": self._agents[agent_id]["case_id"],
-                    "available": session.available_models,
-                    "current": session.current_model})
+    async def _apply_config_options(self, agent_id: str, session: AgentSession) -> None:
+        """Apply the backend's [config_options] defaults, then publish the option
+        list. Model is just the option keyed `model` — no special case."""
+        agent = self._agents[agent_id]
+        backend = self.config.select_backend(agent["backend"] or None)
+        for config_id, preference in backend.config_options.items():
+            await self._apply_default_option(agent_id, session, config_id, preference)
+        self._publish_config_options(agent_id, session)
 
-    async def set_model(self, agent_id: str, model_id: str) -> None:
+    async def _apply_default_option(self, agent_id: str, session: AgentSession,
+                                    config_id: str, preference) -> None:
+        """Set one configured default, warning (not failing) if it doesn't apply."""
+        agent = self._agents[agent_id]
+        option = next((o for o in session.config_options if o["id"] == config_id), None)
+        if option is None:
+            offered = ", ".join(o["id"] for o in session.config_options) or "(none)"
+            self._warn_option(agent_id, agent["case_id"],
+                              f"config_options.{config_id} is set, but this backend advertises "
+                              f"no such option. Available: {offered}")
+            return
+        desired = resolve_config_value(option, preference)
+        if desired is None:
+            if option.get("type") == "boolean":
+                detail = "expected true or false"
+            else:
+                offered = ", ".join(choice["value"] for choice in option.get("options") or [])
+                detail = f"expected one of: {offered}"
+            self._warn_option(agent_id, agent["case_id"],
+                              f"config_options.{config_id} = {preference!r} matched nothing — {detail}")
+            return
+        if desired != option["current_value"]:
+            try:
+                await session.set_config_option(config_id, desired)
+            except Exception as error:
+                self.log.debug("default option %s failed for agent=%s", config_id,
+                               agent_id, exc_info=True)
+                self._warn_option(agent_id, agent["case_id"],
+                                  f"could not apply config_options.{config_id}: {error}")
+
+    def _warn_option(self, agent_id: str, case_id: str, message: str) -> None:
+        self.log.debug("config default for agent=%s: %s", agent_id, message)
+        self._emit({"type": "notice", "agent_id": agent_id, "case_id": case_id,
+                    "level": "error", "message": message})
+
+    def _publish_config_options(self, agent_id: str, session: AgentSession) -> None:
+        """Store (via _emit) and broadcast a session's current config options."""
+        self._emit({"type": "config_options", "agent_id": agent_id,
+                    "case_id": self._agents[agent_id]["case_id"],
+                    "options": session.config_options})
+
+    async def set_config_option(self, agent_id: str, config_id: str, value) -> None:
         session = self.sessions.get(agent_id)
         agent = self._agents.get(agent_id)
         if session is None or agent is None:
             return
         try:
-            await session.set_model(model_id)
+            await session.set_config_option(config_id, value)
         except Exception as error:
-            self.log.debug("set_model failed for agent=%s", agent_id, exc_info=True)
+            self.log.debug("set_config_option failed for agent=%s id=%s",
+                           agent_id, config_id, exc_info=True)
             self._emit({"type": "notice", "agent_id": agent_id,
                         "case_id": agent["case_id"],
-                        "level": "error", "message": f"could not set model: {error}"})
+                        "level": "error", "message": f"could not set option: {error}"})
             return
-        agent["model"] = model_id
-        self._persist_meta(agent_id)
-        self._emit({"type": "models", "agent_id": agent_id, "case_id": agent["case_id"],
-                    "available": self._models.get(agent_id, []), "current": model_id})
+        # Config options are live session state, re-read from the agent each
+        # session — not persisted (nothing to write to meta here).
+        self._publish_config_options(agent_id, session)
 
     def rename_agent(self, agent_id: str, label: str) -> None:
         agent = self._agents.get(agent_id)
@@ -700,14 +701,14 @@ class CaseCoordinator:
                         "case_id": agent["case_id"],
                         "level": "error", "message": "nothing to name yet — the session has no messages"})
             return
-        # Echo has no language model, so it is never used to name a session. The
-        # naming backend defaults to the session's own backend when that isn't echo.
-        naming_backend = self.config.naming_backend or agent["backend"]
-        if not naming_backend or naming_backend == config.ECHO_BACKEND_NAME:
+        # Naming needs an explicit backend; without one the feature is disabled.
+        # That backend's model (and any option) comes from its own config_options.
+        naming_backend = self.config.naming_backend
+        if not naming_backend:
             self._emit({"type": "notice", "agent_id": agent_id,
                         "case_id": agent["case_id"],
-                        "level": "error", "message": "session naming needs a non-echo backend — set "
-                                   "naming_backend in config.toml"})
+                        "level": "error", "message": "session naming is disabled — set "
+                                   "naming_backend in config.toml to enable it"})
             return
         try:
             backend = self.config.select_backend(naming_backend)
@@ -722,9 +723,7 @@ class CaseCoordinator:
         self._emit({"type": "notice", "agent_id": agent_id,
                     "case_id": agent["case_id"], "message": "autonaming session…"})
         try:
-            reply = await oneshot.one_shot(
-                backend, self.project_root, prompt, model=self.config.naming_model
-            )
+            reply = await oneshot.one_shot(backend, self.project_root, prompt)
         except Exception as error:
             self.log.debug("naming query failed for agent=%s", agent_id, exc_info=True)
             self._emit({"type": "notice", "agent_id": agent_id,
@@ -782,7 +781,7 @@ class CaseCoordinator:
         if agent is not None:
             agent["state"] = "stored"
             agent["live"] = False
-            self._models.pop(agent_id, None)
+            self._config_options.pop(agent_id, None)
             self._pending_context.pop(agent_id, None)
             self._evict_transcript(agent_id)
             self._persist_meta(agent_id)
@@ -802,7 +801,7 @@ class CaseCoordinator:
         self._transcripts.pop(agent_id, None)
         self._acp_ids.pop(agent_id, None)
         self._created.pop(agent_id, None)
-        self._models.pop(agent_id, None)
+        self._config_options.pop(agent_id, None)
         self._pending_context.pop(agent_id, None)
         self._auto_named.pop(agent_id, None)
         self._persisted.discard(agent_id)
@@ -894,7 +893,8 @@ class CaseCoordinator:
                 for aid, events in self._transcripts.items()
                 if aid in agent_ids
             },
-            "models": {aid: m for aid, m in self._models.items() if aid in agent_ids},
+            "config_options": {aid: o for aid, o in self._config_options.items()
+                               if aid in agent_ids},
             "usage": {aid: u for aid, u in self._usage.items() if aid in agent_ids},
         }
 

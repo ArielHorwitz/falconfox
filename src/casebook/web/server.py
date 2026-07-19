@@ -323,8 +323,9 @@ def _dispatch(coordinator: CaseCoordinator, action: dict) -> None:
         coordinator.rename_agent(action["agent_id"], action.get("label", ""))
     elif name == "name_agent":
         _spawn(coordinator.name_agent(action["agent_id"]))
-    elif name == "set_model":
-        _spawn(coordinator.set_model(action["agent_id"], action["model_id"]))
+    elif name == "set_config_option":
+        _spawn(coordinator.set_config_option(
+            action["agent_id"], action["config_id"], action["value"]))
     elif name == "send":
         _spawn(coordinator.send(action["agent_id"], action["text"]))
     elif name == "cancel":

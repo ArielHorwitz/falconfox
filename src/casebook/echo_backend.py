@@ -21,18 +21,45 @@ from acp.schema import (
     AgentCapabilities,
     AgentMessageChunk,
     InitializeResponse,
-    ModelInfo,
     NewSessionResponse,
     PromptResponse,
-    SessionModelState,
-    SetSessionModelResponse,
+    SessionConfigOptionBoolean,
+    SessionConfigOptionSelect,
+    SessionConfigSelectOption,
+    SetSessionConfigOptionResponse,
 )
 
-# Two pretend models, so model selection is demonstrable without a real backend.
-_MODELS = [
-    ModelInfo(model_id="echo-small", name="Echo Small"),
-    ModelInfo(model_id="echo-large", name="Echo Large"),
+# Pretend config options, so the config-option UI is demonstrable without a real
+# backend. Like claude and codex, the model is exposed as a `category=="model"`
+# config option (not the unstable `models` field). Their values are reflected in
+# each echo reply so a change is observable end to end.
+_MODEL_CHOICES = [
+    SessionConfigSelectOption(value="echo-small", name="Echo Small"),
+    SessionConfigSelectOption(value="echo-large", name="Echo Large"),
 ]
+_EFFORT_CHOICES = [
+    SessionConfigSelectOption(value="low", name="Low"),
+    SessionConfigSelectOption(value="medium", name="Medium"),
+    SessionConfigSelectOption(value="high", name="High"),
+]
+_DEFAULT_CONFIG = {"model": "echo-small", "effort": "medium", "loud": False}
+
+
+def _config_options(current: dict) -> list:
+    return [
+        SessionConfigOptionSelect(
+            id="model", name="Model", category="model", type="select",
+            current_value=current["model"], options=_MODEL_CHOICES,
+        ),
+        SessionConfigOptionSelect(
+            id="effort", name="Effort", category="reasoning", type="select",
+            current_value=current["effort"], options=_EFFORT_CHOICES,
+        ),
+        SessionConfigOptionBoolean(
+            id="loud", name="Loud", category="output", type="boolean",
+            current_value=current["loud"],
+        ),
+    ]
 
 
 class EchoAgent:
@@ -40,7 +67,7 @@ class EchoAgent:
 
     def __init__(self, connection: AgentSideConnection) -> None:
         self._connection = connection
-        self._model_by_session: dict[str, str] = {}
+        self._config_by_session: dict[str, dict] = {}
 
     async def initialize(self, protocol_version: int, **kwargs: Any) -> InitializeResponse:
         return InitializeResponse(
@@ -51,27 +78,31 @@ class EchoAgent:
 
     async def new_session(self, cwd: str, **kwargs: Any) -> NewSessionResponse:
         session_id = f"echo-{uuid.uuid4().hex}"
-        self._model_by_session[session_id] = _MODELS[0].model_id
+        config = dict(_DEFAULT_CONFIG)
+        self._config_by_session[session_id] = config
         return NewSessionResponse(
             session_id=session_id,
-            models=SessionModelState(
-                available_models=_MODELS, current_model_id=_MODELS[0].model_id
-            ),
+            config_options=_config_options(config),
         )
 
-    async def set_session_model(
-        self, model_id: str, session_id: str, **kwargs: Any
-    ) -> SetSessionModelResponse:
-        self._model_by_session[session_id] = model_id
-        return SetSessionModelResponse()
+    async def set_config_option(
+        self, config_id: str, session_id: str, value: Any, **kwargs: Any
+    ) -> SetSessionConfigOptionResponse:
+        config = self._config_by_session.setdefault(session_id, dict(_DEFAULT_CONFIG))
+        config[config_id] = value
+        # ACP requires the updated option list back in the response.
+        return SetSessionConfigOptionResponse(config_options=_config_options(config))
 
     async def prompt(self, prompt: list, session_id: str, **kwargs: Any) -> PromptResponse:
         text = "".join(getattr(block, "text", "") for block in prompt)
-        model = self._model_by_session.get(session_id, _MODELS[0].model_id)
+        config = self._config_by_session.get(session_id, _DEFAULT_CONFIG)
+        reply = f"echo[{config['model']}/{config['effort']}]: {text}"
+        if config["loud"]:
+            reply = reply.upper()
         await self._connection.session_update(
             session_id=session_id,
             update=AgentMessageChunk(
-                content=text_block(f"echo[{model}]: {text}"),
+                content=text_block(reply),
                 session_update="agent_message_chunk",
             ),
         )
