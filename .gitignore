@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 .casebook/
 .worktrees/
+src/casebook/_version.py

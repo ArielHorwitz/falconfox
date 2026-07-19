@@ -22,7 +22,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from .. import cases, config, logsetup, projects, state
+from .. import cases, config, get_version, logsetup, projects, state
 from ..coordinator import CaseCoordinator
 
 STATIC_DIR = Path(__file__).parent.joinpath("static")
@@ -91,6 +91,9 @@ def create_app(
 
     async def index(_request: Request) -> FileResponse:
         return FileResponse(STATIC_DIR.joinpath("index.html"))
+
+    async def version_endpoint(_request: Request) -> JSONResponse:
+        return JSONResponse({"version": get_version()})
 
     # --- project browser -------------------------------------------------
 
@@ -239,6 +242,7 @@ def create_app(
         lifespan=lifespan,
         routes=[
             # Project browser
+            Route("/api/version", version_endpoint),
             Route("/api/projects", projects_endpoint, methods=["GET", "POST"]),
             Route("/api/projects/{project_id}", remove_project_endpoint,
                   methods=["DELETE"]),

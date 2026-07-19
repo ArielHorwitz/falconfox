@@ -1374,7 +1374,17 @@ el("project-path-input").onkeydown = (event) => {
 };
 document.addEventListener("keydown", onKeydown);
 
+async function loadVersion() {
+  try {
+    const { version } = await fetch("/api/version").then((response) => response.json());
+    if (version) el("version").textContent = version;
+  } catch {
+    // The version indicator is cosmetic; ignore fetch failures.
+  }
+}
+
 applyRoute();
+loadVersion();
 if (route.mode === "projects") {
   loadHotkeys();
   loadProjects();
