@@ -79,6 +79,11 @@ class CaseCoordinator:
         # All config options (model, reasoning effort, toggles) per session, kept in
         # sync from new/load responses and live config_option_update events.
         self._config_options: dict[str, list[dict]] = {}
+        # Slash commands the backend advertises, per session. Unlike config
+        # options these arrive only via a live `available_commands_update` (never
+        # in a session response), so the coordinator cache is the single source —
+        # used for UI discoverability; invocation is plain prompt text.
+        self._commands: dict[str, list[dict]] = {}
         # Transcript to prepend to a resumed session's next message, for backends
         # that lack native session/load. Keyed by agent_id, consumed once.
         self._pending_context: dict[str, str] = {}
@@ -179,6 +184,9 @@ class CaseCoordinator:
         # open (_publish_config_options) or a live update the client forwarded.
         if event_type == "config_options" and agent_id in self._agents:
             self._config_options[agent_id] = event.get("options", [])
+        # Advertised slash commands, forwarded live by the client for discoverability.
+        if event_type == "commands" and agent_id in self._agents:
+            self._commands[agent_id] = event.get("commands", [])
         if agent_id in self._agents and event_type in _REPLAYABLE:
             self._agents[agent_id]["last_active"] = _now_iso()
             self._transcripts.setdefault(agent_id, []).append(event)
@@ -541,6 +549,7 @@ class CaseCoordinator:
             agent["state"] = "stored"
             agent["live"] = False
             self._config_options.pop(agent_id, None)
+            self._commands.pop(agent_id, None)
             self._pending_context.pop(agent_id, None)
         # Force a fresh ACP session on resume — the old one has stale history.
         self._acp_ids[agent_id] = None
@@ -782,6 +791,7 @@ class CaseCoordinator:
             agent["state"] = "stored"
             agent["live"] = False
             self._config_options.pop(agent_id, None)
+            self._commands.pop(agent_id, None)
             self._pending_context.pop(agent_id, None)
             self._evict_transcript(agent_id)
             self._persist_meta(agent_id)
@@ -802,6 +812,7 @@ class CaseCoordinator:
         self._acp_ids.pop(agent_id, None)
         self._created.pop(agent_id, None)
         self._config_options.pop(agent_id, None)
+        self._commands.pop(agent_id, None)
         self._pending_context.pop(agent_id, None)
         self._auto_named.pop(agent_id, None)
         self._persisted.discard(agent_id)
@@ -895,6 +906,8 @@ class CaseCoordinator:
             },
             "config_options": {aid: o for aid, o in self._config_options.items()
                                if aid in agent_ids},
+            "commands": {aid: c for aid, c in self._commands.items()
+                         if aid in agent_ids},
             "usage": {aid: u for aid, u in self._usage.items() if aid in agent_ids},
         }
 

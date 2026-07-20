@@ -70,6 +70,29 @@ def resolve_config_value(option: dict, preference: Any) -> Optional[Any]:
     return None
 
 
+def capture_commands(update: Any) -> list[dict]:
+    """Normalize an `available_commands_update` to a uniform command list.
+
+    Slash commands have no dedicated RPC — they are invoked as plain prompt text
+    — so casebook only needs their names/descriptions for discoverability. The
+    optional `input.hint` is a free-text prompt for the command's argument.
+    """
+    return [
+        {
+            "name": command.name,
+            "description": getattr(command, "description", None),
+            "input_hint": _command_input_hint(command),
+        }
+        for command in getattr(update, "available_commands", None) or []
+    ]
+
+
+def _command_input_hint(command: Any) -> Optional[str]:
+    command_input = getattr(command, "input", None)
+    root = getattr(command_input, "root", None) if command_input else None
+    return getattr(root, "hint", None) if root else None
+
+
 def _config_option_dict(option: Any) -> dict:
     result = {
         "id": option.id,
@@ -147,6 +170,8 @@ class AgentClient(Client):
             )
         elif kind == "config_option_update":
             self._event(type="config_options", options=capture_config_options(update))
+        elif kind == "available_commands_update":
+            self._event(type="commands", commands=capture_commands(update))
         elif kind == "agent_plan":
             self._event(type="plan", raw=_dump(update))
         elif kind == "usage_update":
@@ -158,7 +183,7 @@ class AgentClient(Client):
                 cost_amount=getattr(cost, "amount", None) if cost else None,
                 cost_currency=getattr(cost, "currency", None) if cost else None,
             )
-        # Other update kinds (modes, live model changes, commands) are ignored for now.
+        # Other update kinds (modes, live model changes) are ignored for now.
 
     # --- agent → user: permission prompts ---------------------------------
     async def request_permission(

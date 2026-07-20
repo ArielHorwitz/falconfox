@@ -37,6 +37,7 @@ const state = {
   agents: new Map(),
   transcripts: new Map(),
   configOptions: new Map(),
+  commands: new Map(),
   usage: new Map(),
   panes: new Map(),
   sidebarFocusedAgent: null,
@@ -142,6 +143,9 @@ function handleEvent(event) {
     case "config_options":
       state.configOptions.set(event.agent_id, event.options || []);
       return renderConfigOptions(event.agent_id);
+    case "commands":
+      state.commands.set(event.agent_id, event.commands || []);
+      return renderCommands(event.agent_id);
     case "usage": {
       const usage = state.usage.get(event.agent_id) || {};
       for (const key of ["used", "size", "input_tokens", "output_tokens", "total_tokens", "cost_amount", "cost_currency"]) {
@@ -171,6 +175,7 @@ function applySnapshot(snapshot) {
   state.transcripts.clear();
   state.eventCounts.clear();
   state.configOptions.clear();
+  state.commands.clear();
   state.prevUsage.clear();
   for (const [agentId, pane] of state.panes) pane.root.remove();
   state.panes.clear();
@@ -180,6 +185,10 @@ function applySnapshot(snapshot) {
   for (const [agentId, options] of Object.entries(snapshot.config_options || {})) {
     state.configOptions.set(agentId, options);
     renderConfigOptions(agentId);
+  }
+  for (const [agentId, commands] of Object.entries(snapshot.commands || {})) {
+    state.commands.set(agentId, commands);
+    renderCommands(agentId);
   }
   for (const [agentId, usage] of Object.entries(snapshot.usage || {})) {
     state.usage.set(agentId, usage);
@@ -247,6 +256,7 @@ function removeAgent(agentId) {
   state.transcripts.delete(agentId);
   state.eventCounts.delete(agentId);
   state.configOptions.delete(agentId);
+  state.commands.delete(agentId);
   state.usage.delete(agentId);
   state.prevUsage.delete(agentId);
   if (state.sidebarFocusedAgent === agentId) state.sidebarFocusedAgent = sessionIds()[0] || null;
@@ -406,6 +416,10 @@ function buildPane(agent) {
       <div class="agent-head-controls">
         <span class="state"></span>
         <div class="config-wrap">
+          <button class="commands-btn" title="slash commands" hidden>/</button>
+          <div class="commands-popover" hidden></div>
+        </div>
+        <div class="config-wrap">
           <button class="config-btn" title="session options" hidden>&#x2699;</button>
           <div class="config-popover" hidden></div>
         </div>
@@ -423,6 +437,7 @@ function buildPane(agent) {
     <div class="transcript"></div>
     <button class="scroll-bottom" hidden title="Jump to bottom">&#x2193;</button>
     <div class="composer">
+      <div class="command-menu" hidden></div>
       <textarea rows="1" placeholder="Message this session…"></textarea>
       <button class="send">Send</button>
       <button class="cancel" hidden>Stop</button>
@@ -444,9 +459,16 @@ function buildPane(agent) {
     input.style.height = "auto";
     input.style.height = input.scrollHeight + "px";
   };
-  input.addEventListener("input", autoResize);
+  input.addEventListener("input", () => {
+    autoResize();
+    updateAutocomplete(agent.agent_id);
+  });
+  // Clicking a menu row (mousedown, preventDefault) selects without blurring; any
+  // other blur just dismisses the menu.
+  input.addEventListener("blur", () => closeAutocomplete(agent.agent_id));
   sendBtn.onclick = doSend;
   input.onkeydown = (event) => {
+    if (handleAutocompleteKey(agent.agent_id, event)) return;
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       doSend();
@@ -481,6 +503,11 @@ function buildPane(agent) {
     resumeBtn: root.querySelector(".resume"),
     configBtn: root.querySelector(".config-btn"),
     configPopover: root.querySelector(".config-popover"),
+    commandsBtn: root.querySelector(".commands-btn"),
+    commandsPopover: root.querySelector(".commands-popover"),
+    commandMenu: root.querySelector(".command-menu"),
+    autocomplete: [],   // currently-filtered commands (empty ⇒ menu closed)
+    autocompleteIndex: 0,
     allowInput,
     usageEl: root.querySelector(".agent-usage"),
     stateEl: root.querySelector(".state"),
@@ -489,6 +516,10 @@ function buildPane(agent) {
   pane.configBtn.onclick = (event) => {
     event.stopPropagation();
     toggleConfigPopover(agent.agent_id);
+  };
+  pane.commandsBtn.onclick = (event) => {
+    event.stopPropagation();
+    toggleCommandsPopover(agent.agent_id);
   };
   pane.scrollBottomBtn.onclick = () => {
     pane.transcript.scrollTop = pane.transcript.scrollHeight;
@@ -501,6 +532,7 @@ function buildPane(agent) {
   applyFocusVisibility();
   renderTranscript(agent.agent_id);
   renderConfigOptions(agent.agent_id);
+  renderCommands(agent.agent_id);
   renderUsage(agent.agent_id);
 }
 
@@ -547,15 +579,22 @@ function renderConfigOptions(agentId) {
 
 function toggleConfigPopover(agentId) {
   const pane = state.panes.get(agentId);
-  if (!pane) return;
-  const show = pane.configPopover.hidden;
-  // Only one popover open at a time.
-  for (const other of state.panes.values()) other.configPopover.hidden = true;
-  pane.configPopover.hidden = !show;
+  if (pane) toggleExclusivePopover(pane.configPopover, pane.configBtn);
+}
+
+// Header popovers (session options, slash commands) are mutually exclusive: open
+// one and every other closes, and a click outside dismisses it.
+function toggleExclusivePopover(popover, anchor) {
+  const show = popover.hidden;
+  for (const other of state.panes.values()) {
+    other.configPopover.hidden = true;
+    other.commandsPopover.hidden = true;
+  }
+  popover.hidden = !show;
   if (show) {
     const close = (event) => {
-      if (pane.configPopover.contains(event.target) || pane.configBtn.contains(event.target)) return;
-      pane.configPopover.hidden = true;
+      if (popover.contains(event.target) || anchor.contains(event.target)) return;
+      popover.hidden = true;
       document.removeEventListener("mousedown", close, true);
     };
     document.addEventListener("mousedown", close, true);
@@ -618,6 +657,139 @@ function buildConfigControl(agentId, option) {
     config_id: option.id, value: select.value,
   });
   return select;
+}
+
+// --- slash commands -------------------------------------------------------
+// Two discoverability surfaces over the same list: a browsable popover (the "/"
+// header button) for when you don't know the command, and inline autocomplete
+// on the composer for when you do. Invocation itself is just prompt text.
+
+// The browse popover: every command with its description and input hint. Clicking
+// a row drops it into the composer, ready to run.
+function renderCommands(agentId) {
+  const pane = state.panes.get(agentId);
+  if (!pane) return;
+  const commands = state.commands.get(agentId) || [];
+  pane.commandsBtn.hidden = commands.length === 0;
+  if (commands.length === 0) pane.commandsPopover.hidden = true;
+  pane.commandsPopover.replaceChildren(
+    ...commands.map((command) =>
+      buildCommandRow(command, false, () => {
+        pane.commandsPopover.hidden = true;
+        applyCommand(pane, command);
+      }))
+  );
+}
+
+function toggleCommandsPopover(agentId) {
+  const pane = state.panes.get(agentId);
+  // Guard the hotkey path: no pane / no advertised commands ⇒ nothing to show.
+  if (!pane || (state.commands.get(agentId) || []).length === 0) return;
+  toggleExclusivePopover(pane.commandsPopover, pane.commandsBtn);
+}
+
+// One row shared by the browse popover and the autocomplete menu: `/name`, its
+// description, and (if any) the argument hint.
+function buildCommandRow(command, active, onPick) {
+  const row = document.createElement("div");
+  row.className = "command-row" + (active ? " active" : "");
+  const name = document.createElement("code");
+  name.className = "command-name";
+  name.textContent = "/" + command.name;
+  row.append(name);
+  if (command.description) {
+    const desc = document.createElement("span");
+    desc.className = "command-desc";
+    desc.textContent = command.description;
+    row.append(desc);
+  }
+  if (command.input_hint) {
+    const hint = document.createElement("span");
+    hint.className = "command-hint";
+    hint.textContent = command.input_hint;
+    row.append(hint);
+  }
+  // mousedown (not click) so selection fires before the textarea's blur.
+  row.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    onPick();
+  });
+  return row;
+}
+
+// Put `/name ` in the composer and focus it, ready for arguments. A trailing
+// space means the input no longer matches the autocomplete trigger, so the menu
+// closes on its own.
+function applyCommand(pane, command) {
+  pane.input.value = "/" + command.name + " ";
+  pane.input.focus();
+  pane.input.dispatchEvent(new Event("input"));
+}
+
+// Autocomplete fires only while the whole message is a bare `/word` — a slash at
+// position 0 with no space yet (the command-name phase). That intentionally
+// mirrors how backends recognize a command (leading, on its own) and avoids
+// false positives on paths or dates mid-message.
+function updateAutocomplete(agentId) {
+  const pane = state.panes.get(agentId);
+  if (!pane) return;
+  const match = /^\/(\S*)$/.exec(pane.input.value);
+  const commands = state.commands.get(agentId) || [];
+  const filtered = match
+    ? commands.filter((command) =>
+        command.name.toLowerCase().startsWith(match[1].toLowerCase()))
+    : [];
+  pane.autocomplete = filtered;
+  if (pane.autocompleteIndex >= filtered.length) pane.autocompleteIndex = 0;
+  if (filtered.length === 0) {
+    pane.commandMenu.hidden = true;
+    return;
+  }
+  pane.commandMenu.replaceChildren(
+    ...filtered.map((command, index) =>
+      buildCommandRow(command, index === pane.autocompleteIndex,
+        () => applyCommand(pane, command)))
+  );
+  pane.commandMenu.hidden = false;
+}
+
+function closeAutocomplete(agentId) {
+  const pane = state.panes.get(agentId);
+  if (!pane) return;
+  pane.autocomplete = [];
+  pane.autocompleteIndex = 0;
+  pane.commandMenu.hidden = true;
+}
+
+// Intercept navigation keys while the menu is open; returns true if the key was
+// handled (so the caller skips its own Enter-to-send).
+function handleAutocompleteKey(agentId, event) {
+  const pane = state.panes.get(agentId);
+  if (!pane || pane.commandMenu.hidden || pane.autocomplete.length === 0) return false;
+  const count = pane.autocomplete.length;
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    pane.autocompleteIndex = (pane.autocompleteIndex + 1) % count;
+    updateAutocomplete(agentId);
+    return true;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    pane.autocompleteIndex = (pane.autocompleteIndex - 1 + count) % count;
+    updateAutocomplete(agentId);
+    return true;
+  }
+  if (event.key === "Enter" || event.key === "Tab") {
+    event.preventDefault();
+    applyCommand(pane, pane.autocomplete[pane.autocompleteIndex]);
+    return true;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeAutocomplete(agentId);
+    return true;
+  }
+  return false;
 }
 
 function updateHead(agentId) {
@@ -1118,6 +1290,7 @@ function runAction(action) {
     case "close_session": if (agent.live) send({ action: "close_agent", agent_id: agentId }); return;
     case "delete_session": return sessionDelete(agentId);
     case "toggle_allow": return sessionToggleAllow(agentId);
+    case "toggle_commands": return toggleCommandsPopover(agentId);
   }
 }
 

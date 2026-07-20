@@ -67,6 +67,7 @@ DEFAULT_HOTKEYS = {
     "close_session": "x",
     "delete_session": "d",
     "toggle_allow": "a",
+    "toggle_commands": "/",
     "cancel_turn": "S",
     "cycle_width": "w",
     "help": "?",

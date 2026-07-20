@@ -384,14 +384,79 @@ body {
 .agent-head .rename,
 .agent-head .autoname,
 .agent-head .config-btn,
+.agent-head .commands-btn,
 .agent-head .close,
 .agent-head .delete { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; }
 .agent-head .close { font-size: 16px; }
+.agent-head .commands-btn { font-family: ui-monospace, monospace; font-weight: 700; }
 .agent-head .rename:hover,
 .agent-head .autoname:hover,
 .agent-head .config-btn:hover,
+.agent-head .commands-btn:hover,
 .agent-head .close:hover,
 .agent-head .delete:hover { color: var(--text); }
+
+/* The slash-command browse popover: a scrollable list (backends advertise many),
+   each row a clickable /name + description + hint. */
+/* Screen-centred command palette — capped to the viewport so it never spills off
+   an edge regardless of pane width. */
+.commands-popover {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 30;
+  width: min(680px, 92vw);
+  max-height: 75vh;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.command-row {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 3px 14px;
+  padding: 6px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.command-row:hover,
+.command-row.active { background: var(--panel); }
+.command-name { color: var(--accent); font-family: ui-monospace, monospace; overflow-wrap: break-word; }
+.command-desc { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.command-hint {
+  grid-column: 2;
+  color: var(--muted);
+  opacity: 0.7;
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Inline autocomplete: floats just above the composer, same rows as the popover. */
+.command-menu {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 2px);
+  z-index: 20;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
 
 .transcript { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
 .scroll-bottom {
@@ -511,7 +576,7 @@ body {
 .permission button.chosen { border-color: var(--accent); background: var(--accent); color: var(--bg); opacity: 1; }
 .permission.resolved { opacity: 0.5; pointer-events: none; }
 
-.composer { display: flex; gap: 6px; padding: 8px; border-top: 1px solid var(--border); }
+.composer { position: relative; display: flex; gap: 6px; padding: 8px; border-top: 1px solid var(--border); }
 .composer textarea {
   flex: 1;
   resize: none;
