@@ -91,10 +91,15 @@ logged in; restart casebook / reload-config to use it.
 The discussion surveyed the broader ACP surface. Config options (above) shipped
 first; these are the remaining threads for this case, each its own future session:
 
-- **Slash commands** (`available_commands_update`) — invoked purely as prompt text
-  (no dedicated RPC), so `/compact` likely already works on claude; only discoverability
-  (autocomplete) is missing. Caveat: the coordinator's first-message directive prepend
-  defeats a leading `/command` as the first message.
+- **Slash commands** (`available_commands_update`) — SHIPPED. Invocation already
+  worked (plain prompt text, no RPC); the gap was discoverability. Added: client
+  captures the update, coordinator caches + snapshots it (mirrors config options),
+  and the UI gains a screen-centred command palette ("/" header button, or the
+  `/` hotkey) plus inline `/`-autocomplete on the composer. The first-message
+  directive collision was probed and is **unavoidable** (the leading-user-text
+  splice is load-bearing; embedded-context delivery is refused as prompt
+  injection) — so it is documented as a small edge, not fixed. Full writeup:
+  [slash-commands-directive-injection-findings.md](slash-commands-directive-injection-findings.md).
 - **Session modes** — codex/claude expose approval/plan mode. Codex publishes it *both*
   as a `mode` config option (now surfaced automatically via this work) and as the
   dedicated `SessionModeState`; the dedicated mode API is not otherwise used.
