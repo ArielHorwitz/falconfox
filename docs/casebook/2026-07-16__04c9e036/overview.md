@@ -7,6 +7,11 @@ converged on a single principle: **every option a backend advertises (model,
 reasoning effort, approval mode, toggles) is handled identically; the model is not
 special.** Implemented and merged to `dev` as commit `35e747f`.
 
+**Status: open.** Config options is the first slice of this case — shipped,
+documented, and written up below. The case stays open as the home for the rest of
+the ACP surface (see [Roadmap](#roadmap--remaining-acp-surface-future-sessions)),
+each item to be picked up in its own session.
+
 ## Background: the ACP finding
 
 ACP exposes the model two ways. The **dedicated `models` field + `session/set_model`
@@ -81,9 +86,10 @@ Added `[backends.codex] command = ["codex-acp"]` to the user's
 `~/.config/casebook/config.toml` (backed up alongside). Codex is installed and
 logged in; restart casebook / reload-config to use it.
 
-## Deferred — unused ACP surface worth revisiting
+## Roadmap — remaining ACP surface (future sessions)
 
-The discussion surveyed the broader ACP surface; these were noted but not pursued:
+The discussion surveyed the broader ACP surface. Config options (above) shipped
+first; these are the remaining threads for this case, each its own future session:
 
 - **Slash commands** (`available_commands_update`) — invoked purely as prompt text
   (no dedicated RPC), so `/compact` likely already works on claude; only discoverability
@@ -98,7 +104,15 @@ The discussion surveyed the broader ACP surface; these were noted but not pursue
 - **Prompt capabilities** (image/audio, `embedded_context`) — casebook only sends text;
   supporting attachments needs capturing `prompt_capabilities` at spawn.
 - **Terminal** — casebook sets `terminal=false`; enabling it (brokered like file I/O)
-  is on-thesis but a large security surface.
+  is on-thesis but a large security surface. **Observed finding:** claude-agent-acp
+  still runs commands (git commit, etc.) despite `terminal=false` — it executes out of
+  band via its own machinery, not through casebook's brokered terminal methods. So this
+  thread is less "unlock a missing capability" and more "decide whether casebook should
+  broker/observe/police execution the backend already does on its own." First step for
+  the session: probe each backend's behavior under `terminal=false`. (Separately: a
+  backend's WebFetch/HTTP tool failing is likely network-egress sandboxing or an
+  unexposed tool — *not* the ACP `terminal` capability, which governs command execution
+  only; probe independently.)
 - **Per-session config persistence** — config options currently reset to backend
   defaults on resume (or are restored by the agent on `session/load`). If per-session
   memory is wanted, it should persist *all* options uniformly, not just the model.
