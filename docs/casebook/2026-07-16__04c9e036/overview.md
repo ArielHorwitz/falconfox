@@ -42,7 +42,10 @@ Removed every trace of model-specific handling: the `models`-field capture,
 `current_model`, and `agent["model"]` (dropped from meta/fork/persist). The model is
 just the option with `category=="model"`. Config options are live session state,
 re-read from the agent each session — **not persisted per-session** (matches how
-effort/mode were always treated).
+effort/mode were always treated). This includes **session modes** (approval/plan):
+codex/claude expose mode *both* as a `mode` config option and as the dedicated
+`SessionModeState` API — casebook handles it via the config option like everything
+else, so the dedicated mode API is deliberately not adopted (no separate thread).
 
 ### 3. Default config options — IMPLEMENTED
 Per-backend defaults via `[backends.<name>.config_options]` (keyed by option id),
@@ -100,9 +103,6 @@ first; these are the remaining threads for this case, each its own future sessio
   splice is load-bearing; embedded-context delivery is refused as prompt
   injection) — so it is documented as a small edge, not fixed. Full writeup:
   [slash-commands-directive-injection-findings.md](slash-commands-directive-injection-findings.md).
-- **Session modes** — codex/claude expose approval/plan mode. Codex publishes it *both*
-  as a `mode` config option (now surfaced automatically via this work) and as the
-  dedicated `SessionModeState`; the dedicated mode API is not otherwise used.
 - **Session fork** (`session/fork`) — casebook's manual transcript-copy fork
   (`fork_agent`) is more flexible (arbitrary-point truncation, any backend); native
   fork is higher-fidelity but head-only. A hybrid was left for later.
