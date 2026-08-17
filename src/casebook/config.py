@@ -1,9 +1,8 @@
 """Configuration and backend selection.
 
-Casebook reads a single global config at
-``$XDG_CONFIG_HOME/casebook/config.toml`` (falling back to
-``~/.config/casebook/config.toml``), optionally overlaid by a project-local
-``.casebook/config.toml`` for per-checkout overrides. The config declares the
+FalconFox reads a single global config at
+``$XDG_CONFIG_HOME/falconfox/config.toml`` (falling back to
+``~/.config/falconfox/config.toml``). The config declares the
 available ACP agent *backends* — a backend is just a command to launch plus
 environment — and which one is the default.
 
@@ -33,12 +32,11 @@ from . import logsetup
 log = logsetup.get_logger("config")
 
 CONFIG_FILENAME = "config.toml"
-PROJECT_CONFIG_RELATIVE_PATH = ".casebook/config.toml"
 
 ECHO_BACKEND_NAME = "echo"
 
 # Default logging verbosity. Override with a top-level `log_level = "DEBUG"` in
-# the global config, or the CASEBOOK_LOG_LEVEL environment variable.
+# the global config, or the FALCONFOX_LOG_LEVEL environment variable.
 DEFAULT_LOG_LEVEL = "INFO"
 
 # The instructions handed to the model when asked to name a session. Override it
@@ -107,10 +105,10 @@ class Backend:
 
 
 def global_config_dir() -> Path:
-    """`$XDG_CONFIG_HOME/casebook`, or `~/.config/casebook` if unset."""
+    """`$XDG_CONFIG_HOME/falconfox`, or `~/.config/falconfox` if unset."""
     base = os.environ.get("XDG_CONFIG_HOME")
     root = Path(base) if base else Path.home().joinpath(".config")
-    return root.joinpath("casebook")
+    return root.joinpath("falconfox")
 
 
 def global_config_path() -> Path:
@@ -133,7 +131,7 @@ def builtin_backends() -> dict[str, Backend]:
 
 @dataclass(frozen=True)
 class Config:
-    """The resolved casebook configuration."""
+    """The resolved FalconFox configuration."""
 
     backends: dict[str, Backend]
     default_backend: str
@@ -190,8 +188,8 @@ def _merge_ui(overrides: dict) -> dict:
     return merged
 
 
-def load_config(project_root: Optional[Path] = None) -> Config:
-    """Built-in backends overlaid with global config, then project-local config.
+def load_config() -> Config:
+    """Built-in backends overlaid with the daemon-global config.
 
     Config format (``config.toml``):
 
@@ -205,10 +203,6 @@ def load_config(project_root: Optional[Path] = None) -> Config:
         env = { GEMINI_API_KEY = "..." }
     """
     data = _read_toml(global_config_path())
-    if project_root is not None:
-        project = _read_toml(project_root.joinpath(PROJECT_CONFIG_RELATIVE_PATH))
-        merged_backends = {**data.get("backends", {}), **project.get("backends", {})}
-        data = {**data, **project, "backends": merged_backends}
 
     backends = builtin_backends()
     backends.update(_parse_backends(data.get("backends", {})))
@@ -219,8 +213,7 @@ def load_config(project_root: Optional[Path] = None) -> Config:
         # falling back to the built-in echo if they declared none.
         default = next((name for name in backends if name != ECHO_BACKEND_NAME),
                        ECHO_BACKEND_NAME)
-    log.debug("config loaded (project=%s): backends=%s default=%s",
-              project_root, sorted(backends), default)
+    log.debug("global config loaded: backends=%s default=%s", sorted(backends), default)
     return Config(
         backends=backends,
         default_backend=default,
@@ -232,7 +225,7 @@ def load_config(project_root: Optional[Path] = None) -> Config:
     )
 
 def global_hotkeys() -> dict:
-    """Hotkeys from global config only (no project overrides)."""
+    """Hotkeys from the daemon-global config."""
     data = _read_toml(global_config_path())
     return {**DEFAULT_HOTKEYS, **data.get('hotkeys', {})}
 
@@ -241,8 +234,7 @@ def log_level() -> str:
     """Log level from global config only (top-level `log_level`).
 
     Logging is a process-global concern set up once at server startup, so it is
-    read from the global config rather than any per-project override.
+    read from the global config.
     """
     data = _read_toml(global_config_path())
     return str(data.get("log_level", DEFAULT_LOG_LEVEL))
-

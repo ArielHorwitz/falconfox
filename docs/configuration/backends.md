@@ -1,9 +1,9 @@
 # Backends
 
-A **backend** is the agent casebook launches for a session. Casebook is
+A **backend** is the agent FalconFox launches for a session. FalconFox is
 vendor-agnostic: a backend is just *a command to run* (plus optional environment)
 that speaks the [Agent Client Protocol](https://agentclientprotocol.com) (ACP)
-over stdio. Any ACP-speaking agent works; casebook knows nothing about which
+over stdio. Any ACP-speaking agent works; FalconFox knows nothing about which
 vendor or model is behind it.
 
 > **Just want it running?** Jump to [Quick setup](#quick-setup) for copy-paste
@@ -11,9 +11,9 @@ vendor or model is behind it.
 
 ## How a backend runs
 
-When you start a session on a backend, casebook:
+When you start a session on a backend, FalconFox:
 
-1. launches the backend's `command` as a subprocess, with the **project root** as
+1. launches the backend's `command` as a subprocess, with the session **path** as
    its working directory;
 2. gives it the **full inherited environment**, overlaid with the backend's `env`;
 3. speaks ACP to it over stdin/stdout (initialize → new session → prompts).
@@ -46,7 +46,7 @@ reasoning_effort = "high"
 
 **`echo`** is the only built-in backend — a tiny in-tree ACP agent
 (`python -m casebook.echo_backend`) that reflects your messages back. It's always
-available, so the app runs with zero setup, but it has no language model (see
+available, so the daemon runs with zero setup, but it has no language model (see
 [Naming](#naming)).
 
 Every other backend, Claude included, is one you declare under `[backends.*]` —
@@ -56,7 +56,7 @@ built-in one.
 ## Choosing the default
 
 `default_backend` selects the backend new sessions use unless you pick another in
-the UI. If you don't set it, casebook uses the **first backend you declare**, or
+the CLI. If you don't set it, FalconFox uses the **first backend you declare**, or
 `echo` if you declared none.
 
 ```toml
@@ -66,7 +66,7 @@ default_backend = "claude"
 ## Session options
 
 Backends advertise **config options** over ACP — the model, reasoning effort,
-approval mode, feature toggles, whatever that agent exposes. Casebook treats them
+approval mode, feature toggles, whatever that agent exposes. FalconFox treats them
 all the same: a running session shows them in the **session-options (⚙) popover**,
 and changes are applied over ACP. The model is just one of these options, not a
 special case.
@@ -87,14 +87,14 @@ for exactly what to paste here. Set the option in the UI to see the value you wa
 then copy the line.
 
 If a default can't be applied — the backend advertises no such option id, or the
-value matches none of its choices — casebook emits a notice saying so (and lists
+value matches none of its choices — FalconFox emits a notice saying so (and lists
 what's available), rather than silently dropping it.
 
-Casebook cannot offer an option a backend doesn't expose, and some backends
+FalconFox cannot offer an option a backend doesn't expose, and some backends
 advertise only **coarse model buckets** rather than exact ids (see
 [Claude](#claude)). For finer control, define **separate backends**, each launched
 with that backend's own selection flags or env — the vendor-specific value lives in
-your config, and casebook stays agnostic:
+your config, and FalconFox stays agnostic:
 
 ```toml
 [backends.assistant-fast]
@@ -129,14 +129,13 @@ useful names.)
 
 ## Verifying
 
-Start `casebook` and open a case: configured backends appear in the
-**+ session** backend picker. If a backend fails to launch, the failure surfaces
-as a toast/notice (e.g. a wrong command or missing binary).
+Run `falconfox daemon`, then `falconfox spawn --backend <name> --path <path>`.
+If a backend fails to launch, the API and CLI report the error.
 
 ## Quick setup
 
 Copy-paste recipes for common backends. Each block goes in your config file
-(`~/.config/casebook/config.toml`, or the per-project `.casebook/config.toml`).
+(`~/.config/falconfox/config.toml`).
 
 ### Claude
 

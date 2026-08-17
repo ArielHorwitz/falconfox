@@ -1,8 +1,8 @@
 """Runtime state: server info file and XDG state directory.
 
 The server info file (``server.json``) lives in
-``$XDG_STATE_HOME/casebook/`` (falling back to
-``~/.local/state/casebook/``) and records the PID and port of the running
+``$XDG_STATE_HOME/falconfox/`` (falling back to
+``~/.local/state/falconfox/``) and records the PID and port of the running
 daemon so that subsequent CLI invocations can discover it.
 """
 
@@ -24,14 +24,14 @@ from . import logsetup
 log = logsetup.get_logger("state")
 
 SERVER_INFO_FILENAME = "server.json"
-LOG_FILENAME = "casebook.log"
+LOG_FILENAME = "falconfox.log"
 
 
 def state_dir() -> Path:
-    """``$XDG_STATE_HOME/casebook``, or ``~/.local/state/casebook`` if unset."""
+    """``$XDG_STATE_HOME/falconfox``, or ``~/.local/state/falconfox`` if unset."""
     base = os.environ.get("XDG_STATE_HOME")
     root = Path(base) if base else Path.home().joinpath(".local", "state")
-    return root.joinpath("casebook")
+    return root.joinpath("falconfox")
 
 
 def server_info_path() -> Path:

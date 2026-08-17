@@ -1,9 +1,9 @@
 """Our ACP client: the bridge from one agent's callbacks to engine events.
 
-There is one AgentClient per agent subprocess. The ACP connection calls these
+There is one AgentClient per session subprocess. The ACP connection calls these
 methods; we translate each into a UI-neutral event (or, for permission/fs
 requests, into a real answer the agent waits on). Because the agent's file reads
-and writes are routed through here, casebook is the broker for filesystem access
+and writes are routed through here, FalconFox is the broker for filesystem access
 — the same property that lets it keep the UI in sync.
 """
 
@@ -35,7 +35,7 @@ def capture_config_options(response: Any) -> list[dict]:
     """Normalize a session response (or a live update) to a uniform option list.
 
     ACP's `config_options` is the stable mechanism for every knob — model,
-    reasoning effort, mode, toggles — and casebook treats them all identically
+    reasoning effort, mode, toggles — and FalconFox treats them all identically
     (the model is not special; it's just the option with `category == "model"`).
 
     The ACP `models` field / `session/set_model` (marked UNSTABLE in the spec) is
@@ -74,7 +74,7 @@ def capture_commands(update: Any) -> list[dict]:
     """Normalize an `available_commands_update` to a uniform command list.
 
     Slash commands have no dedicated RPC — they are invoked as plain prompt text
-    — so casebook only needs their names/descriptions for discoverability. The
+    — so FalconFox only needs their names/descriptions for discoverability. The
     optional `input.hint` is a free-text prompt for the command's argument.
     """
     return [
@@ -130,20 +130,18 @@ def _select_choices(options: Any) -> list[dict]:
 class AgentClient(Client):
     def __init__(
         self,
-        agent_id: str,
-        case_id: str,
-        project_root: Path,
+        falconfox_session_id: str,
+        path: Path,
         emit: Emit,
         request_permission: PermissionRequester,
     ) -> None:
-        self.agent_id = agent_id
-        self.case_id = case_id
-        self.project_root = project_root.resolve()
+        self.falconfox_session_id = falconfox_session_id
+        self.path = path.resolve()
         self._emit = emit
         self._request_permission = request_permission
 
     def _event(self, **payload) -> None:
-        self._emit({"agent_id": self.agent_id, "case_id": self.case_id, **payload})
+        self._emit({"session_id": self.falconfox_session_id, **payload})
 
     # --- agent → UI: streamed session updates -----------------------------
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
@@ -190,8 +188,7 @@ class AgentClient(Client):
         self, options: list, session_id: str, tool_call: Any, **kwargs: Any
     ) -> RequestPermissionResponse:
         payload = {
-            "agent_id": self.agent_id,
-            "case_id": self.case_id,
+            "session_id": self.falconfox_session_id,
             "tool_call": {
                 "title": getattr(tool_call, "title", None),
                 "kind": getattr(tool_call, "kind", None),
@@ -208,7 +205,7 @@ class AgentClient(Client):
             outcome=AllowedOutcome(option_id=chosen, outcome="selected")
         )
 
-    # --- agent → filesystem (brokered through casebook) -------------------
+    # --- agent → filesystem (brokered through FalconFox) ------------------
     async def read_text_file(
         self,
         path: str,
@@ -217,9 +214,9 @@ class AgentClient(Client):
         line: Optional[int] = None,
         **kwargs: Any,
     ) -> ReadTextFileResponse:
-        target = self._resolve_in_project(path)
-        log.debug("agent %s reads %s (line=%s limit=%s)",
-                  self.agent_id, target, line, limit)
+        target = self._resolve_in_path(path)
+        log.debug("session %s reads %s (line=%s limit=%s)",
+                  self.falconfox_session_id, target, line, limit)
         text = target.read_text()
         if line is not None or limit is not None:
             lines = text.splitlines(keepends=True)
@@ -231,21 +228,22 @@ class AgentClient(Client):
     async def write_text_file(
         self, content: str, path: str, session_id: str, **kwargs: Any
     ) -> Optional[WriteTextFileResponse]:
-        target = self._resolve_in_project(path)
-        log.debug("agent %s writes %s (%d bytes)",
-                  self.agent_id, target, len(content))
+        target = self._resolve_in_path(path)
+        log.debug("session %s writes %s (%d bytes)",
+                  self.falconfox_session_id, target, len(content))
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
         # The filesystem watcher will surface this as a files_changed event.
         return WriteTextFileResponse()
 
-    def _resolve_in_project(self, path: str) -> Path:
-        """Confine agent file access to the project tree."""
-        resolved = Path(path).resolve()
-        if self.project_root not in resolved.parents and resolved != self.project_root:
-            log.warning("agent %s denied path outside project root: %s",
-                        self.agent_id, path)
-            raise PermissionError(f"path outside project root: {path}")
+    def _resolve_in_path(self, path: str) -> Path:
+        """Confine ACP-brokered file access to the session working path."""
+        candidate = Path(path)
+        resolved = (self.path.joinpath(candidate) if not candidate.is_absolute() else candidate).resolve()
+        if self.path not in resolved.parents and resolved != self.path:
+            log.warning("session %s denied path outside working path: %s",
+                        self.falconfox_session_id, path)
+            raise PermissionError(f"path outside session working path: {path}")
         return resolved
 
 

@@ -1,131 +1,86 @@
-# casebook
+# FalconFox
 
-Casebook is a browser-based app for working with AI agents on structured units
-of work called **cases**.
+FalconFox is a small, vendor-neutral [Agent Client Protocol](https://agentclientprotocol.com)
+session daemon. A session is a working directory plus metadata; the daemon keeps
+the ACP subprocess, transcript, and resume information centrally, without writing
+bookkeeping into the repository where the agent works.
 
-## Concepts
+This branch contains the local proof of concept: the flattened daemon and API,
+the `falconfox` CLI control plane, and a separate two-channel Telegram client.
+Remote authentication, voice transcription, and the rebuilt flat-session web UI
+are later milestones. The old web assets are intentionally left unwired during
+the PoC.
 
-A **casebook** is a directory of cases in your project (by default
-`docs/casebook/`). Each **case** is a subdirectory containing a metadata file
-(`case.toml`), an overview (`overview.md`), and whatever other files the work
-produces — analysis, designs, reports, code plans, etc. The filesystem is the
-source of truth; casebook reflects it.
+## Install and configure
 
-A **session** is a conversation with an agent, tied to a case. The agent
-automatically picks up the case's context — its directive, files, and related
-cases — so it's oriented from the start. Multiple sessions can work the same
-case in parallel; they coordinate through the filesystem, not through each
-other.
-
-A **backend** is any command that speaks the
-[Agent Client Protocol](https://agentclientprotocol.com) (ACP) over stdio.
-Casebook is vendor-agnostic — it doesn't know or care which model or vendor is
-behind a backend. You configure backends in a TOML file; casebook launches them
-as subprocesses and talks ACP to them. See
-[docs/configuration/backends.md](docs/configuration/backends.md) for the full
-reference.
-
-## Getting started
-
-### Install casebook
+For development:
 
 ```bash
-uv tool install git+https://github.com/ArielHorwitz/casebook
+uv sync
 ```
 
-Or for development:
-
-```bash
-git clone https://github.com/ArielHorwitz/casebook
-cd casebook
-uv pip install -e .
-```
-
-### Add a backend
-
-Casebook ships one built-in backend, `echo` (it just reflects your messages
-back), so the app always runs — but you'll want a real agent. The quickest is
-Claude, via the `claude-agent-acp` adapter.
-
-First, make sure [Claude Code](https://docs.claude.com/en/docs/claude-code/overview)
-is installed and you're signed in — the adapter uses its login, so run `claude`
-once and follow the prompt (no separate API key needed). Then point a backend at
-the adapter through `npx`, which fetches it on first use with nothing to install.
-Add this to `~/.config/casebook/config.toml`:
+With no configuration FalconFox uses its built-in `echo` ACP backend. Declare a
+real agent in `~/.config/falconfox/config.toml` (or beneath
+`$XDG_CONFIG_HOME/falconfox`):
 
 ```toml
-default_backend = "claude"
+default_backend = "codex"
 
-[backends.claude]
-command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
+[backends.codex]
+command = ["codex-acp"]
+
+[backends.codex.config_options]
+reasoning_effort = "high"
 ```
 
-Prefer to install the adapter (and skip `npx`), pin a specific model, or set up
-Gemini or another ACP agent? See
-[docs/configuration/backends.md](docs/configuration/backends.md).
+Configuration is daemon-global. There are no per-project overrides.
 
-### Run casebook
+## Daemon and CLI
 
 ```bash
-casebook                      # start daemon + open browser
-casebook /path/to/project     # open browser to a specific project
-casebook --fg                 # foreground server + open browser
-casebook --fg --no-browser    # foreground server, no browser
-casebook --stop               # stop running daemon
+falconfox daemon
+falconfox spawn --path ~/projects/example --name "example work"
+falconfox list
+falconfox send <session-id> "Inspect the failing tests"
+falconfox read <session-id>
+falconfox stop <session-id>
+falconfox resume <session-id>
+falconfox rename <session-id> "better name"
+falconfox delete <session-id>
+falconfox daemon --stop
 ```
 
-The `casebook` command auto-starts a background daemon if one isn't already
-running, then opens your browser to the UI.
+`send` resumes a stored session automatically. `spawn --ephemeral` creates a
+live session that is never persisted and is hidden from the default listing.
+Each backend subprocess receives its own id as `FALCONFOX_SESSION_ID`; the CLI
+rejects self-stop, self-delete, and stopping the containing daemon.
 
-## Using the app
+Session state lives at
+`$XDG_STATE_HOME/falconfox/sessions/<session-id>/` (falling back to
+`~/.local/state/falconfox/sessions/`).
 
-The **home page** lists your cases. Each case opens on its own page, so you can
-keep several cases open in separate browser tabs.
+## Telegram PoC
 
-On a **case page**, the sidebar lists that case's sessions and files; the main
-area shows open sessions as side-by-side panes. Create a session with
-**+ session**, pick a backend, and start talking. Each session pane shows the
-conversation, tool-call activity, permission prompts, and context/token usage
-when the backend reports it.
+Create a Telegram bot and two chats: a single-purpose focus channel and a work
+channel. Then run the client next to the daemon:
 
-For one-off queries without a case, the **Scratch** page runs caseless
-sessions — plain agents with no case directive. A scratch session can be
-promoted into a new case, migrating its history.
-
-All sessions run server-side, independent of the browser — they keep running
-regardless of which pages are open.
-
-### Keyboard navigation
-
-The app is fully keyboard-drivable. Press `?` or click the **&#x2328;** button to
-see the active bindings. Customize them under `[hotkeys]` in your config (see
-[docs/configuration/hotkeys.md](docs/configuration/hotkeys.md)).
-
-## Configuration
-
-Casebook reads a single optional TOML file at
-`~/.config/casebook/config.toml` (respects `$XDG_CONFIG_HOME`), optionally
-overridden per-project in `.casebook/config.toml`.
-
-```toml
-default_backend = "claude"
-
-[backends.claude]
-command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
-
-[backends.gemini]
-command = ["gemini", "--experimental-acp"]
-env = { GEMINI_API_KEY = "..." }
-[backends.gemini.config_options]
-model = "gemini-2.5-pro"
+```bash
+export FALCONFOX_TELEGRAM_TOKEN=…
+export FALCONFOX_TELEGRAM_FOCUS_CHAT_ID=…
+export FALCONFOX_TELEGRAM_WORK_CHAT_ID=…
+export FALCONFOX_TELEGRAM_DEFAULT_PATH="$HOME"
+# Optional: FALCONFOX_URL, FALCONFOX_TELEGRAM_POINTER_FILE,
+# FALCONFOX_TELEGRAM_FOCUS_BACKEND
+falconfox-telegram
 ```
 
-Full reference:
+The focus chat is backed by a rotating ephemeral session and a pointer skill
+shipped with the bot. The bot owns and watches the pointer file, announcing every
+valid change. The work chat forwards to the pointed-at session. `/new`, `/list`,
+`/switch`, `/name`, and `/home` are explicit fast paths; other focus-chat text is
+resolved naturally by the focus agent. During turns the bot refreshes Telegram's
+typing indicator, suppresses tool calls, and sends the final reply as one message.
 
-- **[Configuration overview](docs/configuration/README.md)** — all keys, merge
-  rules, and a complete example.
-- **[Backends](docs/configuration/backends.md)** — the built-in `echo`, session
-  options (model, effort, mode) and their defaults, and copy-paste quick-setup
-  recipes (Claude, Codex, Gemini, and more).
-- **[Hotkeys](docs/configuration/hotkeys.md)** — every bindable action, defaults,
-  and key-name syntax.
+Voice messages and interactive permissions are intentionally deferred. The PoC
+uses always-allow sessions; a permission request with no choices is denied
+immediately instead of hanging.

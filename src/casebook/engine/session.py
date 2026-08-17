@@ -35,10 +35,9 @@ CLIENT_CAPABILITIES = ClientCapabilities(
 
 @dataclass
 class AgentSession:
-    agent_id: str
-    label: str
-    case_id: str
-    project_root: Path
+    session_id: str
+    name: str
+    path: Path
     backend: Backend
     emit: Emit
     request_permission: PermissionRequester
@@ -58,13 +57,6 @@ class AgentSession:
     @property
     def acp_session_id(self) -> Optional[str]:
         return self._acp_session_id
-
-    def retag(self, case_id: str) -> None:
-        """Move a live session to a different case (used when promoting a scratch
-        session). Future events carry the new case id."""
-        self.case_id = case_id
-        if self._client is not None:
-            self._client.case_id = case_id
 
     def _capture_config_options(self, response: Any) -> None:
         """Record all advertised options (model, reasoning effort, toggles, …).
@@ -94,28 +86,31 @@ class AgentSession:
     async def _spawn(self) -> None:
         """Spawn the subprocess, initialize the connection, note its capabilities."""
         client = AgentClient(
-            self.agent_id,
-            self.case_id,
-            self.project_root,
+            self.session_id,
+            self.path,
             self._guarded_emit,
             self.request_permission,
         )
         self._client = client
         # The backend is the user's own trusted agent; pass the full environment
         # (not the trimmed MCP default) so it keeps PATH and ambient auth.
-        environment = {**os.environ, **self.backend.env}
+        environment = {
+            **os.environ,
+            **self.backend.env,
+            "FALCONFOX_SESSION_ID": self.session_id,
+        }
         command, *args = self.backend.command
         # The command is logged before the spawn so that if it fails (backend not
         # on PATH, non-executable, immediate crash) the log names exactly what was
         # attempted — the single most common backend-setup failure.
         log.debug("spawning backend %s: %s (cwd=%s)",
-                  self.backend.name, [command, *args], self.project_root)
+                  self.backend.name, [command, *args], self.path)
         conn, _process = await self._stack.enter_async_context(
             spawn_agent_process(
                 client,
                 command,
                 *args,
-                cwd=str(self.project_root),
+                cwd=str(self.path),
                 env=environment,
                 # asyncio's default StreamReader limit (64 KiB) is far too
                 # small for JSON-RPC messages carrying file contents —
@@ -129,23 +124,21 @@ class AgentSession:
         initialized = await conn.initialize(
             protocol_version=PROTOCOL_VERSION,
             client_capabilities=CLIENT_CAPABILITIES,
-            client_info=Implementation(name="casebook", version="0.1.0"),
+            client_info=Implementation(name="falconfox", version="0.1.0"),
         )
         capabilities = getattr(initialized, "agent_capabilities", None)
         self._supports_load = bool(getattr(capabilities, "load_session", False))
         log.debug("backend %s initialized (agent=%s, load_session=%s)",
-                  self.backend.name, self.agent_id, self._supports_load)
+                  self.backend.name, self.session_id, self._supports_load)
 
     async def start(self) -> None:
         """Spawn the agent and open a fresh session, ready and idle.
 
-        No prompt is sent: casebook does not query the agent on start. The
-        directive is prepended to the user's first message by the coordinator, so
-        a brand-new session doesn't speak until the user does.
+        No prompt is sent: a brand-new session stays quiet until the user speaks.
         """
         await self._spawn()
         session = await self._conn.new_session(
-            cwd=str(self.project_root), mcp_servers=[]
+            cwd=str(self.path), mcp_servers=[]
         )
         self._acp_session_id = session.session_id
         self._capture_config_options(session)
@@ -158,8 +151,8 @@ class AgentSession:
         the agent rehydrates its own history (the replayed updates are suppressed,
         since we already hold that transcript) — return True. Otherwise we open a
         fresh session and return False, leaving it to the caller to re-establish
-        context (casebook re-sends the directive + saved transcript on the next
-        message). Either way, no prompt is sent here.
+        context (FalconFox re-sends the saved transcript on the next message).
+        Either way, no prompt is sent here.
         """
         await self._spawn()
         if self._supports_load and acp_session_id:
@@ -167,7 +160,7 @@ class AgentSession:
             self._suppress_emit = True
             try:
                 loaded = await self._conn.load_session(
-                    cwd=str(self.project_root),
+                    cwd=str(self.path),
                     session_id=acp_session_id,
                     mcp_servers=[],
                 )
@@ -177,7 +170,7 @@ class AgentSession:
             self._set_state("idle")
             return True
         session = await self._conn.new_session(
-            cwd=str(self.project_root), mcp_servers=[]
+            cwd=str(self.path), mcp_servers=[]
         )
         self._acp_session_id = session.session_id
         self._capture_config_options(session)
@@ -199,8 +192,7 @@ class AgentSession:
         self._busy = True
         self.emit(
             {
-                "agent_id": self.agent_id,
-                "case_id": self.case_id,
+                "session_id": self.session_id,
                 "type": "message",
                 "role": "user",
                 "text": display_text if display_text is not None else text,
@@ -218,7 +210,7 @@ class AgentSession:
         except Exception as error:  # surface, don't crash the engine
             # The user sees the summary as a notice; keep the traceback for DEBUG
             # so a backend/protocol failure mid-turn is diagnosable.
-            log.debug("prompt failed for agent=%s", self.agent_id, exc_info=True)
+            log.debug("prompt failed for session=%s", self.session_id, exc_info=True)
             self._notify(f"agent error: {error}", level="error")
         finally:
             self._busy = False
@@ -237,8 +229,7 @@ class AgentSession:
             return
         self.emit(
             {
-                "agent_id": self.agent_id,
-                "case_id": self.case_id,
+                "session_id": self.session_id,
                 "type": "usage",
                 "input_tokens": getattr(usage, "input_tokens", None),
                 "output_tokens": getattr(usage, "output_tokens", None),
@@ -248,37 +239,33 @@ class AgentSession:
 
     def _set_state(self, state: str) -> None:
         self.emit(
-            {"agent_id": self.agent_id, "case_id": self.case_id,
-             "type": "agent_state", "state": state}
+            {"session_id": self.session_id, "type": "agent_state", "state": state}
         )
 
     def _notify(self, message: str, level: str = "info") -> None:
         self.emit(
-            {"agent_id": self.agent_id, "case_id": self.case_id,
+            {"session_id": self.session_id,
              "type": "notice", "level": level, "message": message}
         )
 
 
 class SessionManager:
-    """Owns all live agent sessions, keyed by agent_id, grouped by case."""
+    """Owns all live ACP sessions, keyed by FalconFox session id."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, AgentSession] = {}
 
-    def new_agent_id(self) -> str:
+    def new_session_id(self) -> str:
         return uuid.uuid4().hex[:8]
 
     def add(self, session: AgentSession) -> None:
-        self._sessions[session.agent_id] = session
+        self._sessions[session.session_id] = session
 
-    def get(self, agent_id: str) -> Optional[AgentSession]:
-        return self._sessions.get(agent_id)
+    def get(self, session_id: str) -> Optional[AgentSession]:
+        return self._sessions.get(session_id)
 
-    def pop(self, agent_id: str) -> Optional[AgentSession]:
-        return self._sessions.pop(agent_id, None)
-
-    def for_case(self, case_id: str) -> list[AgentSession]:
-        return [s for s in self._sessions.values() if s.case_id == case_id]
+    def pop(self, session_id: str) -> Optional[AgentSession]:
+        return self._sessions.pop(session_id, None)
 
     def all(self) -> list[AgentSession]:
         return list(self._sessions.values())

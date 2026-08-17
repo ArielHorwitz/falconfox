@@ -1,7 +1,7 @@
 """A minimal, built-in ACP agent that echoes user messages back.
 
 This is the always-available fallback backend (see config.py). It speaks ACP over
-stdio like any real backend, so casebook is runnable and developable without a
+stdio like any real backend, so FalconFox is runnable and developable without a
 model installed. It has no memory and does not support session loading — it
 simply reflects each prompt's text back as an agent message.
 

@@ -1,4 +1,4 @@
-"""Casebook: a coordinator connecting a filesystem casebook to ACP agent backends."""
+"""FalconFox: a vendor-neutral ACP session daemon."""
 
 from __future__ import annotations
 

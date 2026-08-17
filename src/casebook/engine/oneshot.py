@@ -101,7 +101,7 @@ async def one_shot(backend: Backend, project_root: Path, prompt: str) -> str:
         await conn.initialize(
             protocol_version=PROTOCOL_VERSION,
             client_capabilities=_NO_FILES,
-            client_info=Implementation(name="casebook", version="0.1.0"),
+            client_info=Implementation(name="falconfox", version="0.1.0"),
         )
         session = await conn.new_session(cwd=str(project_root), mcp_servers=[])
         await _apply_defaults(conn, session, backend)
