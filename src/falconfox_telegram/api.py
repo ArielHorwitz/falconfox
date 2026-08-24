@@ -34,6 +34,14 @@ async def _json_request(url: str, method: str = "GET", body: dict | None = None)
             raise ApiError(detail) from error
         except urllib.error.URLError as error:
             raise ApiError(str(error.reason)) from error
+        except OSError as error:
+            # A *read* timeout raises TimeoutError, which urllib does not wrap
+            # in URLError (unlike a connect failure). Uncaught it escapes the
+            # caller's `except ApiError`, kills the polling task, and takes the
+            # daemon websocket down with it -- discarding any in-flight turn's
+            # reply. Observed live: two teardowns during one long turn, blamed
+            # on the daemon, which was healthy throughout.
+            raise ApiError(f"{type(error).__name__}: {error}") from error
 
     return await asyncio.to_thread(perform)
 

@@ -125,6 +125,32 @@ environment had accumulated by hand.
    `python3` is 3.10.** Any tool documented as "run it with python3" needs
    checking, not assuming.
 
+7. **A Telegram read timeout silently destroyed an agent's reply** — the worst
+   bug of the session, and it ate this session's own case-update report before
+   it was found. `_json_request` classifies `HTTPError` and `URLError` as
+   `ApiError`, but a *read* timeout raises `TimeoutError`, which urllib does not
+   wrap in `URLError` the way it wraps a connect failure. It therefore escaped
+   `_poll_telegram`'s `except ApiError`, killed the polling task, and
+   `asyncio.wait(FIRST_COMPLETED)` read that as the connection dying — so a
+   hiccup on the **Telegram** side tore down the **daemon** websocket, and
+   `_reset_connection_state()` wiped `_turn_chat` / `_reply_parts` with the
+   turn's accumulated text in them. The log even blamed the daemon
+   (`daemon connection lost`) while the daemon was healthy throughout: two
+   teardowns inside one long turn, 14:35:17 and 14:38:09.
+
+   Two fixes, because there are two failures. The timeout is now classified as
+   `ApiError`, so the existing retry handles it and nothing is torn down. And
+   `_reset_connection_state()` now returns the chats it interrupted, so a
+   dropped connection **tells the chat its reply is gone** instead of leaving it
+   waiting forever — the session still holds the turn, so the content is
+   recoverable, but only if you know to ask.
+
+   The lesson generalises past this bug: **silent loss is worse than an error.**
+   The reconnect loop added during the AFK run was written to make restarts
+   survivable, and it does — but "the connection recovered" was quietly allowed
+   to mean "and the turn in flight simply vanished". A recovery path that
+   discards data needs to say so.
+
 ## State at the end of the session
 
 All five fixed, committed, pushed to `origin/falconfox`, and live on the VPS

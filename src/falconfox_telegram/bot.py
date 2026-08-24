@@ -20,6 +20,11 @@ from .rendering import render_messages
 
 log = logging.getLogger("falconfox.telegram")
 
+INTERRUPTED_TURN = (
+    "Lost the connection mid-turn, so that reply is gone. The session still "
+    "has it — ask it to repeat."
+)
+
 
 @dataclass(frozen=True)
 class BotConfig:
@@ -112,17 +117,28 @@ class FalconFoxTelegramBot:
             for loop in loops:
                 loop.cancel()
             await asyncio.gather(*loops, return_exceptions=True)
-            self._reset_connection_state()
+            # Dropping the connection discards whatever each in-flight turn
+            # had accumulated. Say so, rather than leaving a chat waiting on
+            # a reply that can no longer arrive -- the session still holds the
+            # turn, so the content is recoverable, but only if you know.
+            for chat_id in self._reset_connection_state():
+                try:
+                    await self.telegram.message(chat_id, INTERRUPTED_TURN)
+                except Exception:
+                    log.warning("could not report the lost turn to %s", chat_id)
 
-    def _reset_connection_state(self) -> None:
+    def _reset_connection_state(self) -> list[int]:
+        """Clear per-connection state; return chats left mid-turn."""
         self._ws = None
         self._focus_working = False
         self._rotate_pending = False
         for typing in self._typing_tasks.values():
             typing.cancel()
         self._typing_tasks.clear()
+        interrupted = sorted(set(self._turn_chat.values()))
         self._turn_chat.clear()
         self._reply_parts.clear()
+        return interrupted
 
     def _prepare_focus_workspace(self) -> None:
         # Keep the pointer inside the focus session's cwd so ACP-brokered file

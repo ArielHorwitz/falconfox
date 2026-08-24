@@ -11,7 +11,8 @@ from unittest.mock import patch
 from casebook.cli import CliError, _guard_self_target
 from casebook.coordinator import SessionCoordinator
 from casebook.storage import SessionStore
-from falconfox_telegram.bot import BotConfig, FalconFoxTelegramBot
+from falconfox_telegram.api import ApiError, _json_request
+from falconfox_telegram.bot import INTERRUPTED_TURN, BotConfig, FalconFoxTelegramBot
 from falconfox_telegram.rendering import TELEGRAM_MESSAGE_LIMIT, render_messages
 
 
@@ -158,6 +159,43 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             await bot._handle_event({"type": "agent_state", "session_id": "session",
                                      "state": "idle"})
             self.assertEqual(bot._typing_tasks, {})
+
+
+    async def test_read_timeout_is_an_api_error_not_a_teardown(self):
+        # urllib wraps a connect failure in URLError but lets a read timeout
+        # through as TimeoutError. Escaping as OSError kills the polling task
+        # and takes the daemon websocket -- and the in-flight reply -- with it.
+        def raise_timeout(*_args, **_kwargs):
+            raise TimeoutError("The read operation timed out")
+
+        with patch("urllib.request.urlopen", raise_timeout):
+            with self.assertRaises(ApiError):
+                await _json_request("http://localhost/nowhere")
+
+    async def test_dropped_connection_reports_the_lost_turn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = FalconFoxTelegramBot(BotConfig(
+                "token", 10, 20, pointer_file=Path(directory, "focus"),
+                default_path=Path(directory),
+            ))
+            bot.telegram = FakeTelegram()
+            bot._turn_chat["session"] = 20
+            bot._reply_parts["session"] = ["half an answer"]
+            self.assertEqual(bot._reset_connection_state(), [20])
+            # State is cleared, and the chat id is handed back so the caller can
+            # tell that chat its reply is never coming.
+            self.assertEqual(bot._turn_chat, {})
+            self.assertEqual(bot._reply_parts, {})
+
+    async def test_quiet_disconnect_reports_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = FalconFoxTelegramBot(BotConfig(
+                "token", 10, 20, pointer_file=Path(directory, "focus"),
+                default_path=Path(directory),
+            ))
+            bot.telegram = FakeTelegram()
+            self.assertEqual(bot._reset_connection_state(), [])
+            self.assertTrue(INTERRUPTED_TURN)
 
 
 class RenderingTests(unittest.TestCase):
