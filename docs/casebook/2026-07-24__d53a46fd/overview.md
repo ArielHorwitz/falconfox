@@ -10,21 +10,28 @@ built-in "manager" role) as the intelligence that drives it.
 **Decision: pivot this repo into falconfox** (rename + generalize in place), rather
 than starting a new one — see [Repo strategy](#repo-strategy--pivot-in-place).
 
-**Status: open — deployed and live on the VPS (`lemcel`) as of 2026-08-24, and
-now advancing from phone-driven VPS sessions.** The first such session ran the
-same day and did real work end to end — seven findings raised and fixed,
-designed, built, tested, deployed and verified entirely from Telegram,
-including two self-updates of falconfox from inside a falconfox session. That
-is the case's central claim demonstrated rather than argued. Findings and the
-deploy procedure that emerged:
-[first-phone-session-environment-gaps-and-update-loop-hardening.md](first-phone-session-environment-gaps-and-update-loop-hardening.md).
+**Status: CLOSED (2026-08-24).** The thesis is not argued but demonstrated:
+falconfox runs on the VPS (`lemcel`), and this case was finished from a phone.
+Sessions were spawned, real work was done, five staged deploys landed —
+including falconfox updating *itself* from inside a falconfox session, four
+times — and the session driving it survived and resumed every daemon restart.
+The pivot is committed: the package is `falconfox`, the repo is
+`ArielHorwitz/falconfox`, and `master` carries it.
 
-**Deploy state:** the VPS runs `9d5535f` — every fix from the first phone
-session is live. `update.log` shows three staged deploys that day, the last
-landing `healthy at revision 9d5535f` at 14:53:32, with `falconfox-daemon` and
-`falconfox-telegram` both running from that restart. Note the unit names are
-`falconfox-daemon` / `falconfox-telegram`; there is no unit called plain
-`falconfox`, and `systemctl --user is-active falconfox` therefore reports
+Closed does not mean everything was built. It means every thread was
+**disposed of** — done, or dropped with a reason, or moved somewhere that
+outlives the case. Deferred work lives in [docs/wishlist.md](../../wishlist.md)
+(missing) and [docs/bugs.md](../../bugs.md) (broken), which is what makes
+closing honest rather than a way of dropping threads. Dogfooding continues from
+Telegram, across this project and others; findings get their own cases.
+
+**Deploy state at close:** the VPS runs the renamed package. `update.log`
+records five staged deploys on 2026-08-24, the last landing `healthy at
+revision 9587cdf` at 17:31:33 with no rollback — a package rename coming up
+clean is the strongest test the repaired update loop has had. Commits after
+that point are documentation only, so the running code is current. Note the
+units are `falconfox-daemon` / `falconfox-telegram`; there is no unit called
+plain `falconfox`, and `systemctl --user is-active falconfox` therefore reports
 `inactive` on a perfectly healthy host.
 
 **Direction set 2026-08-24: this case closes once its open items are
@@ -138,13 +145,15 @@ deliberately, as a starting point for that later effort rather than as debt.
 
 ### Closing checklist
 
-Code and delivery:
+Code and delivery — all done:
 
-- [ ] Rename the package and every reference above.
-- [ ] Fast-forward `master` to `falconfox`.
-- [ ] Deploy and restart (detached), verify healthy, confirm rollback was not
-      needed.
-- [ ] GitHub repo rename + remote/clone-URL fixes (user).
+- [x] Rename the package and every reference above (`9587cdf`). Every remaining
+      "casebook" in the tree refers to the workflow; none to the daemon.
+- [x] Fast-forward `master` to `falconfox` — `a222a8c..9587cdf`, clean.
+- [x] Deploy and restart, detached, `healthy at revision 9587cdf`, no rollback.
+- [x] GitHub repo renamed to `ArielHorwitz/falconfox`; remote and the clone URL
+      in `deploy/README.md` follow it. The bootstrap checklist in this case
+      keeps the old URL — it records what was executed, and GitHub redirects.
 
 **Where deferred work goes.** Two new files, [docs/wishlist.md](../../wishlist.md)
 and [docs/bugs.md](../../bugs.md), now hold what this case pushes forward —
@@ -179,6 +188,14 @@ Open threads, all now disposed of:
 - **Bot websocket reconnect — done.** The loop was added during the AFK run and
   hardened by finding 7; the stale note above has been reconciled.
 - **The desktop client** — the web UI, reframed and moved to the wishlist.
+- **The typing indicator** — reported intermittent again at the very end of the
+  case, and filed rather than fixed: `_typing_loop` dies on one transient
+  Telegram error and `_start_typing`'s guard reads the dead task as live, so
+  nothing restarts it. In [bugs.md](../../bugs.md), with the two earlier
+  decisions that must not be undone by a naive fix. The UX half — no way to
+  tell idle from working from stuck — is in
+  [wishlist.md](../../wishlist.md). A fitting last finding: the case closes the
+  way it ran, by using the thing and writing down what using it exposed.
 
 Dogfooding continues after this case closes, from Telegram, across this project
 *and others* — which is the point of having built it. Findings get their own

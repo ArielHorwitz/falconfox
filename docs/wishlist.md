@@ -42,17 +42,27 @@ effort rather than an unfinished corner of the pivot.
 Reported alongside the typing bug, and not fixed by fixing it: from the work
 chat there is no way to tell whether a session is idle, working, or stuck. The
 typing indicator is the only signal, and it is a poor one — it says the *bot*
-believes a turn is in flight, which is not the same claim. A wedged backend and
-a busy one look identical.
+believes a turn is in flight, which is a weaker claim than the session actually
+working. A wedged backend and a busy one look identical.
 
-The daemon already knows more than the chat shows: `falconfox list` reports
-`idle` / `working` / `stored` per session. Today only the focus chat can ask,
-and asking there means leaving the conversation. Something like a `/status` in
-the work chat would close most of the gap.
+The daemon already knows more than the chat shows. `falconfox list` reports
+`idle` / `working` / `stored` per session, but today only the focus chat can
+ask, and asking there means leaving the conversation. Something like a
+`/status` in the work chat would close most of the gap.
+
+There is a second, richer source the client currently ignores: the daemon emits
+`session_updated` carrying `state: starting` while an ACP subprocess is being
+resumed, and `src/falconfox_telegram/bot.py` does not consume that event at all
+— `_handle_event` returns early on anything that is not `agent_state`.
+Consuming it would let the chat distinguish *starting* from *working*, which is
+the distinction a cold turn most needs, and it is the same change the typing
+bug wants. See "The typing indicator dies on one transient Telegram error" in
+[bugs.md](bugs.md); these two are worth doing together.
 
 "Stuck" is the harder half and genuinely missing rather than merely unexposed:
 nothing distinguishes a long turn from a hung one. That needs a notion of time
-since the last event, not just the current state.
+since the last event, not just the current state — which is new bookkeeping,
+either in the bot or in the daemon's session metadata.
 
 ## Rename the `falconfox-pointer` skill to match its job
 
