@@ -1,0 +1,10 @@
+[Unit]
+Description=FalconFox session daemon
+
+[Service]
+ExecStart=@REPO@/.venv/bin/falconfox daemon --foreground
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

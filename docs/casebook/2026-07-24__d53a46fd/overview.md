@@ -10,10 +10,26 @@ built-in "manager" role) as the intelligence that drives it.
 **Decision: pivot this repo into falconfox** (rename + generalize in place), rather
 than starting a new one — see [Repo strategy](#repo-strategy--pivot-in-place).
 
-**Status: open — local PoC implemented; live Telegram credential validation remains.**
+**Status: open — local PoC implemented; live Telegram acceptance run in progress
+(started 2026-08-24).** The stack works end to end with real credentials; the first
+focus-channel conversation exposed instruction gaps in the focus agent (it
+self-oriented as a work agent until corrected) — transcript and analysis:
+[focus-agent-live-transcript-and-instruction-gaps.md](focus-agent-live-transcript-and-instruction-gaps.md).
+Also filed: replies render as raw markdown because sends lack `parse_mode` —
+[telegram-markdown-parse-mode-finding.md](telegram-markdown-parse-mode-finding.md).
 
 Implementation and verification details:
 [poc-implementation-and-verification.md](poc-implementation-and-verification.md).
+
+**VPS deployment tooling landed 2026-08-24** (`deploy/` — see its README): systemd
+user units for daemon + bot, one-command bootstrap (`setup.sh`), and a self-update
+script (`update.sh`) with health check and automatic rollback, designed for the
+dogfooding goal that after one manual clone the *only* interface is Telegram —
+including updating falconfox itself from inside a falconfox session
+(`--detach-restart` schedules the restart after the agent's turn ends). Finding
+folded into the design rather than fixed in code: the bot has **no websocket
+reconnect loop**, so every daemon restart kills it — `Restart=always` in the unit
+compensates; a reconnect loop remains a worthwhile future hardening.
 
 ## Current goal: a local PoC — daemon + telegram only
 

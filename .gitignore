@@ -5,3 +5,4 @@ __pycache__/
 .casebook/
 .worktrees/
 src/casebook/_version.py
+.env

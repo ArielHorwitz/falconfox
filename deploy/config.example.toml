@@ -1,0 +1,19 @@
+# FalconFox daemon config for a headless VPS.
+# Copy to ~/.config/falconfox/config.toml and paste your token.
+
+default_backend = "claude"
+default_always_allow = true
+
+[backends.claude]
+command = ["claude-agent-acp"]
+# Generate with `claude setup-token` (on any machine — the OAuth step needs a
+# browser, but the token is portable). Valid for one year; re-run to renew.
+# NOTE: a stray ANTHROPIC_API_KEY in the environment would take precedence
+# over this token and bill per-use — don't set one.
+env = { CLAUDE_CODE_OAUTH_TOKEN = "paste-token-here" }
+
+[backends.claude.config_options]
+model = "opus"
+mode = "auto"
+effort = "high"
+fast = "off"
