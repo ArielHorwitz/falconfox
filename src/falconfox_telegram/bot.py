@@ -13,8 +13,10 @@ from pathlib import Path
 
 from watchfiles import awatch
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 from .api import ApiError, DaemonApi, TelegramApi
+from .rendering import render_messages
 
 log = logging.getLogger("falconfox.telegram")
 
@@ -77,18 +79,50 @@ class FalconFoxTelegramBot:
         ws_url = self.config.daemon_url.replace("http://", "ws://", 1).replace(
             "https://", "wss://", 1
         ) + "/ws"
-        async with connect(ws_url) as websocket:
-            self._ws = websocket
-            snapshot = json.loads(await websocket.recv())
-            if snapshot.get("type") != "snapshot":
-                raise RuntimeError("FalconFox did not send an initial snapshot")
-            await self._ensure_work_pointer()
-            await self._spawn_focus_session()
-            await asyncio.gather(
-                self._receive_events(),
-                self._poll_telegram(),
-                self._watch_pointer(),
-            )
+        # `async for ... in connect(...)` retries the connection with backoff,
+        # so the bot survives daemon restarts (e.g. a self-update) instead of
+        # dying with the connection.
+        async for websocket in connect(ws_url):
+            try:
+                await self._run_connected(websocket)
+            except (ConnectionClosed, ApiError, OSError) as error:
+                log.warning("daemon connection lost (%s); reconnecting", error)
+                await asyncio.sleep(2)
+                continue
+
+    async def _run_connected(self, websocket) -> None:
+        self._ws = websocket
+        snapshot = json.loads(await websocket.recv())
+        if snapshot.get("type") != "snapshot":
+            raise RuntimeError("FalconFox did not send an initial snapshot")
+        await self._ensure_work_pointer()
+        # Rotate rather than plain-spawn: after a reconnect that was not a
+        # daemon restart, this also cleans up the previous focus session.
+        await self._rotate_focus_session()
+        loops = [asyncio.create_task(coroutine) for coroutine in (
+            self._receive_events(), self._poll_telegram(), self._watch_pointer(),
+        )]
+        try:
+            # All three loops are endless, so any completion means the
+            # connection (or a loop) is gone; surface its outcome.
+            done, _pending = await asyncio.wait(loops, return_when=asyncio.FIRST_COMPLETED)
+            for finished in done:
+                finished.result()
+        finally:
+            for loop in loops:
+                loop.cancel()
+            await asyncio.gather(*loops, return_exceptions=True)
+            self._reset_connection_state()
+
+    def _reset_connection_state(self) -> None:
+        self._ws = None
+        self._focus_working = False
+        self._rotate_pending = False
+        for typing in self._typing_tasks.values():
+            typing.cancel()
+        self._typing_tasks.clear()
+        self._turn_chat.clear()
+        self._reply_parts.clear()
 
     def _prepare_focus_workspace(self) -> None:
         # Keep the pointer inside the focus session's cwd so ACP-brokered file
@@ -100,11 +134,25 @@ class FalconFoxTelegramBot:
             "skills", "falconfox-pointer", "SKILL.md"
         ).read_text()
         skill_dir.joinpath("SKILL.md").write_text(packaged_skill)
-        root.joinpath("AGENTS.md").write_text(
-            "You are the single-purpose FalconFox Telegram focus agent. For every user "
-            "message, use the falconfox-pointer skill. The pointer file is "
-            f"`{self.pointer}`. Do nothing except resolve and move that pointer.\n"
+        # Claude discovers skills under .claude/skills; bridge with a symlink.
+        claude_dir = root.joinpath(".claude")
+        claude_dir.mkdir(exist_ok=True)
+        skills_link = claude_dir.joinpath("skills")
+        if not skills_link.is_symlink() and not skills_link.exists():
+            skills_link.symlink_to(Path("..", ".agents", "skills"))
+        orientation = (
+            "You are the FalconFox Telegram focus agent: the single-purpose session "
+            "behind the focus chat. You are NOT a work agent — your only job is "
+            "deciding which session the work chat talks to. For every user message, "
+            "follow the falconfox-pointer skill (.agents/skills/falconfox-pointer). "
+            f"The pointer file is `{self.pointer}`. You may run `falconfox list` and "
+            "`falconfox spawn`, and write that pointer file — nothing else. Never "
+            "orient on or work in any project. When greeting or unsure, ask which "
+            "session to focus.\n"
         )
+        # Both files, so every agent runtime picks the orientation up natively.
+        root.joinpath("AGENTS.md").write_text(orientation)
+        root.joinpath("CLAUDE.md").write_text(orientation)
         self.focus_workspace = root
 
     async def _ensure_work_pointer(self) -> None:
@@ -289,7 +337,8 @@ class FalconFoxTelegramBot:
         chat_id = self._turn_chat.pop(session_id, None)
         reply = "".join(self._reply_parts.pop(session_id, [])).strip()
         if chat_id and reply:
-            await self.telegram.message(chat_id, reply)
+            for rendered in render_messages(reply):
+                await self.telegram.html_message(chat_id, rendered.html, rendered.plain)
         if session_id == self.focus_session_id and self._rotate_pending:
             await self._rotate_focus_session()
 

@@ -11,6 +11,7 @@ from casebook.cli import CliError, _guard_self_target
 from casebook.coordinator import SessionCoordinator
 from casebook.storage import SessionStore
 from falconfox_telegram.bot import BotConfig, FalconFoxTelegramBot
+from falconfox_telegram.rendering import TELEGRAM_MESSAGE_LIMIT, render_messages
 
 
 class StorageTests(unittest.TestCase):
@@ -85,10 +86,14 @@ class CliSafetyTests(unittest.TestCase):
 class FakeTelegram:
     def __init__(self):
         self.messages = []
+        self.html_messages = []
         self.typing_chats = []
 
     async def message(self, chat_id, text):
         self.messages.append((chat_id, text))
+
+    async def html_message(self, chat_id, html_text, plain_fallback):
+        self.html_messages.append((chat_id, html_text, plain_fallback))
 
     async def typing(self, chat_id):
         self.typing_chats.append(chat_id)
@@ -113,11 +118,56 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             await bot._handle_event({"type": "tool_call", "session_id": "session",
                                      "title": "hidden"})
             await bot._handle_event({"type": "message", "session_id": "session",
-                                     "role": "agent", "text": "world"})
+                                     "role": "agent", "text": "**world**"})
             await bot._handle_event({"type": "agent_state", "session_id": "session",
                                      "state": "idle"})
             self.assertEqual(fake.typing_chats, [20])
-            self.assertEqual(fake.messages, [(20, "hello world")])
+            self.assertEqual(fake.messages, [])
+            self.assertEqual(fake.html_messages,
+                             [(20, "hello <b>world</b>", "hello **world**")])
+
+
+class RenderingTests(unittest.TestCase):
+    def test_common_markdown_becomes_telegram_html(self):
+        markdown = (
+            "# Title\n\nUse `falconfox list` for **bold** and *italic* moves.\n\n"
+            "```python\nprint('a < b')\n```\n\nSee [docs](https://example.com/a?x=1&y=2)."
+        )
+        messages = render_messages(markdown)
+        self.assertEqual(len(messages), 1)
+        html = messages[0].html
+        self.assertIn("<b>Title</b>", html)
+        self.assertIn("<code>falconfox list</code>", html)
+        self.assertIn("<b>bold</b>", html)
+        self.assertIn("<i>italic</i>", html)
+        self.assertIn('<pre><code class="language-python">print(\'a &lt; b\')</code></pre>', html)
+        self.assertIn('<a href="https://example.com/a?x=1&amp;y=2">docs</a>', html)
+        self.assertEqual(messages[0].plain, markdown.strip())
+
+    def test_html_in_agent_text_is_escaped(self):
+        messages = render_messages("compare a<b> with &c and snake_case_name")
+        self.assertEqual(messages[0].html, "compare a&lt;b&gt; with &amp;c and snake_case_name")
+
+    def test_tables_render_monospaced(self):
+        messages = render_messages("| id | name |\n|----|------|\n| 1  | foo  |")
+        self.assertTrue(messages[0].html.startswith("<pre>"))
+
+    def test_long_turns_split_under_the_limit(self):
+        markdown = "\n\n".join(f"paragraph {number} " + "word " * 200
+                               for number in range(20))
+        messages = render_messages(markdown)
+        self.assertGreater(len(messages), 1)
+        for message in messages:
+            self.assertLessEqual(len(message.html), TELEGRAM_MESSAGE_LIMIT)
+
+    def test_giant_code_block_splits_into_multiple_pre_chunks(self):
+        markdown = "```\n" + "\n".join(f"line {number}" for number in range(2000)) + "\n```"
+        messages = render_messages(markdown)
+        self.assertGreater(len(messages), 1)
+        for message in messages:
+            self.assertLessEqual(len(message.html), TELEGRAM_MESSAGE_LIMIT)
+            self.assertTrue(message.html.startswith("<pre>"))
+            self.assertTrue(message.html.endswith("</pre>"))
 
 
 if __name__ == "__main__":

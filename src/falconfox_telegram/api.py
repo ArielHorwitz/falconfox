@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import urllib.error
 import urllib.request
+
+log = logging.getLogger("falconfox.telegram.api")
 
 
 class ApiError(Exception):
@@ -73,11 +76,23 @@ class TelegramApi:
         return await self.call("getUpdates", body)
 
     async def message(self, chat_id: int, text: str) -> None:
-        # Bot API text is capped at 4096 characters. Keep the PoC's one-message
-        # per turn rule by truncating exceptionally long replies.
+        # Bot API text is capped at 4096 characters. Plain sends (notices,
+        # command output, fallbacks) are truncated rather than split.
         if len(text) > 4096:
             text = text[:4080] + "\n…[truncated]"
         await self.call("sendMessage", {"chat_id": chat_id, "text": text})
+
+    async def html_message(self, chat_id: int, html_text: str, plain_fallback: str) -> None:
+        # Telegram rejects the whole message on any HTML entity error, so a
+        # failed formatted send falls back to the plain source text.
+        try:
+            await self.call("sendMessage", {
+                "chat_id": chat_id, "text": html_text, "parse_mode": "HTML",
+                "link_preview_options": {"is_disabled": True},
+            })
+        except ApiError as error:
+            log.warning("HTML send failed (%s); falling back to plain text", error)
+            await self.message(chat_id, plain_fallback)
 
     async def typing(self, chat_id: int) -> None:
         await self.call("sendChatAction", {"chat_id": chat_id, "action": "typing"})

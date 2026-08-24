@@ -10,13 +10,16 @@ built-in "manager" role) as the intelligence that drives it.
 **Decision: pivot this repo into falconfox** (rename + generalize in place), rather
 than starting a new one — see [Repo strategy](#repo-strategy--pivot-in-place).
 
-**Status: open — local PoC implemented; live Telegram acceptance run in progress
-(started 2026-08-24).** The stack works end to end with real credentials; the first
-focus-channel conversation exposed instruction gaps in the focus agent (it
-self-oriented as a work agent until corrected) — transcript and analysis:
-[focus-agent-live-transcript-and-instruction-gaps.md](focus-agent-live-transcript-and-instruction-gaps.md).
-Also filed: replies render as raw markdown because sends lack `parse_mode` —
-[telegram-markdown-parse-mode-finding.md](telegram-markdown-parse-mode-finding.md).
+**Status: open — live Telegram acceptance passed locally (2026-08-24); everything
+is staged for the VPS migration, which is the remaining step.** The live run
+surfaced two findings, **both fixed the same day**: focus-agent instruction gaps
+(transcript and analysis:
+[focus-agent-live-transcript-and-instruction-gaps.md](focus-agent-live-transcript-and-instruction-gaps.md))
+and unrendered markdown replies
+([telegram-markdown-parse-mode-finding.md](telegram-markdown-parse-mode-finding.md)).
+The fixes, the bot's new reconnect loop, and the decisions taken during the
+autonomous run — plus the exact VPS bootstrap checklist — are in
+[afk-run-decisions-and-vps-bootstrap-checklist.md](afk-run-decisions-and-vps-bootstrap-checklist.md).
 
 Implementation and verification details:
 [poc-implementation-and-verification.md](poc-implementation-and-verification.md).

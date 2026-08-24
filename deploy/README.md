@@ -9,8 +9,10 @@ update that could not roll itself back.
 
 ## Prerequisites (once, as root or with sudo)
 
-- git, [uv](https://docs.astral.sh/uv/), Node.js + npm
-- `npm install -g @agentclientprotocol/claude-agent-acp`
+On an apt-based VPS, run `deploy/provision.sh` as root (copy the script over,
+or run the manual equivalent): git, curl, Node.js + npm (>=18),
+[uv](https://docs.astral.sh/uv/), and
+`npm install -g @agentclientprotocol/claude-agent-acp`.
 
 ## Bootstrap (once, as the deploy user)
 
