@@ -1,4 +1,4 @@
 title = "ACP surface: config options (shipped), then slash commands, fork, prompt media, modes, terminal"
-status = "open"
+status = "paused"
 created = "2026-07-16T21:00:43.895269"
 keywords = ["acp", "config-options", "model-selection", "reasoning-effort", "session-modes", "backends", "naming", "slash-commands", "session-fork", "prompt-capabilities", "terminal", "roadmap"]

@@ -7,10 +7,10 @@ converged on a single principle: **every option a backend advertises (model,
 reasoning effort, approval mode, toggles) is handled identically; the model is not
 special.** Implemented and merged to `dev` as commit `35e747f`.
 
-**Status: open.** Config options is the first slice of this case — shipped,
-documented, and written up below. The case stays open as the home for the rest of
-the ACP surface (see [Roadmap](#roadmap--remaining-acp-surface-future-sessions)),
-each item to be picked up in its own session.
+**Status: paused.** Config options and slash commands have shipped, documented, and
+written up below. The remaining ACP surface (see
+[Roadmap](#roadmap--remaining-acp-surface-future-sessions)) is on hold — the threads
+stand ready to be picked up, each in its own session, when work resumes.
 
 ## Background: the ACP finding
 
