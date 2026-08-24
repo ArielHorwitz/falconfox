@@ -1,6 +1,6 @@
 # Keyboard shortcuts
 
-Casebook is fully keyboard-drivable. Bindings live under a `[hotkeys]` table in
+FalconFox is fully keyboard-drivable. Bindings live under a `[hotkeys]` table in
 your [config](README.md); any subset overrides the defaults. The app also shows
 the **active** bindings live — press `?` or click the ⌨ button.
 
@@ -57,7 +57,7 @@ value:
 Notes:
 
 - **Modifier combos aren't supported.** A keypress with Ctrl/Cmd/Alt held is
-  ignored by casebook (left to the browser), so you can't bind `Ctrl+S`.
+  ignored by FalconFox (left to the browser), so you can't bind `Ctrl+S`.
 - **Shortcuts don't fire while you're typing** in an input, textarea, or select —
   so they never collide with prompting. The one exception is Escape, which blurs
   the input.

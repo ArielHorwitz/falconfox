@@ -2,7 +2,6 @@
 __pycache__/
 *.egg-info/
 *.pyc
-.casebook/
 .worktrees/
-src/casebook/_version.py
+src/falconfox/_version.py
 .env

@@ -116,10 +116,10 @@ def global_config_path() -> Path:
 
 
 def echo_backend() -> Backend:
-    """The always-available in-tree echo agent (see casebook.echo_backend)."""
+    """The always-available in-tree echo agent (see falconfox.echo_backend)."""
     return Backend(
         name=ECHO_BACKEND_NAME,
-        command=[sys.executable, "-m", "casebook.echo_backend"],
+        command=[sys.executable, "-m", "falconfox.echo_backend"],
     )
 
 

@@ -1,9 +1,9 @@
 """Build-time hook that stamps the source git commit into the wheel/sdist.
 
 At build time the checkout still has ``.git`` (uv clones it before building), so we
-resolve the commit here and write ``src/casebook/_version.py`` into the artifact. The
+resolve the commit here and write ``src/falconfox/_version.py`` into the artifact. The
 installed package then reports the commit without needing git at runtime. Running from a
-plain checkout (no build) falls back to live git in ``casebook.get_version``.
+plain checkout (no build) falls back to live git in ``falconfox.get_version``.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
-VERSION_FILE = "src/casebook/_version.py"
+VERSION_FILE = "src/falconfox/_version.py"
 
 
 class CustomBuildHook(BuildHookInterface):

@@ -56,16 +56,16 @@ const state = {
   prevUsage: new Map(),  // agent_id → {input_tokens, output_tokens, total_tokens} for computing deltas
 };
 
-// Tab title: "{project} · {label} — casebook" (label omitted on the home page).
+// Tab title: "{project} · {label} — falconfox" (label omitted on the home page).
 // Any part not yet loaded is skipped, so the title fills in as data arrives.
 function updateTitle() {
   let label;
   if (route.mode === "scratch") label = "scratch";
   else if (route.mode === "case") label = state.caseTitle || route.caseId;
   else if (route.mode === "home") label = null;
-  else return void (document.title = "Casebook");  // project browser
+  else return void (document.title = "FalconFox");  // project browser
   const parts = [state.projectName, label].filter(Boolean);
-  document.title = parts.length ? `${parts.join(" · ")} — casebook` : "casebook";
+  document.title = parts.length ? `${parts.join(" · ")} — falconfox` : "falconfox";
 }
 
 const el = (id) => document.getElementById(id);
@@ -1361,7 +1361,7 @@ async function loadUi() {
   for (const [status, color] of Object.entries(ui.case_colors || {})) {
     style.setProperty(`--case-color-${status}`, color);
   }
-  const saved = localStorage.getItem("casebook.sessionWidth");
+  const saved = localStorage.getItem("falconfox.sessionWidth");
   const width = saved || ui.session_width;
   if (width) style.setProperty("--session-width", width);
   state.widthIndex = state.widths.indexOf(width);
@@ -1374,7 +1374,7 @@ function cycleWidth() {
   state.widthIndex = (state.widthIndex + 1 + state.widths.length) % state.widths.length;
   const width = state.widths[state.widthIndex];
   document.documentElement.style.setProperty("--session-width", width);
-  localStorage.setItem("casebook.sessionWidth", width);
+  localStorage.setItem("falconfox.sessionWidth", width);
   toast(`Session width: ${width}`);
 }
 

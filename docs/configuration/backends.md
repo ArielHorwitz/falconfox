@@ -45,7 +45,7 @@ reasoning_effort = "high"
 ## The built-in backend
 
 **`echo`** is the only built-in backend — a tiny in-tree ACP agent
-(`python -m casebook.echo_backend`) that reflects your messages back. It's always
+(`python -m falconfox.echo_backend`) that reflects your messages back. It's always
 available, so the daemon runs with zero setup, but it has no language model (see
 [Naming](#naming)).
 
@@ -81,7 +81,7 @@ reasoning_effort = "high"
 ```
 
 The **keys are option ids** and the **values are choice values** — both defined by
-the backend, not by casebook. Don't guess them: open the ⚙ popover on a running
+the backend, not by FalconFox. Don't guess them: open the ⚙ popover on a running
 session and each row shows a copy-ready snippet (e.g. `reasoning_effort = "high"`)
 for exactly what to paste here. Set the option in the UI to see the value you want,
 then copy the line.

@@ -65,7 +65,7 @@ def _start_daemon(host: str) -> state.ServerInfo:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = open(log_path, "a")  # held by the child
     subprocess.Popen(
-        [sys.executable, "-m", "casebook", "daemon", "--foreground", "--host", host],
+        [sys.executable, "-m", "falconfox", "daemon", "--foreground", "--host", host],
         start_new_session=True,
         stdout=log_file,
         stderr=log_file,

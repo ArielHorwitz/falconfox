@@ -5,7 +5,7 @@ stdio like any real backend, so FalconFox is runnable and developable without a
 model installed. It has no memory and does not support session loading — it
 simply reflects each prompt's text back as an agent message.
 
-Run as ``python -m casebook.echo_backend``; that is exactly the command the
+Run as ``python -m falconfox.echo_backend``; that is exactly the command the
 built-in ``echo`` backend launches.
 """
 

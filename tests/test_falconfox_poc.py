@@ -8,9 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from casebook.cli import CliError, _guard_self_target
-from casebook.coordinator import SessionCoordinator
-from casebook.storage import SessionStore
+from falconfox.cli import CliError, _guard_self_target
+from falconfox.coordinator import SessionCoordinator
+from falconfox.storage import SessionStore
 from falconfox_telegram.api import ApiError, _json_request
 from falconfox_telegram.bot import INTERRUPTED_TURN, BotConfig, FalconFoxTelegramBot
 from falconfox_telegram.rendering import TELEGRAM_MESSAGE_LIMIT, render_messages

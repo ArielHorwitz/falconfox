@@ -5,11 +5,17 @@ session daemon. A session is a working directory plus metadata; the daemon keeps
 the ACP subprocess, transcript, and resume information centrally, without writing
 bookkeeping into the repository where the agent works.
 
-This branch contains the local proof of concept: the flattened daemon and API,
-the `falconfox` CLI control plane, and a separate two-channel Telegram client.
-Remote authentication, voice transcription, and the rebuilt flat-session web UI
-are later milestones. The old web assets are intentionally left unwired during
-the PoC.
+What is here: the flattened daemon and API, the `falconfox` CLI control plane,
+and a separate two-channel Telegram client, deployed and driven from a phone.
+Telegram is the mobile client; the web assets under `src/falconfox/web/` are
+the desktop client and ship unwired, because flattening the session model
+removed the navigation they were built on.
+
+The daemon binds loopback and expects to be reached through a co-located
+client, so remote authentication is not planned — Telegram *is* the remote
+access. Voice input and rewiring the web UI are wanted but deferred; see
+[docs/wishlist.md](docs/wishlist.md) for those and [docs/bugs.md](docs/bugs.md)
+for what is known broken.
 
 ## Install and configure
 
