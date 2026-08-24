@@ -107,3 +107,86 @@ either in the bot or in the daemon's session metadata. Decide where it belongs
 before building it — the falconfox case's layer boundary says the daemon stays
 opinion-light and clients hold the opinions, but "when did this session last
 emit anything" is arguably daemon fact, not client opinion.
+
+## Design direction (user, 2026-08-24)
+
+Three proposals, recorded before they are built. The first two are decisions to
+take; the third changes what the case is really about.
+
+### Two states out of a one-state channel
+
+Spend a second chat action to double the alphabet: **`record_voice` while output
+tokens are streaming**, **`typing` while the agent is working but not
+producing** — waiting on the backend, running a tool, thinking.
+
+This is the right instinct for a channel with no state vocabulary: if the only
+lever is *which* content-type the bot claims to be producing, then use two of
+them and let the difference carry the meaning. It buys the single most valuable
+distinction — *alive and producing* versus *alive and busy* — without any new
+message traffic.
+
+Two things to settle before building it:
+
+- **Which way round?** The proposal maps `typing` to the non-producing state,
+  which inverts the intuitive reading (typing = making text). The argument for
+  the proposal is that `typing` is the unremarkable default, so the *distinctive*
+  "recording voice message…" fires precisely when something notable is
+  happening — and a failed or lapsed indicator degrades to the generic one.
+  The argument against is that a reader who has not been told the mapping will
+  guess the opposite. Both defensible; pick deliberately rather than by
+  accident.
+- **`record_voice` collides with actual voice.** It is the honest action when
+  the reply itself will be a voice message, which is exactly what the deferred
+  voice effort produces. Spending it here is a real cost, not a free reuse.
+  Mitigations if voice lands: move audio to `upload_voice` (recording the
+  reply vs. sending it), or move the streaming indicator to one of the other
+  unused actions — `choose_sticker`, `find_location`, `upload_document`. None
+  is more honest than the others; that is the nature of the channel.
+
+### Flush the reply when the stream stops
+
+Today the bot accumulates `_reply_parts` and sends one message per turn on
+`agent_state: idle`. The proposal: when the output stream stops while the turn
+continues — the agent has moved to a tool call or other non-output work — push
+what has accumulated *immediately*, because with a trustworthy state indicator
+it is now unambiguous that the agent is still working rather than finished.
+
+This is the strongest of the three, and it reframes the case. The other two
+improve a *signal about* progress; this delivers the progress itself. A long
+turn stops feeling dead because real content arrives during it, which is a
+better answer to "is it stuck" than any indicator can be.
+
+**The daemon already emits everything this needs** — checked, not assumed.
+`engine/client.py` normalises ACP session updates into a richer event stream
+than the bot consumes:
+
+- `message` with `role: "agent"` — streamed `agent_message_chunk`s. Consumed.
+- `message` with `role: "thought"` — `agent_thought_chunk`s. **Discarded.**
+- `tool_call` with `tool_call_id`, `title`, `tool_kind`, `status` — from
+  `tool_call` and `tool_call_update`. **Discarded.**
+- `plan`, `commands`, `usage`. **Discarded.**
+
+`_handle_event` returns early on anything that is not `message`, an error
+`notice`, or `agent_state`, so all of it is thrown away today. A `tool_call`
+event arriving while `_reply_parts` is non-empty **is** the "stream stopped,
+turn continues" signal — precise, already delivered, no daemon change required.
+Thought chunks give a third distinguishable state for free, and `title` would
+allow saying *what* the agent is doing.
+
+Constraints this must respect:
+
+- **Suppressing tool calls as content stays.** The falconfox case deliberately
+  chose one message per turn with tool calls hidden, to keep a phone chat
+  readable. Using `tool_call` as a *state signal* is not a reversal of that;
+  rendering tool calls as messages would be. Keep the distinction.
+- **Chat clutter is a first-order concern**, per the same UX notes. A
+  tool-heavy turn could flush many times; debounce, and consider a minimum
+  accumulated length before flushing.
+- **Telegram rate-limits messages per chat** far more tightly than chat
+  actions. A chatty turn is the case where this design is most wanted and most
+  likely to hit limits.
+
+Unlooked-for benefit worth stating: incremental flush shrinks the blast radius
+of the failure that motivated finding 7 of the phone session, where a dropped
+connection silently discarded a whole turn's accumulated reply. Text already
+delivered cannot be lost.
