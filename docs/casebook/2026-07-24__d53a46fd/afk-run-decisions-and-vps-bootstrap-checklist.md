@@ -87,6 +87,37 @@ file is that report. Everything below is implemented, tested, committed on the
    --detach-restart` from any session (rollback is automatic on a failed
    health check; forensics in `~/.local/state/falconfox/update.log`).
 
+## Bootstrap executed (2026-08-24, delegated)
+
+The user delegated the bootstrap itself; it is **done** — falconfox runs on
+`lemcel` (Ubuntu 22.04) under systemd user units with linger, and the full
+update loop was proven live. Deviations/additions from the checklist above:
+
+- Node was absent and Ubuntu 22.04's candidate is node 12; `provision.sh` now
+  installs NodeSource node 22 automatically (and avoids the distro `npm`
+  package, which conflicts with NodeSource's bundled npm).
+- A VPS ed25519 key was generated and registered to the user's GitHub account
+  ("lemcel (falconfox)", approved by the user); push access verified. Git
+  identity configured.
+- The first boot flushed out three real bugs, all fixed through the update
+  loop itself (`update.sh` on the VPS pulling from the laptop):
+  1. **Python floor was wrong** — code imports `tomllib` (3.11+) but
+     `requires-python` said 3.10, and Ubuntu 22.04's system Python is 3.10:
+     instant crash. Floor bumped to 3.11; uv provisions a managed 3.13.
+  2. **Deploy re-locking** — `uv sync` rewrote `uv.lock` on the VPS (different
+     uv version), dirtying the deploy checkout and tripping the update guard.
+     Deploy scripts now use `uv sync --frozen`.
+  3. **CLI discovery broken under systemd** — `serve()` writes `server.json`
+     only with the `FALCONFOX_DAEMON=1` marker, which only the detached
+     spawner set. The unit now sets it (journald keeps console logging).
+- The rollback path executed for real once. Notable: rolling back code does
+  not roll back the interpreter (the venv kept Python 3.13, so the "broken"
+  old revision ran fine after rollback). Also, a rollback is useless when the
+  baseline itself never worked — bootstrap-day special, not a loop flaw.
+- Verified on the VPS: `falconfox list` discovery, a claude-backend session
+  round-trip (proves the OAuth token), Telegram bot polling, linger, push
+  access, and a clean `update.sh` no-op run.
+
 ## Known-open items (not blockers)
 
 - Voice, remote CLI/web access, and the rebuilt web UI remain deferred as

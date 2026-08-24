@@ -10,8 +10,8 @@ built-in "manager" role) as the intelligence that drives it.
 **Decision: pivot this repo into falconfox** (rename + generalize in place), rather
 than starting a new one — see [Repo strategy](#repo-strategy--pivot-in-place).
 
-**Status: open — live Telegram acceptance passed locally (2026-08-24); everything
-is staged for the VPS migration, which is the remaining step.** The live run
+**Status: open — deployed and live on the VPS (`lemcel`) as of 2026-08-24; the
+remaining step is the user's first real phone-driven session, then closing.** The live run
 surfaced two findings, **both fixed the same day**: focus-agent instruction gaps
 (transcript and analysis:
 [focus-agent-live-transcript-and-instruction-gaps.md](focus-agent-live-transcript-and-instruction-gaps.md))
