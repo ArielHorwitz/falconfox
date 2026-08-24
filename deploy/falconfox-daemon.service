@@ -5,6 +5,10 @@ Description=FalconFox session daemon
 # The unit is the managed singleton: the marker makes serve() write
 # server.json (CLI discovery) and log to the console for journald.
 Environment=FALCONFOX_DAEMON=1
+# Agent sessions inherit this environment, so ~/.local/bin (where setup.sh
+# shims the CLI) must be on it for an agent to invoke `falconfox` by name.
+# It has to be set here: systemd ignores PATH set via environment.d.
+Environment=PATH=@HOME@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
 ExecStart=@REPO@/.venv/bin/falconfox daemon --foreground
 Restart=always
 RestartSec=2

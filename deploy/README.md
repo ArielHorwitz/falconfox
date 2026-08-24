@@ -27,7 +27,22 @@ cp ~/falconfox/deploy/config.example.toml ~/.config/falconfox/config.toml
 ```
 
 `setup.sh` is idempotent: it syncs the venv, installs and starts both units,
+symlinks the `falconfox` / `falconfox-telegram` CLIs into `~/.local/bin`,
 enables lingering (so units run without a login session), and health-checks.
+
+Then install the agent skills, which is what makes sessions able to run the
+casebook workflow and drive the daemon:
+
+```sh
+git clone https://github.com/ArielHorwitz/agent-skills ~/agent-skills
+~/agent-skills/install.sh        # -> ~/.agents/skills
+~/agent-skills/fix-claude.sh ~   # ~/.claude/skills -> ../.agents/skills
+```
+
+Skills live outside the deploy checkout because they are the user's, not the
+deployment's — `setup.sh` deliberately does not install them. The
+`fix-claude.sh` bridge is required for Claude-backed sessions, which only read
+`.claude/`. Update path: `git pull` in the clone, then `install.sh --upgrade`.
 
 Notes:
 
@@ -35,6 +50,11 @@ Notes:
   Telegram allows one `getUpdates` consumer per token and gives the rest 409s.
 - To **push** work from VPS sessions, the deploy user needs a GitHub-registered
   SSH key and git identity (`user.name` / `user.email`).
+- The CLI is **not** on PATH by default. `setup.sh` shims it into
+  `~/.local/bin` (which the stock Ubuntu `~/.profile` adds for login shells),
+  and the daemon unit sets `Environment=PATH` so agent sessions — which
+  inherit the daemon's environment — can invoke `falconfox` by name. PATH
+  cannot be set via `environment.d`; systemd ignores that one variable.
 - The clone location is free (units are rendered with the real path); `-b
   falconfox` pins the deploy branch — switching the checkout's branch later
   changes what `update.sh` follows.

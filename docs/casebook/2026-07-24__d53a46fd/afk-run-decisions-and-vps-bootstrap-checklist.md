@@ -118,6 +118,56 @@ update loop was proven live. Deviations/additions from the checklist above:
   round-trip (proves the OAuth token), Telegram bot polling, linger, push
   access, and a clean `update.sh` no-op run.
 
+## Post-bootstrap gaps found from the first VPS session (2026-08-24)
+
+The first Telegram-driven VPS session hit two things the bootstrap never
+covered. Both are fixed; both were invisible on the laptop, where the
+environment had accumulated by hand.
+
+1. **No agent skills were installed on the VPS.** `~/.agents/skills` did not
+   exist, so no session could run the casebook workflow or the falconfox
+   driving instructions — the very layers the case argues carry the work.
+   Invoking `/casebook` in a VPS session simply failed. The bootstrap
+   checklist had no skills step because on the laptop they were already there.
+   Fixed by cloning
+   [agent-skills](https://github.com/ArielHorwitz/agent-skills) to
+   `~/agent-skills` and running `install.sh` + `fix-claude.sh ~` (the latter
+   bridges `~/.claude/skills -> ../.agents/skills`, which Claude-backed
+   sessions need). Now a documented bootstrap step. Deliberately *not*
+   automated in `setup.sh`: skills are the user's, not the deployment's —
+   which is the same layer boundary the case defends everywhere else.
+
+2. **The `falconfox` CLI was not on PATH.** It only existed as
+   `~/falconfox/.venv/bin/falconfox`, so the skill's and the focus agent's
+   instructions to run `falconfox list` / `spawn` would fail for any session
+   that did not know the venv path. Two halves to the fix, because there are
+   two kinds of consumer:
+   - `setup.sh` now symlinks both entry points into `~/.local/bin`, which
+     stock Ubuntu's `~/.profile` already puts on PATH for **login shells**
+     (SSH).
+   - **Agent sessions** inherit their environment from the daemon process, so
+     they needed the daemon unit itself changed: `Environment=PATH=…`, with the
+     home path templated in as `@HOME@` alongside the existing `@REPO@`.
+
+   Two systemd gotchas are worth recording, both verified on systemd 249 rather
+   than assumed:
+   - **`environment.d` cannot set `PATH`.** An identical
+     `PATH2=$HOME/.local/bin:$PATH` line in the same file expands correctly
+     while the `PATH=` line is silently dropped. The unit's `Environment=` is
+     the only persistent user-level lever.
+   - **`%h` did not expand** in a transient unit's `Environment=`, arriving in
+     the process as a literal `%h`. Hence templating the real path at install
+     time instead — which also matches how the unit already gets `@REPO@`.
+     Verified by running the exact rendered PATH under `systemd-run --user`:
+     `falconfox` resolves from `~/.local/bin` and `claude-agent-acp` is still
+     found in `/usr/bin`.
+
+   Consequence worth noting for the dogfooding loop: a PATH change in the unit
+   only reaches sessions after a **daemon restart**, which kills the requesting
+   agent's own turn — so it lands via `update.sh --detach-restart` like any
+   other change, and the session that asked for it is not the session that
+   sees it.
+
 ## Known-open items (not blockers)
 
 - Voice, remote CLI/web access, and the rebuilt web UI remain deferred as
