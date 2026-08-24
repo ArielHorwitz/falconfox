@@ -83,6 +83,11 @@ re-rendered on every update). Everything is appended to
 update went quiet. Deeper forensics: `journalctl --user -u falconfox-daemon`
 / `-u falconfox-telegram`, and `~/.local/state/falconfox/falconfox.log`.
 
+A restart step that fails is logged and does **not** abort the update — the
+health check and rollback are what recover from it. This matters for unit-file
+changes specifically: a malformed unit makes `systemctl restart` exit non-zero,
+which under `set -e` would otherwise skip rollback entirely.
+
 Known limits: the health check can miss a bot that crashes slowly (it samples
 `is-active` once after a settle delay), and an in-flight turn at restart time
 is always lost. Stored sessions resume with transcripts intact; the bot reuses

@@ -168,6 +168,22 @@ environment had accumulated by hand.
    other change, and the session that asked for it is not the session that
    sees it.
 
+3. **The rollback had a hole, found while assessing the risk of shipping the
+   above.** `update.sh`'s `restart_services()` ran under `set -euo pipefail`,
+   so a non-zero `systemctl restart` aborted the script *before* the health
+   check — and therefore before the rollback. Tested with throwaway canary
+   units, the two failure modes diverge:
+   - a unit that **loads but whose process fails** → `restart` exits 0 →
+     health check fails → rollback runs (the path exercised on bootstrap day);
+   - a unit that **fails to load** → `restart` exits 1 → script aborted, no
+     rollback, daemon down.
+
+   The uncovered mode was exactly the one a unit-file change can cause, which
+   is what this very change was. Both restart steps (and the rollback's own
+   checkout/sync) now log and carry on instead of aborting, so `healthy()`
+   always gets to decide. Worth stating as a principle: **the recovery path
+   must not be reachable only along the success path.**
+
 ## Known-open items (not blockers)
 
 - Voice, remote CLI/web access, and the rebuilt web UI remain deferred as

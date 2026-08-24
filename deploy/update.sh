@@ -27,9 +27,14 @@ log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
 mkdir -p "$STATE_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
+# Neither step may abort the script: a unit file that fails to load makes
+# `systemctl restart` exit non-zero, and under `set -e` that would skip the
+# health check and the rollback -- losing recovery for exactly the kind of
+# change (a broken unit) that needs it most. Fail loudly, carry on, let
+# healthy() decide.
 restart_services() {
-    "$REPO/deploy/setup.sh" install-units
-    systemctl --user restart "${UNITS[@]}"
+    "$REPO/deploy/setup.sh" install-units || log "install-units FAILED"
+    systemctl --user restart "${UNITS[@]}" || log "systemctl restart FAILED"
 }
 
 healthy() {
@@ -73,7 +78,8 @@ restart_phase() {
         return 0
     fi
     log "UNHEALTHY — rolling back to $rollback_to"
-    (cd "$REPO" && git reset --hard "$rollback_to" && uv sync --frozen)
+    (cd "$REPO" && git reset --hard "$rollback_to" && uv sync --frozen) \
+        || log "rollback checkout/sync FAILED -- restarting anyway"
     restart_services
     if healthy; then
         log "rolled back to $rollback_to and recovered"
