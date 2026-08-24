@@ -11,7 +11,16 @@ built-in "manager" role) as the intelligence that drives it.
 than starting a new one — see [Repo strategy](#repo-strategy--pivot-in-place).
 
 **Status: open — deployed and live on the VPS (`lemcel`) as of 2026-08-24; the
-remaining step is the user's first real phone-driven session, then closing.** The live run
+remaining step is the user's first real phone-driven session, then closing.**
+
+**Handoff (2026-08-24):** the laptop session that built and deployed the PoC is
+closed; from here the case advances **from VPS sessions driven via Telegram**.
+The single source of truth is the **`falconfox` branch on origin** — the VPS
+deploy checkout (`~/falconfox` on `lemcel`) follows it via `deploy/update.sh`,
+and the laptop's `.worktrees/falconfox` is a mirror, not an active workplace.
+Keep active work on one side at a time (VPS now); `dev` was pushed at the
+handoff so nothing lives only on the laptop. Eventual closing includes merging
+`falconfox` back to the trunk. The live run
 surfaced two findings, **both fixed the same day**: focus-agent instruction gaps
 (transcript and analysis:
 [focus-agent-live-transcript-and-instruction-gaps.md](focus-agent-live-transcript-and-instruction-gaps.md))
