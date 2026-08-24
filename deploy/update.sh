@@ -25,7 +25,17 @@ UNITS=(falconfox-daemon.service falconfox-telegram.service)
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
 
 mkdir -p "$STATE_DIR"
+# When a detached restart exits, systemd tears down the service cgroup and
+# kills tee -- often before it has been scheduled to read the last chunk out
+# of the pipe, silently losing the tail of the log. That tail is the one
+# record saying whether the health check passed or a rollback ran. Observed
+# for real: a restart logged "restarting services" and nothing after it, on a
+# deployment that was in fact healthy. Closing the fds and waiting for tee to
+# drain fixes it (10/10 in a canary; line-buffering alone was 1/5 -- the race
+# is tee reading the pipe, not tee flushing its output).
 exec > >(tee -a "$LOG_FILE") 2>&1
+tee_pid=$!
+trap 'exec 1>&- 2>&-; wait "$tee_pid" 2>/dev/null || true' EXIT
 
 # Neither step may abort the script: a unit file that fails to load makes
 # `systemctl restart` exit non-zero, and under `set -e` that would skip the

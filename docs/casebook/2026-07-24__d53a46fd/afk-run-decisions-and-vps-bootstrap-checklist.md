@@ -184,6 +184,17 @@ environment had accumulated by hand.
    always gets to decide. Worth stating as a principle: **the recovery path
    must not be reachable only along the success path.**
 
+4. **The update log lost its tail** — found when the deploy above restarted
+   cleanly but logged `restarting services` and nothing after it, in neither
+   the log file nor journald, on a deployment that was verifiably healthy.
+   Cause: `exec > >(tee -a "$LOG_FILE")`. When the script exits, systemd tears
+   down the transient unit's cgroup and kills `tee` before it has read the last
+   chunk out of the pipe. Note the race is `tee` **reading**, not `tee`
+   flushing: a canary run ten times scored 1/5 with `stdbuf -oL` but 10/10 once
+   the script closes its fds and `wait`s for `tee` to drain. Worth flagging
+   because the log is the only forensic record when an update goes quiet — a
+   rollback that ran and left no trace is nearly as bad as one that never ran.
+
 ## Known-open items (not blockers)
 
 - Voice, remote CLI/web access, and the rebuilt web UI remain deferred as
