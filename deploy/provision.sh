@@ -16,14 +16,20 @@ if ! command -v apt-get >/dev/null; then
 fi
 
 apt-get update
-apt-get install -y git curl ca-certificates nodejs npm
+apt-get install -y git curl ca-certificates
 
-node_major="$(node --version | sed 's/^v\([0-9]*\).*/\1/')"
-if [[ "$node_major" -lt 18 ]]; then
-    echo "error: node $(node --version) is too old for claude-agent-acp (need >=18)." >&2
-    echo "Use NodeSource (https://github.com/nodesource/distributions) and re-run." >&2
-    exit 1
+node_major=0
+if command -v node >/dev/null; then
+    node_major="$(node --version | sed 's/^v\([0-9]*\).*/\1/')"
 fi
+if [[ "$node_major" -lt 18 ]]; then
+    # Distro node is missing or too old for claude-agent-acp — use NodeSource.
+    # NodeSource's nodejs bundles npm; do NOT install the distro npm package
+    # alongside it (conflicting dependencies).
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    apt-get install -y nodejs
+fi
+command -v npm >/dev/null || apt-get install -y npm
 
 npm install -g @agentclientprotocol/claude-agent-acp
 

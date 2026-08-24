@@ -3,7 +3,7 @@ name = "casebook"
 version = "0.1.0"
 description = "A small vendor-neutral ACP session daemon for remote agent work."
 readme = "README.md"
-requires-python = ">=3.10,<3.15"
+requires-python = ">=3.11,<3.15"
 dependencies = [
     "agent-client-protocol>=0.10.1",
     "starlette>=0.37",
