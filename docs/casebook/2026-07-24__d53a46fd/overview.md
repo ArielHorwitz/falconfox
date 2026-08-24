@@ -10,8 +10,20 @@ built-in "manager" role) as the intelligence that drives it.
 **Decision: pivot this repo into falconfox** (rename + generalize in place), rather
 than starting a new one — see [Repo strategy](#repo-strategy--pivot-in-place).
 
-**Status: open — deployed and live on the VPS (`lemcel`) as of 2026-08-24; the
-remaining step is the user's first real phone-driven session, then closing.**
+**Status: open — deployed and live on the VPS (`lemcel`) as of 2026-08-24, and
+now advancing from phone-driven VPS sessions.** The first such session ran the
+same day and did real work end to end — five fixes designed, built, tested,
+deployed and verified entirely from Telegram, including two self-updates of
+falconfox from inside a falconfox session. That is the case's central claim
+demonstrated rather than argued. Findings and the deploy procedure that
+emerged:
+[first-phone-session-environment-gaps-and-update-loop-hardening.md](first-phone-session-environment-gaps-and-update-loop-hardening.md).
+
+**Still open before closing:** voice (deferred by design); the focus-channel
+*switching* flow, which no session has deliberately exercised yet (spawning,
+real work, and resume-after-daemon-restart are all now demonstrated — this
+session survived two restarts and resumed both times); and merging the
+`falconfox` branch back to the trunk.
 
 **Handoff (2026-08-24):** the laptop session that built and deployed the PoC is
 closed; from here the case advances **from VPS sessions driven via Telegram**.

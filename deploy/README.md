@@ -44,6 +44,12 @@ deployment's — `setup.sh` deliberately does not install them. The
 `fix-claude.sh` bridge is required for Claude-backed sessions, which only read
 `.claude/`. Update path: `git pull` in the clone, then `install.sh --upgrade`.
 
+The `casebook` skill's CLI needs `python3` to be 3.11+ (it imports `tomllib`).
+Ubuntu 22.04's `python3` is 3.10, so shim a modern one onto PATH ahead of it:
+`ln -sfn /usr/bin/python3.12 ~/.local/bin/python3`. This does not touch
+`/usr/bin/python3`; it does mean sessions no longer see apt's `python3-*`
+modules, which nothing here depends on.
+
 Notes:
 
 - **Stop any other poller on the same bot token first** (e.g. the laptop bot):

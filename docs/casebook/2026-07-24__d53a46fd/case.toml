@@ -1,4 +1,6 @@
 title = "falconfox: remote ACP session daemon with agent-managed sessions (casebook as a layer)"
 status = "open"
 created = "2026-07-24T09:48:01.655418"
-keywords = ["falconfox", "daemon", "acp", "remote", "vps", "telegram", "telegram-bot", "voice", "session-management", "ephemeral-sessions", "focus-pointer", "cli", "casebook-skill", "repo-pivot", "vendor-agnostic", "poc"]
+keywords = ["falconfox", "daemon", "acp", "remote", "vps", "telegram", "telegram-bot", "voice", "session-management", "ephemeral-sessions", "focus-pointer", "cli", "casebook-skill", "repo-pivot", "vendor-agnostic", "poc", "agent-skills",
+            "systemd", "deployment", "update-loop", "rollback", "self-update",
+            "typing-indicator", "dogfooding"]
