@@ -294,9 +294,20 @@ class FalconFoxTelegramBot:
             return True
         return False
 
+    def _start_typing(self, session_id: str, chat_id: int) -> None:
+        if session_id not in self._typing_tasks:
+            self._typing_tasks[session_id] = asyncio.create_task(
+                self._typing_loop(chat_id))
+
     async def _forward(self, session_id: str, chat_id: int, text: str) -> None:
         self._turn_chat[session_id] = chat_id
         self._reply_parts[session_id] = []
+        # Type from the moment the prompt goes out. Waiting for the daemon to
+        # report `working` leaves the whole backend-startup window silent: a
+        # stored session resumes an ACP subprocess first, and the daemon carries
+        # that as a `starting` state on session_updated, which this client does
+        # not consume. That gap is exactly when a turn looks like it hung.
+        self._start_typing(session_id, chat_id)
         async with self._ws_lock:
             await self._ws.send(json.dumps({
                 "action": "send", "session_id": session_id, "text": text,
@@ -325,9 +336,11 @@ class FalconFoxTelegramBot:
         if session_id == self.focus_session_id:
             self._focus_working = state == "working"
         if state == "working":
+            # Normally already typing since _forward; this covers a turn that
+            # began before the indicator did.
             chat_id = self._turn_chat.get(session_id)
-            if chat_id and session_id not in self._typing_tasks:
-                self._typing_tasks[session_id] = asyncio.create_task(self._typing_loop(chat_id))
+            if chat_id:
+                self._start_typing(session_id, chat_id)
             return
         if state != "idle":
             return

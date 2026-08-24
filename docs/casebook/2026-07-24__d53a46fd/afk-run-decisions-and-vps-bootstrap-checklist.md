@@ -195,6 +195,21 @@ environment had accumulated by hand.
    because the log is the only forensic record when an update goes quiet — a
    rollback that ran and left no trace is nearly as bad as one that never ran.
 
+5. **"typing…" did not cover the whole turn** — user-reported from the
+   phone, and a miss against the PoC's own success criterion that a long
+   turn should show typing rather than appear to hang. The bot started the
+   indicator on the daemon's `agent_state: working`, which only arrives once
+   the backend is already producing. A stored session first resumes an ACP
+   subprocess, and the daemon carries *that* as `state: starting` on
+   `session_updated` — an event this client does not consume at all. So the
+   entire startup/resume window, the slowest part of a cold turn, was silent.
+   Fixed by starting the indicator in `_forward()` when the prompt is sent,
+   with the `working` handler kept as an idempotent safety net.
+
+   Rejected while fixing: cancelling typing on an error notice. `_warn_option`
+   emits `level: "error"` for non-terminal problems (a config option that
+   would not apply), so that would kill the indicator on turns that are fine.
+
 ## Known-open items (not blockers)
 
 - Voice, remote CLI/web access, and the rebuilt web UI remain deferred as

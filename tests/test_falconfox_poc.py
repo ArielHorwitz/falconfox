@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -125,6 +126,38 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(fake.messages, [])
             self.assertEqual(fake.html_messages,
                              [(20, "hello <b>world</b>", "hello **world**")])
+
+
+    async def test_typing_starts_when_the_prompt_is_sent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = FalconFoxTelegramBot(BotConfig(
+                "token", 10, 20, pointer_file=Path(directory, "focus"),
+                default_path=Path(directory),
+            ))
+            fake = FakeTelegram()
+            bot.telegram = fake
+            sent = []
+
+            class FakeWebSocket:
+                async def send(self, payload):
+                    sent.append(json.loads(payload))
+
+            bot._ws = FakeWebSocket()
+            await bot._forward("session", 20, "do the thing")
+            await asyncio.sleep(0)
+            # Typing is live before the daemon has reported any state at all --
+            # the backend may still be starting up or resuming.
+            self.assertEqual(fake.typing_chats, [20])
+            self.assertEqual(sent, [{"action": "send", "session_id": "session",
+                                     "text": "do the thing"}])
+            # A later `working` event must not start a second typing loop.
+            await bot._handle_event({"type": "agent_state", "session_id": "session",
+                                     "state": "working"})
+            await asyncio.sleep(0)
+            self.assertEqual(fake.typing_chats, [20])
+            await bot._handle_event({"type": "agent_state", "session_id": "session",
+                                     "state": "idle"})
+            self.assertEqual(bot._typing_tasks, {})
 
 
 class RenderingTests(unittest.TestCase):
