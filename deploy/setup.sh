@@ -51,7 +51,7 @@ if grep -q "paste-token-here" "$CONFIG_DIR/config.toml"; then
     exit 1
 fi
 
-(cd "$REPO" && uv sync)
+(cd "$REPO" && uv sync --frozen)
 install_units
 systemctl --user enable --now "${UNITS[@]}"
 loginctl enable-linger "$USER" 2>/dev/null \

@@ -60,7 +60,7 @@ apply_update() {
         log "already up to date at $previous_revision — nothing to do"
         exit 0
     fi
-    uv sync
+    uv sync --frozen
     log "updated $previous_revision -> $(git rev-parse HEAD)"
 }
 
@@ -73,7 +73,7 @@ restart_phase() {
         return 0
     fi
     log "UNHEALTHY — rolling back to $rollback_to"
-    (cd "$REPO" && git reset --hard "$rollback_to" && uv sync)
+    (cd "$REPO" && git reset --hard "$rollback_to" && uv sync --frozen)
     restart_services
     if healthy; then
         log "rolled back to $rollback_to and recovered"
