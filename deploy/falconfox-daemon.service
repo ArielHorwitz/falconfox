@@ -2,6 +2,9 @@
 Description=FalconFox session daemon
 
 [Service]
+# The unit is the managed singleton: the marker makes serve() write
+# server.json (CLI discovery) and log to the console for journald.
+Environment=FALCONFOX_DAEMON=1
 ExecStart=@REPO@/.venv/bin/falconfox daemon --foreground
 Restart=always
 RestartSec=2
