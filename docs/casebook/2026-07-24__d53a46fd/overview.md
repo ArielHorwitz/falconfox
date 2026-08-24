@@ -12,27 +12,39 @@ than starting a new one — see [Repo strategy](#repo-strategy--pivot-in-place).
 
 **Status: open — deployed and live on the VPS (`lemcel`) as of 2026-08-24, and
 now advancing from phone-driven VPS sessions.** The first such session ran the
-same day and did real work end to end — five fixes designed, built, tested,
-deployed and verified entirely from Telegram, including two self-updates of
-falconfox from inside a falconfox session. That is the case's central claim
-demonstrated rather than argued. Findings and the deploy procedure that
-emerged:
+same day and did real work end to end — seven findings raised and fixed,
+designed, built, tested, deployed and verified entirely from Telegram,
+including two self-updates of falconfox from inside a falconfox session. That
+is the case's central claim demonstrated rather than argued. Findings and the
+deploy procedure that emerged:
 [first-phone-session-environment-gaps-and-update-loop-hardening.md](first-phone-session-environment-gaps-and-update-loop-hardening.md).
 
-**Still open before closing:** voice (deferred by design); the focus-channel
-*switching* flow, which no session has deliberately exercised yet (spawning,
-real work, and resume-after-daemon-restart are all now demonstrated — this
-session survived two restarts and resumed both times); and merging the
-`falconfox` branch back to the trunk.
+**Deploy state:** the VPS runs `9d5535f` — every fix from the first phone
+session is live. `update.log` shows three staged deploys that day, the last
+landing `healthy at revision 9d5535f` at 14:53:32, with `falconfox-daemon` and
+`falconfox-telegram` both running from that restart. Note the unit names are
+`falconfox-daemon` / `falconfox-telegram`; there is no unit called plain
+`falconfox`, and `systemctl --user is-active falconfox` therefore reports
+`inactive` on a perfectly healthy host.
 
-**Handoff (2026-08-24):** the laptop session that built and deployed the PoC is
-closed; from here the case advances **from VPS sessions driven via Telegram**.
-The single source of truth is the **`falconfox` branch on origin** — the VPS
-deploy checkout (`~/falconfox` on `lemcel`) follows it via `deploy/update.sh`,
-and the laptop's `.worktrees/falconfox` is a mirror, not an active workplace.
-Keep active work on one side at a time (VPS now); `dev` was pushed at the
-handoff so nothing lives only on the laptop. Eventual closing includes merging
-`falconfox` back to the trunk. The live run
+**Direction set 2026-08-24: this case closes once its open items are
+addressed.** It is not a standing log for dogfooding findings — the thesis is
+demonstrated, so the remaining work is to commit to the pivot (rename
+everywhere, merge to the trunk) and dispose of every open thread explicitly.
+The closing checklist, including the items that need a decision rather than
+code, is in
+[Finalizing the pivot](#finalizing-the-pivot-2026-08-24).
+
+**Migration complete (2026-08-24):** the laptop is no longer a workplace for
+this project at all — development happens **exclusively from Telegram**, in
+sessions running on the VPS. This is not a handoff to be managed but a
+finished move, and it removes the concurrent-mutation hazard entirely: there
+is only one side now. The single source of truth is the **`falconfox` branch
+on origin**, and the working tree is the VPS deploy checkout (`~/falconfox` on
+`lemcel`) itself — the same tree `deploy/update.sh` fast-forwards, which means
+**a session must commit and push its work before triggering an update**, or
+the update meets a dirty tree. `dev` was pushed before the move so nothing
+lives only on the laptop. The live run
 surfaced two findings, **both fixed the same day**: focus-agent instruction gaps
 (transcript and analysis:
 [focus-agent-live-transcript-and-instruction-gaps.md](focus-agent-live-transcript-and-instruction-gaps.md))
@@ -50,10 +62,128 @@ user units for daemon + bot, one-command bootstrap (`setup.sh`), and a self-upda
 script (`update.sh`) with health check and automatic rollback, designed for the
 dogfooding goal that after one manual clone the *only* interface is Telegram —
 including updating falconfox itself from inside a falconfox session
-(`--detach-restart` schedules the restart after the agent's turn ends). Finding
-folded into the design rather than fixed in code: the bot has **no websocket
-reconnect loop**, so every daemon restart kills it — `Restart=always` in the unit
-compensates; a reconnect loop remains a worthwhile future hardening.
+(`--detach-restart` schedules the restart after the agent's turn ends). A
+finding first folded into the design rather than fixed — the bot had **no
+websocket reconnect loop**, so every daemon restart killed it and
+`Restart=always` compensated — was **since fixed in code**: `bot.py` reconnects
+on a lost daemon connection, and this session survived two restarts on it.
+Finding 7 of the phone session is the sequel: the reconnect loop made restarts
+survivable but silently discarded the turn in flight, so it now tells the chat
+its reply is gone.
+
+## Finalizing the pivot (2026-08-24)
+
+The PoC is done and live, so the case's remaining work is to **commit to the
+pivot and then close**. The name is the last thing making it look provisional.
+
+**1. Complete the rename.** Build order item 1 deliberately deferred the "full
+package rename" and renamed only the CLI entry point. The surviving surface is
+small and mechanical — the runtime state paths are *already* `falconfox`
+(`$XDG_CONFIG_HOME/falconfox`, `$XDG_STATE_HOME/falconfox/sessions`) and so are
+the systemd units, so nothing a running deployment depends on moves:
+
+- `src/casebook/` → `src/falconfox/`, and the imports and `python -m` targets
+  that reference it (`cli.py`, `__main__.py`, `config.py`, `echo_backend.py`,
+  `tests/test_falconfox_poc.py`).
+- `pyproject.toml`: `name = "casebook"` → `falconfox`; the `[project.scripts]`
+  target and `[tool.hatch...].packages`.
+- `hatch_build.py`: the `_version.py` path it writes.
+- `.gitignore`: `.casebook/` and `src/casebook/_version.py`.
+- `docs/configuration/{backends,hotkeys}.md`: prose still says "casebook".
+- `deploy/README.md`: the clone URL, and the prose distinguishing the project
+  from the casebook skill.
+- The web UI (`src/casebook/web/static/`) still brands itself "Casebook" in
+  `index.html`, `app.js` titles, and a `casebook.sessionWidth` localStorage
+  key. Rename it with the rest — see the note on its future below.
+
+**`docs/casebook/` and the skill keep their name — they are not part of this
+rename.** The point of this case is that they were never part of this project.
+The casebook workflow turned out to be better expressed as a skill independent
+of any UI or session manager; it was extracted successfully, and *that* is what
+freed this repo to become a remote session manager. falconfox is now
+**independent of casebook**. It merely happens to be developed by someone who
+uses the casebook skill — as they would on any project. After the rename, every
+remaining occurrence of "casebook" in the tree should refer to the workflow and
+none to the daemon, which makes the boundary greppable.
+
+**Requires the user, not an agent:** renaming the GitHub repo
+`ArielHorwitz/casebook` → `falconfox`, then updating the deploy checkout's
+remote on `lemcel` and the clone URL in `deploy/README.md`. GitHub redirects
+the old name, so this can trail the code rename safely.
+
+**2. Merge `falconfox` to the trunk.** Here the usual "delivery is plumbing"
+rule does not apply: the pivot *is* this case's subject (build order item 1),
+so landing it on `master` is the act that makes the pivot real rather than a
+long-lived branch. It is a **clean fast-forward** — `origin/master`,
+`origin/dev` and the merge-base are all `a222a8c`, with `falconfox` 29 ahead
+and 0 behind — so the only real work is the rename, and the merge is its
+punctuation. Do the rename first, so the trunk receives the project under its
+final name in one move.
+
+**3. Restart falconfox, then close.** The user wants a restart once the case's
+work is done. A rename changes the installed package, so it is the largest
+deploy since bootstrap and exactly the "fails to load" mode the update loop was
+just hardened against — a genuine test of the repaired rollback. It must go out
+as a detached restart, since the session requesting it is killed by it.
+
+### The web UI is not dead code — it is the desktop client
+
+Earlier notes treat `src/casebook/web/static/` as unwired residue. Reframed:
+the web UI is the **desktop client**, the counterpart to Telegram as the
+**mobile client**. Rewiring it onto the flat session model is a **separate
+effort and out of this case's scope**, because Telegram is already *enough* to
+dogfood falconfox while developing it — which is the standard this case set for
+itself and met. So the UI gets renamed with everything else and left unwired,
+deliberately, as a starting point for that later effort rather than as debt.
+
+### Closing checklist
+
+Code and delivery:
+
+- [ ] Rename the package and every reference above.
+- [ ] Fast-forward `master` to `falconfox`.
+- [ ] Deploy and restart (detached), verify healthy, confirm rollback was not
+      needed.
+- [ ] GitHub repo rename + remote/clone-URL fixes (user).
+
+**Where deferred work goes.** Two new files, [docs/wishlist.md](../../wishlist.md)
+and [docs/bugs.md](../../bugs.md), now hold what this case pushes forward —
+missing things and broken things respectively. They exist so that closing the
+case does not lose the work it deliberately chose not to do: an item there has
+been *decided against for now, with the reason*, rather than forgotten. This is
+what makes closing honest instead of a way of dropping threads.
+
+Open threads, all now disposed of:
+
+- **Focus-channel switching — verified working.** The last unproven claim in
+  the PoC's own success criterion, confirmed in use rather than in a test.
+  One feedback item came with it and was fixed rather than filed: the focus
+  agent refused to rename or delete sessions, insisting that belonged in a work
+  session. That was the instructions being narrower than the design — the chat
+  is a **session manager**, and focus is one of the things it manages, not the
+  whole of it. Both constraints were widened (the packaged skill and the
+  orientation message in `bot.py`), keeping the one boundary that matters: it
+  manages sessions, it never works inside them. Destructive ops read the target
+  back first, per the case's own note that voice transcription is lossy and a
+  delete has no undo.
+- **Voice — deferred, deliberately, and moved to the wishlist.** Wanted; not a
+  blocker. Its own effort now, like the desktop client, rather than an
+  unfinished corner of this case.
+- **Remote access (bind off-loopback + bearer token) — dropped.** Listed as
+  daemon feature 2 and "the genuinely new capability vs. the current code", but
+  the deployment binds `127.0.0.1:9721` and needs nothing more, because the
+  Telegram bot is **co-located with the daemon**. Telegram *is* the remote
+  access. A headline feature deleted by the design rather than built — recorded
+  under "deliberately not planned" in the wishlist so it is not re-raised later
+  as an oversight.
+- **Bot websocket reconnect — done.** The loop was added during the AFK run and
+  hardened by finding 7; the stale note above has been reconciled.
+- **The desktop client** — the web UI, reframed and moved to the wishlist.
+
+Dogfooding continues after this case closes, from Telegram, across this project
+*and others* — which is the point of having built it. Findings get their own
+cases, or an entry in wishlist/bugs; that is what keeps this one a bounded unit
+of work rather than a standing log.
 
 ## Current goal: a local PoC — daemon + telegram only
 

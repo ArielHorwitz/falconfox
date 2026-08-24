@@ -7,15 +7,11 @@ exposed the gaps, because the session tried to *use* the environment the
 bootstrap had left behind.
 
 The theme: **everything the bootstrap did not install was invisible on the
-laptop, where it had accumulated by hand over months.** Two of the five items
-below are missing environment; the other three are the update loop failing to
-be as safe as it looked, found by asking what would happen if the first fix
-went wrong.
-
-
-The first Telegram-driven VPS session hit two things the bootstrap never
-covered. Both are fixed; both were invisible on the laptop, where the
-environment had accumulated by hand.
+laptop, where it had accumulated by hand over months.** Of the seven items
+below, three (1, 2, 6) are missing environment; two (3, 4) are the update loop
+failing to be as safe as it looked, found by asking what would happen if the
+first fix went wrong; and two (5, 7) are Telegram-client bugs that only a real
+phone-driven turn could surface.
 
 1. **No agent skills were installed on the VPS.** `~/.agents/skills` did not
    exist, so no session could run the casebook workflow or the falconfox
@@ -153,11 +149,26 @@ environment had accumulated by hand.
 
 ## State at the end of the session
 
-All five fixed, committed, pushed to `origin/falconfox`, and live on the VPS
-at `1765dc2` through two staged deploys. Verified after the final restart:
-services active, `falconfox` resolving by name, health check logged with its
-tail intact — the last of which is itself the confirmation that finding 4 is
-fixed, since the earlier restart lost exactly that line.
+All seven are fixed. Findings 1-5 were committed, pushed to
+`origin/falconfox`, and taken live on the VPS at `1765dc2` through two staged
+deploys. Verified after the final restart: services active, `falconfox`
+resolving by name, health check logged with its tail intact — the last of
+which is itself the confirmation that finding 4 is fixed, since the earlier
+restart lost exactly that line.
+
+Two items land outside that snapshot:
+
+- **Finding 6** is a host-side change only (`~/.local/bin/python3 ->
+  /usr/bin/python3.12`), so it carries no commit and no deploy — it is already
+  in effect on the VPS and would have to be redone on any rebuilt host. That
+  makes it a bootstrap-checklist item, not a code change.
+- **Finding 7** was found and fixed *after* this section was first written —
+  the timeout fix is `9d5535f`, and it too went live, through a third staged
+  deploy: `update.log` records `restarting services` at 14:53:24 and
+  `healthy at revision 9d5535f...` at 14:53:32, with both units running from
+  that restart. So all seven findings are not just fixed but **in effect on
+  the VPS**, and the log tail survived a third time — finding 4 confirmed
+  again by the same evidence that first exposed it.
 
 The deploy procedure that emerged, and which is worth reusing for any
 unit-file change: fast-forward the deploy checkout and run `setup.sh
