@@ -102,6 +102,6 @@ class TelegramApi:
             log.warning("HTML send failed (%s); falling back to plain text", error)
             await self.message(chat_id, plain_fallback)
 
-    async def typing(self, chat_id: int) -> None:
-        await self.call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+    async def chat_action(self, chat_id: int, action: str) -> None:
+        await self.call("sendChatAction", {"chat_id": chat_id, "action": action})
 

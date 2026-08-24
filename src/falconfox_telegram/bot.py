@@ -63,6 +63,32 @@ class BotConfig:
         )
 
 
+# Telegram has no "thinking", "working" or "stuck" chat action: every one of the
+# eleven valid values describes the bot producing a kind of content. So the
+# vocabulary gets spent as a code -- one distinct action per state we can
+# actually tell apart -- which is the most this channel can carry. Each lasts
+# about five seconds, hence the refresh loop below.
+#
+# Which glyph means what is deliberately arbitrary for now. What matters is that
+# the states are distinguishable in the chat; the mapping is a table of one-line
+# choices to reshuffle here, in one place, once we have watched it in use.
+#
+# Note `record_voice` is on loan: it is the honest action for a reply that is
+# itself a voice message, which is what the deferred voice work would produce.
+# If that lands, move audio to `upload_voice` or move streaming to one of the
+# unused actions (`choose_sticker` aside, `find_location`, `upload_photo`, the
+# video ones).
+TURN_ACTIONS = {
+    "starting": "choose_sticker",    # resuming or launching the ACP subprocess
+    "working": "typing",             # alive, but producing nothing right now
+    "thinking": "find_location",     # agent_thought_chunk
+    "streaming": "record_voice",     # agent_message_chunk -- output is flowing
+    "tool": "upload_document",       # a tool call is running
+}
+DEFAULT_ACTION = TURN_ACTIONS["working"]
+ACTION_REFRESH_SECONDS = 4
+
+
 class FalconFoxTelegramBot:
     def __init__(self, config: BotConfig) -> None:
         self.config = config
@@ -75,7 +101,8 @@ class FalconFoxTelegramBot:
         self._rotate_pending = False
         self._reply_parts: dict[str, list[str]] = {}
         self._turn_chat: dict[str, int] = {}
-        self._typing_tasks: dict[str, asyncio.Task] = {}
+        self._activity_tasks: dict[str, asyncio.Task] = {}
+        self._activity_state: dict[str, str] = {}
         self._ws = None
         self._ws_lock = asyncio.Lock()
 
@@ -132,9 +159,10 @@ class FalconFoxTelegramBot:
         self._ws = None
         self._focus_working = False
         self._rotate_pending = False
-        for typing in self._typing_tasks.values():
-            typing.cancel()
-        self._typing_tasks.clear()
+        for activity in self._activity_tasks.values():
+            activity.cancel()
+        self._activity_tasks.clear()
+        self._activity_state.clear()
         interrupted = sorted(set(self._turn_chat.values()))
         self._turn_chat.clear()
         self._reply_parts.clear()
@@ -312,10 +340,47 @@ class FalconFoxTelegramBot:
             return True
         return False
 
-    def _start_typing(self, session_id: str, chat_id: int) -> None:
-        if session_id not in self._typing_tasks:
-            self._typing_tasks[session_id] = asyncio.create_task(
-                self._typing_loop(chat_id))
+    def _start_activity(self, session_id: str, chat_id: int) -> bool:
+        """Ensure a refresh loop is running. True if this call started one."""
+        task = self._activity_tasks.get(session_id)
+        # `task.done()` matters: a finished task is still *in* the dict, and the
+        # old `session_id not in self._typing_tasks` guard read that as live. One
+        # failed sendChatAction therefore silenced a turn permanently, with the
+        # `working` safety net unable to restart it because it hit the same
+        # guard.
+        if task is not None and not task.done():
+            return False
+        self._activity_tasks[session_id] = asyncio.create_task(
+            self._activity_loop(session_id, chat_id))
+        return True
+
+    async def _set_activity(self, session_id: str, state: str) -> None:
+        """Record what the session is doing and show it in the chat."""
+        chat_id = self._turn_chat.get(session_id)
+        if chat_id is None:
+            return
+        # Before the equality check, so this doubles as the safety net that
+        # revives a loop which died mid-turn.
+        started = self._start_activity(session_id, chat_id)
+        if self._activity_state.get(session_id) == state:
+            return
+        self._activity_state[session_id] = state
+        # Streamed output fires an event per chunk; only a *change* is worth an
+        # API call. A fresh loop sends immediately, so it needs no second one.
+        if not started:
+            await self._send_action(session_id, chat_id)
+
+    async def _send_action(self, session_id: str, chat_id: int) -> None:
+        action = TURN_ACTIONS.get(
+            self._activity_state.get(session_id, ""), DEFAULT_ACTION)
+        try:
+            await self.telegram.chat_action(chat_id, action)
+        except ApiError as error:
+            # Never fatal to the loop. A 429 from the rate limiter -- likeliest
+            # on exactly the long turn that needs an indicator -- or one of the
+            # read timeouts this deployment sees used to end the task outright
+            # and leave the turn silent for the rest of its life.
+            log.debug("chat action %s failed for %s: %s", action, session_id, error)
 
     async def _forward(self, session_id: str, chat_id: int, text: str) -> None:
         self._turn_chat[session_id] = chat_id
@@ -325,7 +390,7 @@ class FalconFoxTelegramBot:
         # stored session resumes an ACP subprocess first, and the daemon carries
         # that as a `starting` state on session_updated, which this client does
         # not consume. That gap is exactly when a turn looks like it hung.
-        self._start_typing(session_id, chat_id)
+        await self._set_activity(session_id, "working")
         async with self._ws_lock:
             await self._ws.send(json.dumps({
                 "action": "send", "session_id": session_id, "text": text,
@@ -340,8 +405,29 @@ class FalconFoxTelegramBot:
         if not session_id:
             return
         event_type = event.get("type")
-        if event_type == "message" and event.get("role") == "agent":
-            self._reply_parts.setdefault(session_id, []).append(event.get("text", ""))
+        if event_type == "message":
+            role = event.get("role")
+            if role == "agent":
+                self._reply_parts.setdefault(session_id, []).append(event.get("text", ""))
+                await self._set_activity(session_id, "streaming")
+            elif role == "thought":
+                # Never part of the reply -- only a sign of what is happening.
+                await self._set_activity(session_id, "thinking")
+            return
+        if event_type == "tool_call":
+            # Consumed as a *state signal* only. Tool calls stay suppressed as
+            # content: one message per turn is a deliberate choice for a phone
+            # chat, and rendering them would undo it.
+            status = event.get("status")
+            await self._set_activity(
+                session_id, "working" if status in ("completed", "failed") else "tool")
+            return
+        if event_type == "session_updated":
+            # The daemon carries a resuming ACP subprocess as `starting`, the
+            # slowest part of a cold turn. The client used to ignore this event
+            # entirely, so that whole window looked identical to working.
+            if event.get("state") == "starting":
+                await self._set_activity(session_id, "starting")
             return
         if event_type == "notice" and event.get("level") == "error":
             chat_id = self._turn_chat.get(session_id)
@@ -354,17 +440,16 @@ class FalconFoxTelegramBot:
         if session_id == self.focus_session_id:
             self._focus_working = state == "working"
         if state == "working":
-            # Normally already typing since _forward; this covers a turn that
-            # began before the indicator did.
-            chat_id = self._turn_chat.get(session_id)
-            if chat_id:
-                self._start_typing(session_id, chat_id)
+            # Normally already active since _forward; this covers a turn that
+            # began before the indicator did, and revives a loop that has died.
+            await self._set_activity(session_id, "working")
             return
         if state != "idle":
             return
-        typing = self._typing_tasks.pop(session_id, None)
-        if typing:
-            typing.cancel()
+        activity = self._activity_tasks.pop(session_id, None)
+        if activity:
+            activity.cancel()
+        self._activity_state.pop(session_id, None)
         chat_id = self._turn_chat.pop(session_id, None)
         reply = "".join(self._reply_parts.pop(session_id, [])).strip()
         if chat_id and reply:
@@ -373,10 +458,10 @@ class FalconFoxTelegramBot:
         if session_id == self.focus_session_id and self._rotate_pending:
             await self._rotate_focus_session()
 
-    async def _typing_loop(self, chat_id: int) -> None:
+    async def _activity_loop(self, session_id: str, chat_id: int) -> None:
         try:
             while True:
-                await self.telegram.typing(chat_id)
-                await asyncio.sleep(4)
+                await self._send_action(session_id, chat_id)
+                await asyncio.sleep(ACTION_REFRESH_SECONDS)
         except asyncio.CancelledError:
             raise

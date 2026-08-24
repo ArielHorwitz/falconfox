@@ -108,6 +108,34 @@ before building it — the falconfox case's layer boundary says the daemon stays
 opinion-light and clients hold the opinions, but "when did this session last
 emit anything" is arguably daemon fact, not client opinion.
 
+## Built: the fix and the state code (2026-08-24)
+
+Fault 1 is fixed and the granular indicator is in, together, because the
+second is worthless on a loop that dies.
+
+`_typing_loop`/`_start_typing` became `_activity_loop`/`_start_activity`/
+`_set_activity`. The loop now swallows `ApiError` around the send, and the
+restart guard tests `task.done()` rather than mere presence in the dict — the
+two halves of the bug. Two regression tests cover exactly those: a chat action
+that raises must not end the loop, and a loop that has died must be revived by
+the next state change.
+
+`TURN_ACTIONS` in `bot.py` is the whole mapping, one line per state, meant to
+be reshuffled once we have watched it. Five states are distinguished, each with
+its own action, from events the client previously discarded: `starting`
+(`session_updated`), `working`, `thinking` (thought chunks), `streaming`
+(message chunks), `tool` (tool calls, as a state signal only — they stay
+suppressed as content). An action is sent on *state change*, not per event, so
+a chunk-by-chunk stream costs one call rather than hundreds; the 4-second loop
+refreshes whatever the current state is.
+
+**The mapping is provisional by decision, not by neglect** — the point of this
+pass is to see the states become visible at all. Which glyph means what comes
+after watching it.
+
+Not built yet: flushing the reply when the stream stops. That is the next step
+and the one with the real payoff.
+
 ## Design direction (user, 2026-08-24)
 
 Three proposals, recorded before they are built. The first two are decisions to

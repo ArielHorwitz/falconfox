@@ -12,7 +12,8 @@ from falconfox.cli import CliError, _guard_self_target
 from falconfox.coordinator import SessionCoordinator
 from falconfox.storage import SessionStore
 from falconfox_telegram.api import ApiError, _json_request
-from falconfox_telegram.bot import INTERRUPTED_TURN, BotConfig, FalconFoxTelegramBot
+from falconfox_telegram.bot import (INTERRUPTED_TURN, TURN_ACTIONS, BotConfig,
+                                    FalconFoxTelegramBot)
 from falconfox_telegram.rendering import TELEGRAM_MESSAGE_LIMIT, render_messages
 
 
@@ -89,7 +90,8 @@ class FakeTelegram:
     def __init__(self):
         self.messages = []
         self.html_messages = []
-        self.typing_chats = []
+        self.actions = []
+        self.action_error = None
 
     async def message(self, chat_id, text):
         self.messages.append((chat_id, text))
@@ -97,12 +99,14 @@ class FakeTelegram:
     async def html_message(self, chat_id, html_text, plain_fallback):
         self.html_messages.append((chat_id, html_text, plain_fallback))
 
-    async def typing(self, chat_id):
-        self.typing_chats.append(chat_id)
+    async def chat_action(self, chat_id, action):
+        if self.action_error is not None:
+            raise self.action_error
+        self.actions.append((chat_id, action))
 
 
 class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
-    async def test_turn_uses_typing_and_one_final_message(self):
+    async def test_turn_signals_each_state_and_sends_one_final_message(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
                 "token", 10, 20, pointer_file=Path(directory, "focus"),
@@ -123,13 +127,21 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
                                      "role": "agent", "text": "**world**"})
             await bot._handle_event({"type": "agent_state", "session_id": "session",
                                      "state": "idle"})
-            self.assertEqual(fake.typing_chats, [20])
+            # One action per state *change*: a chunk-by-chunk stream must not
+            # produce a call per chunk, and the tool call is visible as state
+            # without being rendered as content.
+            self.assertEqual(fake.actions, [
+                (20, TURN_ACTIONS["working"]),
+                (20, TURN_ACTIONS["streaming"]),
+                (20, TURN_ACTIONS["tool"]),
+                (20, TURN_ACTIONS["streaming"]),
+            ])
             self.assertEqual(fake.messages, [])
             self.assertEqual(fake.html_messages,
                              [(20, "hello <b>world</b>", "hello **world**")])
 
 
-    async def test_typing_starts_when_the_prompt_is_sent(self):
+    async def test_activity_starts_when_the_prompt_is_sent(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
                 "token", 10, 20, pointer_file=Path(directory, "focus"),
@@ -146,20 +158,78 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             bot._ws = FakeWebSocket()
             await bot._forward("session", 20, "do the thing")
             await asyncio.sleep(0)
-            # Typing is live before the daemon has reported any state at all --
-            # the backend may still be starting up or resuming.
-            self.assertEqual(fake.typing_chats, [20])
+            # The indicator is live before the daemon has reported any state at
+            # all -- the backend may still be starting up or resuming.
+            self.assertEqual(fake.actions, [(20, TURN_ACTIONS["working"])])
             self.assertEqual(sent, [{"action": "send", "session_id": "session",
                                      "text": "do the thing"}])
-            # A later `working` event must not start a second typing loop.
+            # A later `working` event must not start a second loop, nor repeat
+            # the action for a state that has not changed.
             await bot._handle_event({"type": "agent_state", "session_id": "session",
                                      "state": "working"})
             await asyncio.sleep(0)
-            self.assertEqual(fake.typing_chats, [20])
+            self.assertEqual(fake.actions, [(20, TURN_ACTIONS["working"])])
             await bot._handle_event({"type": "agent_state", "session_id": "session",
                                      "state": "idle"})
-            self.assertEqual(bot._typing_tasks, {})
+            self.assertEqual(bot._activity_tasks, {})
 
+
+    async def test_a_failed_chat_action_does_not_silence_the_turn(self):
+        # The bug this replaces: _typing_loop caught only CancelledError, so one
+        # ApiError -- a 429 from the rate limiter, or a read timeout -- ended the
+        # task. The dead task stayed in the dict, the restart guard read it as
+        # live, and the rest of the turn went silent with nothing logged.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = FalconFoxTelegramBot(BotConfig(
+                "token", 10, 20, pointer_file=Path(directory, "focus"),
+                default_path=Path(directory),
+            ))
+            fake = FakeTelegram()
+            bot.telegram = fake
+            bot._turn_chat["session"] = 20
+            bot._reply_parts["session"] = []
+
+            fake.action_error = ApiError("Too Many Requests: retry after 1")
+            await bot._handle_event({"type": "agent_state", "session_id": "session",
+                                     "state": "working"})
+            await asyncio.sleep(0)
+            self.assertEqual(fake.actions, [])
+            self.assertFalse(bot._activity_tasks["session"].done(),
+                             "one failed chat action must not end the loop")
+
+            # Recovered: the next state change reaches the chat.
+            fake.action_error = None
+            await bot._handle_event({"type": "message", "session_id": "session",
+                                     "role": "agent", "text": "hi"})
+            self.assertEqual(fake.actions, [(20, TURN_ACTIONS["streaming"])])
+            await bot._handle_event({"type": "agent_state", "session_id": "session",
+                                     "state": "idle"})
+            self.assertEqual(bot._activity_tasks, {})
+
+    async def test_a_dead_activity_loop_is_revived_by_the_next_state(self):
+        # The second half of the same bug: even if the loop dies for a reason the
+        # ApiError guard does not cover, the guard must not mistake a finished
+        # task for a running one.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = FalconFoxTelegramBot(BotConfig(
+                "token", 10, 20, pointer_file=Path(directory, "focus"),
+                default_path=Path(directory),
+            ))
+            bot.telegram = FakeTelegram()
+            bot._turn_chat["session"] = 20
+            await bot._set_activity("session", "working")
+            dead = bot._activity_tasks["session"]
+            dead.cancel()
+            try:
+                await dead
+            except asyncio.CancelledError:
+                pass
+            self.assertTrue(dead.done())
+
+            await bot._set_activity("session", "streaming")
+            self.assertIsNot(bot._activity_tasks["session"], dead)
+            self.assertFalse(bot._activity_tasks["session"].done())
+            bot._activity_tasks["session"].cancel()
 
     async def test_read_timeout_is_an_api_error_not_a_teardown(self):
         # urllib wraps a connect failure in URLError but lets a read timeout
