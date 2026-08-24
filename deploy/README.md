@@ -17,7 +17,7 @@ or run the manual equivalent): git, curl, Node.js + npm (>=18),
 ## Bootstrap (once, as the deploy user)
 
 ```sh
-git clone -b falconfox git@github.com:ArielHorwitz/casebook.git ~/falconfox
+git clone -b falconfox git@github.com:ArielHorwitz/falconfox.git ~/falconfox
 mkdir -p ~/.config/falconfox
 cp ~/falconfox/deploy/telegram.env.example ~/.config/falconfox/telegram.env
 cp ~/falconfox/deploy/config.example.toml ~/.config/falconfox/config.toml

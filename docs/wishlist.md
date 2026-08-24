@@ -35,6 +35,25 @@ parts were built.
 Wanted, and not a blocker. Text first was the right order; voice is now its own
 effort rather than an unfinished corner of the pivot.
 
+## Tell the user what a session is actually doing
+
+*From the phone, 2026-08-24.*
+
+Reported alongside the typing bug, and not fixed by fixing it: from the work
+chat there is no way to tell whether a session is idle, working, or stuck. The
+typing indicator is the only signal, and it is a poor one — it says the *bot*
+believes a turn is in flight, which is not the same claim. A wedged backend and
+a busy one look identical.
+
+The daemon already knows more than the chat shows: `falconfox list` reports
+`idle` / `working` / `stored` per session. Today only the focus chat can ask,
+and asking there means leaving the conversation. Something like a `/status` in
+the work chat would close most of the gap.
+
+"Stuck" is the harder half and genuinely missing rather than merely unexposed:
+nothing distinguishes a long turn from a hung one. That needs a notion of time
+since the last event, not just the current state.
+
 ## Rename the `falconfox-pointer` skill to match its job
 
 *From the falconfox pivot case, 2026-08-24.*

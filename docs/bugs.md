@@ -8,6 +8,38 @@ Record what fails, under what conditions, and how bad it is — enough that
 whoever picks it up does not have to rediscover it. Delete the entry when the
 fix lands.
 
+## The typing indicator dies on one transient Telegram error
+
+*Reported from the phone, 2026-08-24.*
+
+"typing…" is intermittent: it appears, then stops while the agent is still
+working, so a long turn once again looks like it may have hung. This is a
+different fault from the one fixed on 2026-08-24 — that one was the indicator
+*starting* too late, this one is it *stopping* too early.
+
+`_typing_loop` re-sends `sendChatAction` every 4 seconds (the action expires
+after about 5), and catches only `CancelledError`. But `telegram.typing()`
+reaches `_json_request`, which raises `ApiError` on any HTTP, URL or OS error —
+including a 429 from Telegram's rate limiter, which a turn long enough to need
+an indicator is precisely the kind to provoke, and including the read timeouts
+this deployment is already known to see.
+
+One such error ends the task. Nothing restarts it, and the reason is the guard
+in `_start_typing`:
+
+    if session_id not in self._typing_tasks:
+
+A dead task is still *in* `_typing_tasks` — the dict holds the finished object —
+so the guard reads it as still running and declines to start a new one. The
+`agent_state: working` safety net cannot recover it either, because it goes
+through the same guard. The turn stays silent from then on, and the exception is
+never retrieved, so nothing is logged at the time.
+
+Fix has two halves, matching the two faults: make the loop survive an `ApiError`
+(log and keep looping — a failed keystroke animation is never worth ending a
+turn's feedback over), and make `_start_typing` treat a task that is `done()` as
+absent so the safety net can genuinely restart it.
+
 ## The focus workspace never prunes stale skills
 
 *Found while widening the focus skill, 2026-08-24.*
