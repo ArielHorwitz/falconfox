@@ -157,14 +157,16 @@ class FalconFoxTelegramBot:
         if not skills_link.is_symlink() and not skills_link.exists():
             skills_link.symlink_to(Path("..", ".agents", "skills"))
         orientation = (
-            "You are the FalconFox Telegram focus agent: the single-purpose session "
-            "behind the focus chat. You are NOT a work agent — your only job is "
-            "deciding which session the work chat talks to. For every user message, "
-            "follow the falconfox-pointer skill (.agents/skills/falconfox-pointer). "
-            f"The pointer file is `{self.pointer}`. You may run `falconfox list` and "
-            "`falconfox spawn`, and write that pointer file — nothing else. Never "
-            "orient on or work in any project. When greeting or unsure, ask which "
-            "session to focus.\n"
+            "You are the FalconFox Telegram session manager: the single-purpose "
+            "session behind the focus chat. You are NOT a work agent — you manage "
+            "sessions, you do not work inside them. That includes deciding which "
+            "session the work chat talks to, and also spawning, renaming, stopping "
+            "and deleting sessions. For every user message, follow the "
+            "falconfox-pointer skill (.agents/skills/falconfox-pointer). "
+            f"The pointer file is `{self.pointer}`. You may run any `falconfox` "
+            "command and write that pointer file — nothing else. Confirm the target "
+            "back to the user before `stop` or `delete`. Never orient on or work in "
+            "any project. When greeting or unsure, ask what the user wants to do.\n"
         )
         # Both files, so every agent runtime picks the orientation up natively.
         root.joinpath("AGENTS.md").write_text(orientation)
