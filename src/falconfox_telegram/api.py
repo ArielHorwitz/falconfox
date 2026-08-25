@@ -56,6 +56,10 @@ class DaemonApi:
     async def sessions(self) -> list[dict]:
         return await _json_request(f"{self.base_url}/api/sessions")
 
+    async def session(self, session_id: str) -> dict:
+        """Session metadata plus its full transcript."""
+        return await _json_request(f"{self.base_url}/api/sessions/{session_id}")
+
     async def spawn(self, *, path: str, name: str | None = None,
                     backend: str | None = None, ephemeral: bool = False) -> dict:
         return await _json_request(f"{self.base_url}/api/sessions", "POST", {

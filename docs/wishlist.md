@@ -35,52 +35,6 @@ parts were built.
 Wanted, and not a blocker. Text first was the right order; voice is now its own
 effort rather than an unfinished corner of the pivot.
 
-## Persist the bot's turn→chat map across bot restarts
-
-*From the observability case, 2026-08-25.*
-
-A bot-only restart mid-turn keeps the turn alive daemon-side but loses the
-bot's in-memory record of which chat the reply belongs to, so the reply is
-never delivered and — since the new process is not tracking the turn — the
-silent-turn report does not fire either. Observed live: a scheduled bot
-restart landed five seconds into a fresh turn and orphaned its reply.
-
-The fix is a small state file (the bot already owns the pointer file pattern):
-persist `{session_id: chat_id}` on forward, reload on start, and let the new
-process adopt in-flight turns. Deferred because bot restarts are rare, the
-collision window is one turn, and the transcript still holds the reply — but
-it is exactly the kind of silent loss this case exists to eliminate, so it
-should be picked up with the turn-feedback case.
-
-## Tell the user what a session is actually doing
-
-*From the phone, 2026-08-24.*
-
-Reported alongside the typing bug, and not fixed by fixing it: from the work
-chat there is no way to tell whether a session is idle, working, or stuck. The
-typing indicator is the only signal, and it is a poor one — it says the *bot*
-believes a turn is in flight, which is a weaker claim than the session actually
-working. A wedged backend and a busy one look identical.
-
-The daemon already knows more than the chat shows. `falconfox list` reports
-`idle` / `working` / `stored` per session, but today only the focus chat can
-ask, and asking there means leaving the conversation. Something like a
-`/status` in the work chat would close most of the gap.
-
-There is a second, richer source the client currently ignores: the daemon emits
-`session_updated` carrying `state: starting` while an ACP subprocess is being
-resumed, and `src/falconfox_telegram/bot.py` does not consume that event at all
-— `_handle_event` returns early on anything that is not `agent_state`.
-Consuming it would let the chat distinguish *starting* from *working*, which is
-the distinction a cold turn most needs, and it is the same change the typing
-bug wants. See "The typing indicator dies on one transient Telegram error" in
-[bugs.md](bugs.md); these two are worth doing together.
-
-"Stuck" is the harder half and genuinely missing rather than merely unexposed:
-nothing distinguishes a long turn from a hung one. That needs a notion of time
-since the last event, not just the current state — which is new bookkeeping,
-either in the bot or in the daemon's session metadata.
-
 ## Choose the model when spawning a session
 
 *From the phone, 2026-08-25.*

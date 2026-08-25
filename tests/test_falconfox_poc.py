@@ -16,7 +16,7 @@ from falconfox.engine.session import AgentSession
 from falconfox.storage import SessionStore
 from falconfox.watchdog import StallWatchdog
 from falconfox_telegram.api import ApiError, _json_request
-from falconfox_telegram.bot import (BUSY_TURN, DAEMON_DOWN, INTERRUPTED_TURN,
+from falconfox_telegram.bot import (BUSY_TURN, DAEMON_DOWN, QUIET_TURN_SECONDS,
                                     TURN_ACTIONS, BotConfig, FalconFoxTelegramBot)
 from falconfox_telegram.rendering import TELEGRAM_MESSAGE_LIMIT, render_messages
 
@@ -567,6 +567,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             bot = self._bot_mid_turn(directory)
             bot._turn_id["session"] = "t123"
             bot._turn_started_at["session"] = time.monotonic() - 5
+            bot._last_event_at["session"] = time.monotonic() - 3
             bot._activity_state["session"] = "streaming"
             bot._reply_parts["session"] = ["buffered text"]
             bot._pointer_value = "session"
@@ -584,7 +585,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(handled)
             report = bot.telegram.messages[0][1]
             for expected in ("9.9-test", "work thing", "t123", "streaming",
-                             f"buffered={len('buffered text')}"):
+                             f"buffered={len('buffered text')}", "quiet=3s"):
                 self.assertIn(expected, report)
 
     async def test_a_started_turn_is_never_stranded_by_the_pre_turn_guard(self):
@@ -657,7 +658,11 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ApiError):
                 await _json_request("http://localhost/nowhere")
 
-    async def test_dropped_connection_reports_the_lost_turn(self):
+    async def test_dropped_connection_keeps_the_turn_map_for_reconciliation(self):
+        # The old behaviour told the chat "anything not sent is gone" the moment
+        # the connection dropped -- usually false, since the daemon keeps every
+        # chunk. Now the in-memory state dies with the connection, but the
+        # persisted map survives, and the next connection settles it.
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
                 "token", 10, 20, pointer_file=Path(directory, "focus"),
@@ -666,21 +671,193 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             bot.telegram = FakeTelegram()
             bot._turn_chat["session"] = 20
             bot._reply_parts["session"] = ["half an answer"]
-            self.assertEqual(bot._reset_connection_state(), [20])
-            # State is cleared, and the chat id is handed back so the caller can
-            # tell that chat its reply is never coming.
+            bot._persist_turns()
+            bot._reset_connection_state()
             self.assertEqual(bot._turn_chat, {})
             self.assertEqual(bot._reply_parts, {})
+            self.assertEqual(bot.telegram.messages, [])
+            persisted = json.loads(bot._turns_file.read_text())
+            self.assertEqual(persisted["session"]["chat"], 20)
 
-    async def test_quiet_disconnect_reports_nothing(self):
+    async def test_a_long_quiet_turn_is_said_once_per_spell(self):
+        # "Stuck" cannot be told apart from a long tool call from outside, so
+        # the bot states the observable fact -- how long since the daemon last
+        # said anything -- once per quiet spell, not once per tick.
         with tempfile.TemporaryDirectory() as directory:
-            bot = FalconFoxTelegramBot(BotConfig(
-                "token", 10, 20, pointer_file=Path(directory, "focus"),
-                default_path=Path(directory),
-            ))
-            bot.telegram = FakeTelegram()
-            self.assertEqual(bot._reset_connection_state(), [])
-            self.assertTrue(INTERRUPTED_TURN)
+            bot = self._bot_mid_turn(directory)
+            bot._last_event_at["session"] = time.monotonic() - QUIET_TURN_SECONDS - 1
+            await bot._check_quiet("session", 20)
+            await bot._check_quiet("session", 20)
+            self.assertEqual(len(bot.telegram.messages), 1)
+            self.assertIn("Nothing from the agent", bot.telegram.messages[0][1])
+            # An event ends the spell; the next long silence is its own news.
+            await self._stream(bot, "sign of life")
+            bot._last_event_at["session"] = time.monotonic() - QUIET_TURN_SECONDS - 1
+            await bot._check_quiet("session", 20)
+            self.assertEqual(len(bot.telegram.messages), 2)
+            await self._idle(bot)
+
+
+class TurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    """The persisted turn map: a bot restart mid-turn must not orphan the reply.
+
+    Observed live before this existed: a scheduled bot restart landed five
+    seconds into a fresh turn, the new process had no idea which chat the
+    reply belonged to, and the reply was never delivered -- with the
+    silent-turn report unable to fire, since nothing was tracking the turn.
+    """
+
+    def _bot(self, directory):
+        bot = FalconFoxTelegramBot(BotConfig(
+            "token", 10, 20, pointer_file=Path(directory, "focus"),
+            default_path=Path(directory),
+        ))
+        bot.telegram = FakeTelegram()
+        return bot
+
+    class _Daemon:
+        def __init__(self, state="working", transcript=None):
+            self._state = state
+            self._transcript = transcript or []
+
+        async def sessions(self):
+            if self._state is None:
+                return []
+            return [{"session_id": "session", "name": "work thing",
+                     "state": self._state, "path": "/tmp"}]
+
+        async def session(self, session_id):
+            return {"session_id": session_id, "transcript": self._transcript}
+
+    @staticmethod
+    def _transcript(*agent_chunks):
+        return [{"type": "message", "role": "user", "text": "do the thing"},
+                *({"type": "message", "role": "agent", "text": chunk}
+                  for chunk in agent_chunks)]
+
+    async def test_a_forwarded_turn_is_persisted_and_removed_when_it_ends(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            sent = []
+
+            class FakeWebSocket:
+                async def send(self, payload):
+                    sent.append(payload)
+
+            bot._ws = FakeWebSocket()
+            await bot._forward("session", 20, "do the thing")
+            persisted = json.loads(bot._turns_file.read_text())
+            self.assertEqual(persisted["session"]["chat"], 20)
+            await bot._handle_event({"type": "turn_ended", "session_id": "session",
+                                     "turn_id": "t1", "outcome": "completed",
+                                     "stop_reason": "end_turn", "output_chars": 0})
+            self.assertEqual(json.loads(bot._turns_file.read_text()), {})
+
+    async def test_a_restarted_bot_adopts_a_turn_still_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old = self._bot(directory)
+            old._turn_chat["session"] = 20
+            old._turn_started_at["session"] = time.monotonic()
+            old._persist_turns()
+
+            bot = self._bot(directory)
+            bot.daemon = self._Daemon(
+                "working", self._transcript("the full", " reply"))
+            await bot._reconcile_persisted_turns()
+            self.assertEqual(bot._turn_chat, {"session": 20})
+            self.assertIn("session", bot._adopted)
+            # Post-adoption chunks accumulate but must not be delivered from
+            # the gappy buffer: the settled transcript at turn end is the only
+            # complete source, and nothing may be sent twice.
+            await bot._handle_event({"type": "message", "session_id": "session",
+                                     "role": "agent", "text": " reply"})
+            await bot._handle_event({"type": "turn_ended", "session_id": "session",
+                                     "turn_id": "t1", "outcome": "completed",
+                                     "stop_reason": "end_turn", "output_chars": 14})
+            self.assertEqual(len(bot.telegram.html_messages), 1)
+            self.assertEqual(bot.telegram.html_messages[0][2], "the full reply")
+            self.assertEqual(bot.telegram.messages, [],
+                             "an adopted, delivered turn has nothing to warn about")
+            self.assertEqual(json.loads(bot._turns_file.read_text()), {})
+            self.assertEqual(bot._activity_tasks, {})
+
+    async def test_a_turn_that_ended_while_the_bot_was_away_is_recovered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old = self._bot(directory)
+            old._turn_chat["session"] = 20
+            old._turn_started_at["session"] = time.monotonic()
+            # Six raw characters were already flushed before the restart.
+            old._consumed["session"] = 6
+            old._delivered["session"] = 6
+            old._persist_turns()
+
+            bot = self._bot(directory)
+            bot.daemon = self._Daemon("idle", self._transcript("before", " and after"))
+            await bot._reconcile_persisted_turns()
+            self.assertEqual(bot._turn_chat, {}, "an ended turn is not adopted")
+            self.assertEqual(len(bot.telegram.messages), 1)
+            self.assertIn("recovered", bot.telegram.messages[0][1].lower())
+            self.assertEqual(len(bot.telegram.html_messages), 1)
+            self.assertEqual(bot.telegram.html_messages[0][2], "and after")
+            self.assertEqual(json.loads(bot._turns_file.read_text()), {})
+
+    async def test_an_ended_turn_with_nothing_undelivered_stays_quiet(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old = self._bot(directory)
+            old._turn_chat["session"] = 20
+            old._turn_started_at["session"] = time.monotonic()
+            old._consumed["session"] = len("the whole reply")
+            old._delivered["session"] = len("the whole reply")
+            old._persist_turns()
+
+            bot = self._bot(directory)
+            bot.daemon = self._Daemon("idle", self._transcript("the whole reply"))
+            await bot._reconcile_persisted_turns()
+            self.assertEqual(bot.telegram.messages, [])
+            self.assertEqual(bot.telegram.html_messages, [])
+
+    async def test_an_ended_turn_that_produced_nothing_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old = self._bot(directory)
+            old._turn_chat["session"] = 20
+            old._turn_started_at["session"] = time.monotonic()
+            old._persist_turns()
+
+            bot = self._bot(directory)
+            bot.daemon = self._Daemon("idle", self._transcript())
+            await bot._reconcile_persisted_turns()
+            self.assertEqual(len(bot.telegram.messages), 1)
+            self.assertIn("without delivering", bot.telegram.messages[0][1])
+
+    async def test_a_vanished_session_is_the_only_true_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old = self._bot(directory)
+            old._turn_chat["session"] = 20
+            old._turn_started_at["session"] = time.monotonic()
+            old._persist_turns()
+
+            bot = self._bot(directory)
+            bot.daemon = self._Daemon(state=None)
+            await bot._reconcile_persisted_turns()
+            self.assertEqual(len(bot.telegram.messages), 1)
+            self.assertIn("no longer exists", bot.telegram.messages[0][1])
+            self.assertEqual(json.loads(bot._turns_file.read_text()), {})
+
+    async def test_focus_chat_turns_die_with_the_bot(self):
+        # The focus session is ephemeral and rotated on every connect; its
+        # turns are session-management chatter, not work output worth reviving.
+        with tempfile.TemporaryDirectory() as directory:
+            old = self._bot(directory)
+            old._turn_chat["session"] = 10
+            old._turn_started_at["session"] = time.monotonic()
+            old._persist_turns()
+
+            bot = self._bot(directory)
+            bot.daemon = self._Daemon("working")
+            await bot._reconcile_persisted_turns()
+            self.assertEqual(bot._turn_chat, {})
+            self.assertEqual(bot.telegram.messages, [])
+            self.assertEqual(json.loads(bot._turns_file.read_text()), {})
 
 
 class RenderingTests(unittest.TestCase):

@@ -13,7 +13,8 @@ kind of thing the logs now answer in one line. Build the presentation layer on
 the turn events, not on state transitions. Related items worth picking up
 together, both in [wishlist.md](../../wishlist.md): persisting the turn→chat
 map across bot restarts, and the original "tell the user what a session is
-actually doing" entry.
+actually doing" entry. *(Both picked up the same day — see "no turn left
+behind" below; their wishlist entries are gone.)*
 
 *(Original pause note, kept for history: the first live test of the state code
 ended in a failure nobody could explain from the outside, and diagnosis meant
@@ -233,6 +234,60 @@ Two lessons worth carrying:
   state, the bot took a defensible branch, Telegram was never called. Nothing
   had an error to report. Silence is the failure mode this client keeps
   producing, and the third time it has cost a reply.
+
+## Built: no turn left behind, and quiet turns say so (2026-08-25)
+
+The round the unpause note asked for, both wishlist items picked up together
+(their entries are deleted from wishlist.md per its policy; the context lives
+here now).
+
+**The turn map is persisted and reconciled.** `_persist_turns` writes
+`{session_id: {chat, turn_id, consumed, delivered, started}}` to `turns.json`
+beside the pointer file on every forward, flush and turn end — and the file
+deliberately survives both a bot restart (SIGTERM runs no cleanup) and a
+connection reset. On every connect, `_reconcile_persisted_turns` settles the
+map against the daemon, with three outcomes:
+
+- **Session still `working`/`starting` → adopt.** The new process takes the
+  turn as its own: indicator resumes, `turn_ended` finalizes normally.
+- **Turn ended while the bot was away → recover.** The undelivered remainder
+  is rebuilt from the session transcript and delivered, behind a one-line
+  "♻️ recovered" note. If nothing was ever produced, the silent-turn report
+  fires instead of nothing firing at all.
+- **Session gone → the only true loss**, and the only case that says so.
+
+The recovery arithmetic rides on a new `consumed` counter — raw stream
+characters removed from the buffer by flushes, unlike `delivered` which counts
+stripped characters actually sent. The transcript stores the same chunk events
+the websocket streams, so `turn_text[consumed:]` is exactly what the chat has
+not seen. An adopted turn's buffer is missing whatever streamed while the bot
+was away, so partial flushes are suppressed for it and the whole reply is
+rebuilt from the settled transcript at `turn_ended` — end-state arithmetic on
+a settled transcript, rather than trying to splice a live stream around a gap.
+
+Two consequences worth naming:
+
+- **`INTERRUPTED_TURN` is retired.** "Anything not already sent is gone" was
+  usually false — the daemon keeps every chunk — and during the keepalive
+  stalls it filled the chat with copies of itself. A dropped connection now
+  keeps quiet about turns (the daemon-down announcement still fires); the next
+  connection either recovers them or reports the truth.
+- **Focus-chat turns are dropped on reconcile, silently.** The focus session
+  is ephemeral and rotated on every connect; reviving its session-management
+  chatter would be noise.
+
+**Quiet turns are the "stuck" answer.** `_last_event_at` records every event
+per session; the activity loop (already ticking every 4 s) checks it, and a
+turn quiet for `QUIET_TURN_SECONDS` (180) gets one message per spell: how long
+the silence has lasted and what the last activity was, with the explicit
+caveat that a long tool call and a stuck turn look identical from outside —
+the bot states the observable fact and leaves the judgement to the reader. An
+event ends the spell, so the next long silence is its own news. `/status` now
+carries `quiet=<n>s` per in-flight turn.
+
+**Still unverified in use**, like the state code before it: the adoption path,
+the recovery path and the 180-second threshold all need real restarts and real
+long turns. The first live restart mid-turn is the test that matters.
 
 ## Design direction (user, 2026-08-24)
 
