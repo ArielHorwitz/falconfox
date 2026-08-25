@@ -74,9 +74,15 @@ Alongside it, two `daemon connection lost (sent 1011 (internal error) keepalive
 ping timeout; no close frame received)` at 06:21:30 and 06:23:44, plus a
 `ws disconnect: code=1006` at 06:23:22. The bot reconnects and reports the
 interrupted turns, which is why the focus chat filled with "anything not
-already sent is gone". **The keepalive timeouts are their own open question:**
-they mean the daemon's event loop stalled long enough to miss a ping, and
-nothing records what it was doing. Chase this first.
+already sent is gone". ~~They mean the daemon's event loop stalled long enough
+to miss a ping~~ — **investigated 2026-08-25, and that framing was wrong**: the
+aligned logs show *both* processes silent in overlapping windows, next to a
+session spawn, on a 1-vCPU/951MB host that sits 1.1GB into swap — pointing at
+host-wide memory thrash, not the daemon's loop specifically. The logs cannot
+decide it conclusively, which is this case's thesis in miniature; a stall
+watchdog now runs in both processes and will attribute the next occurrence
+itself. Full reconstruction and the shipped instrumentation:
+[keepalive-stalls-finding.md](keepalive-stalls-finding.md).
 
 ## The case proving itself (2026-08-25, 07:03)
 
@@ -146,6 +152,43 @@ decisions worth keeping:
 an announcement that raised would turn a blip into an outage — and the version
 lookup is a nicety that must not be able to swallow the announcement itself.
 
+## Shipped: the turn is a first-class fact, and silence is an error (2026-08-25)
+
+The round that answers the case's central sentence. What landed, in one deploy:
+
+- **The daemon names the turn.** `engine/session.py` gives every prompt turn an
+  id and emits `turn_started` / `turn_ended` events — duration, message chunks,
+  output chars, thought chunks, tool calls, outcome, and the ACP stop reason.
+  `turn_ended` is emitted *before* the trailing `idle`, because the end of a
+  turn is a fact with contents while idle is a state a session can be in for
+  other reasons — conflating them is how replies got dropped. These are turn
+  *facts*; presentation stays in the clients, per the constraint below.
+- **The coordinator logs turns from the events**, replacing the working→idle
+  inference. A turn that completes with zero output chars is logged WARNING
+  (`turn produced NO output`) at the moment it happens.
+- **The bot finalizes turns on `turn_ended`**, not on inferred idle — the
+  pre-turn-idle guard and the streamed-output safety catch remain only as a
+  backstop for a daemon that never sent one. `_finish_turn` is idempotent, so
+  the idle that follows finds nothing to do.
+- **Silence reaches the chat.** A turn that ends with nothing delivered (and
+  not errored or cancelled — those already speak) sends `⚠️ The turn ended
+  without delivering a reply (…)`, distinguishing "the agent produced no
+  output; stop reason: X" from "the agent wrote N characters that were lost on
+  the way to this chat" — the resume-idle bug's exact shape, now audible. The
+  unexplained 06:24 stop in the evidence above would have printed one of these
+  two sentences.
+- **The bot logs its happy path at INFO**: forward, refusal, each flush
+  (partial/final, chars), turn end with delivered totals — the five parallel
+  dicts stop being invisible.
+- **`/status` in either chat**: daemon version, session list with states,
+  focused session, and the bot's own view of in-flight turns (chat, activity
+  state, buffered vs delivered chars, age). Diagnosis from the phone.
+- **HTTP API actions are logged** (`action=… via=http`). The focus agent drives
+  the daemon over the CLI→HTTP path, which previously left no trace at all —
+  its spawns/sends/deletes appeared only as side effects.
+- **The stall watchdog** in both processes (see
+  [keepalive-stalls-finding.md](keepalive-stalls-finding.md)).
+
 ## The shape of the problem
 
 `idle` was misread as "turn over" when it means "not currently running a
@@ -160,7 +203,12 @@ parallel dicts keyed by session, mutated from several branches of one event
 handler, and **logs none of them**. Every failure so far has been one of those
 dicts being in a state nobody could see.
 
-## Directions (not yet decided)
+## Directions (all five taken — see the shipped section above)
+
+One deliberate deviation: the turn id is minted in the **daemon** at
+`engine/session.py`'s `send`, not at the client's `_forward` as sketched below.
+A turn is a daemon fact; the client carries the daemon's id rather than
+inventing a parallel one.
 
 - **Name the turn.** Give it an id at `_forward` and carry it through: started,
   first chunk, each flush, each state change, ended, bytes delivered. A turn
