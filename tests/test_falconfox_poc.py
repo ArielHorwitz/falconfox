@@ -239,6 +239,9 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
         bot.telegram = FakeTelegram()
         bot._turn_chat["session"] = 20
         bot._reply_parts["session"] = []
+        # A real turn always reports `working` before it streams; without it the
+        # bot now (correctly) refuses to treat `idle` as the turn ending.
+        bot._turn_working.add("session")
         return bot
 
     async def _stream(self, bot, text):
@@ -308,6 +311,36 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             await self._idle(bot)
             self.assertEqual(len(bot.telegram.html_messages), 2)
             self.assertEqual(bot.telegram.html_messages[1][2], "b" * 300)
+
+    async def test_the_idle_from_resuming_a_stored_session_is_not_the_turn_ending(self):
+        # Sending to a stored session resumes it, and engine/session.py sets
+        # `idle` once the ACP subprocess is up -- before the prompt runs. Taking
+        # that for the end of the turn dropped _turn_chat before any chunk
+        # arrived, so the real reply had nowhere to go and vanished with nothing
+        # logged. It cost the first reply after every daemon restart.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            sent = []
+
+            class FakeWebSocket:
+                async def send(self, payload):
+                    sent.append(json.loads(payload))
+
+            bot._ws = FakeWebSocket()
+            await bot._forward("session", 20, "do the thing")
+
+            # The resume's idle, before the turn has ever reported working.
+            await self._idle(bot)
+            self.assertIn("session", bot._turn_chat,
+                          "a turn that never began cannot have ended")
+
+            await bot._handle_event({"type": "agent_state", "session_id": "session",
+                                     "state": "working"})
+            await self._stream(bot, "the real reply")
+            await self._idle(bot)
+            self.assertEqual(len(bot.telegram.html_messages), 1)
+            self.assertEqual(bot.telegram.html_messages[0][2], "the real reply")
+            self.assertNotIn("session", bot._turn_chat)
 
     async def test_read_timeout_is_an_api_error_not_a_teardown(self):
         # urllib wraps a connect failure in URLError but lets a read timeout

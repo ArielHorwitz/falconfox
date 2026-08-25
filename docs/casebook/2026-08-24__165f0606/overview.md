@@ -166,6 +166,52 @@ connection.
 only been exercised by tests; whether the flush fires at useful moments, and
 whether the guards are tuned anywhere near right, needs real turns.
 
+## The real bug behind "no reply in Telegram" (2026-08-25)
+
+Reported as a missing reply and initially mistaken — by me — for a stale
+message from the pre-restart build. It was neither. **Every first turn after a
+daemon restart silently lost its reply**, and had done since before any of this
+case's work.
+
+Evidence, in order:
+
+- The daemon's own log for the lost turn: `action=send` at 05:28:57, then
+  **`all sessions idle` at 05:29:00**, then `transcript_reset`, then
+  `dogfood (working)` at 05:29:01, then `turn complete` at 05:29:49.
+- `falconfox read` showed the reply had been generated in full, so it died
+  between the bot and Telegram.
+- A direct `sendMessage` to the work chat returned `ok:true`, so delivery
+  worked and the fault was in the bot.
+
+Cause: sending to a **stored** session resumes it, and `engine/session.py`
+sets `idle` once the ACP subprocess is up — *before the prompt runs*
+(`_set_state("idle")` at lines 145, 170, 177; `working` only at 202). The bot
+treated any `idle` as the end of the turn, so it popped `_turn_chat`, cancelled
+the indicator and cleared the buffer before a single chunk had arrived. The
+real reply then streamed into a session with nowhere to send it, and the final
+`idle` found no chat. No exception, no log line, no notice — the quietest
+possible failure.
+
+Fix: a turn ends only if it ever began. `_turn_working` records that a session
+has reported `working` since `_forward`; an `idle` for a session with an open
+turn that never did is ignored as the resume artefact it is.
+
+**Not caused by the flush work** — the previous code had the same structure and
+the same hole. What the flush work did was change the symptom: with output
+delivered mid-turn, some of a lost turn would now have survived. The reason it
+looked new is that it only fires on the first turn after a restart, and this
+case has caused a lot of restarts.
+
+Two lessons worth carrying:
+
+- **`idle` is not an event, it is a state that can be entered for more than one
+  reason.** The client read it as "turn over" when it means "not currently
+  running a prompt" — true during a resume, before anything has been asked.
+- The failure was silent because every layer behaved: the daemon emitted a true
+  state, the bot took a defensible branch, Telegram was never called. Nothing
+  had an error to report. Silence is the failure mode this client keeps
+  producing, and the third time it has cost a reply.
+
 ## Design direction (user, 2026-08-24)
 
 Three proposals, recorded before they are built. The first two are decisions to

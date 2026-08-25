@@ -114,6 +114,7 @@ class FalconFoxTelegramBot:
         self._activity_tasks: dict[str, asyncio.Task] = {}
         self._activity_state: dict[str, str] = {}
         self._last_flush: dict[str, float] = {}
+        self._turn_working: set[str] = set()
         self._ws = None
         self._ws_lock = asyncio.Lock()
 
@@ -175,6 +176,7 @@ class FalconFoxTelegramBot:
         self._activity_tasks.clear()
         self._activity_state.clear()
         self._last_flush.clear()
+        self._turn_working.clear()
         interrupted = sorted(set(self._turn_chat.values()))
         self._turn_chat.clear()
         self._reply_parts.clear()
@@ -426,6 +428,7 @@ class FalconFoxTelegramBot:
     async def _forward(self, session_id: str, chat_id: int, text: str) -> None:
         self._turn_chat[session_id] = chat_id
         self._reply_parts[session_id] = []
+        self._turn_working.discard(session_id)
         # Type from the moment the prompt goes out. Waiting for the daemon to
         # report `working` leaves the whole backend-startup window silent: a
         # stored session resumes an ACP subprocess first, and the daemon carries
@@ -483,10 +486,21 @@ class FalconFoxTelegramBot:
         if state == "working":
             # Normally already active since _forward; this covers a turn that
             # began before the indicator did, and revives a loop that has died.
+            self._turn_working.add(session_id)
             await self._set_activity(session_id, "working")
             return
         if state != "idle":
             return
+        if session_id in self._turn_chat and session_id not in self._turn_working:
+            # Resuming a stored session emits `idle` *before* the turn starts
+            # (engine/session.py sets it once the ACP subprocess is up). Treating
+            # that as the end of the turn tore down _turn_chat before a single
+            # chunk had arrived, so the real reply streamed into a session with
+            # nowhere to send it and was dropped in silence -- every first turn
+            # after a daemon restart. A turn ends only if it ever began.
+            log.debug("ignoring pre-turn idle for %s", session_id)
+            return
+        self._turn_working.discard(session_id)
         activity = self._activity_tasks.pop(session_id, None)
         if activity:
             activity.cancel()
