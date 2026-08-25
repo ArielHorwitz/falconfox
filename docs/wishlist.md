@@ -35,6 +35,23 @@ parts were built.
 Wanted, and not a blocker. Text first was the right order; voice is now its own
 effort rather than an unfinished corner of the pivot.
 
+## Persist the bot's turn→chat map across bot restarts
+
+*From the observability case, 2026-08-25.*
+
+A bot-only restart mid-turn keeps the turn alive daemon-side but loses the
+bot's in-memory record of which chat the reply belongs to, so the reply is
+never delivered and — since the new process is not tracking the turn — the
+silent-turn report does not fire either. Observed live: a scheduled bot
+restart landed five seconds into a fresh turn and orphaned its reply.
+
+The fix is a small state file (the bot already owns the pointer file pattern):
+persist `{session_id: chat_id}` on forward, reload on start, and let the new
+process adopt in-flight turns. Deferred because bot restarts are rare, the
+collision window is one turn, and the transcript still holds the reply — but
+it is exactly the kind of silent loss this case exists to eliminate, so it
+should be picked up with the turn-feedback case.
+
 ## Tell the user what a session is actually doing
 
 *From the phone, 2026-08-24.*

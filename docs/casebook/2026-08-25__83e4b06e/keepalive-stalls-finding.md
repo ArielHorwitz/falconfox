@@ -80,7 +80,46 @@ Recovery is logged with the stall's duration either way. The next keepalive
 timeout will sit next to a watchdog line that says which kind it was, in which
 process, and — if it was in-process — where.
 
-## If it is the host (likely), the fix is capacity or load, not code
+## Resolved (2026-08-25, 10:08): the watchdog adjudicated, and it was neither
+
+A fresh keepalive timeout fired at 10:08:33 with the instrumentation live —
+and **the watchdog stayed silent in both processes**. No loop stall, no
+process-wide freeze; the daemon logged continuously through the window and
+handled the reconnect within seconds. Both earlier hypotheses (a blocked
+daemon loop; host-wide thrash) are ruled out for this occurrence.
+
+What the logs showed instead: a 252-second turn with 11 tool calls was
+running, and the **pre-fix** bot — chat actions still awaited inline — logged
+nothing from 10:05:52 to 10:08:33, the width of a few back-to-back 40s
+Telegram read timeouts. The mechanism, end to end:
+
+1. A hung Telegram API call wedges `_handle_event`, so `_receive_events`
+   stops draining the websocket.
+2. The websocket library's recv queue fills; backpressure pauses the TCP
+   transport.
+3. Paused transport means the bot neither answers the daemon's pings nor
+   reads the daemon's pongs. Both sides' keepalives starve: the daemon cuts
+   the connection (`1006`), the bot reports `sent 1011 keepalive ping
+   timeout` when its own timer fires.
+
+This also retro-explains the original 06:2x incidents — bot silent for
+minutes while the daemon logged normally, disconnects with no close frame,
+the bot reporting the loss long after the daemon saw it. The swap-starved
+host remains real and surely worsens Telegram call latency, but it was the
+aggravator, not the cause.
+
+**The fix was already live two minutes later** (`0de482f`, deployed 10:10:02):
+the indicator send is detached from the event pipeline. The 10:08:33 timeout
+was the last gasp of the pre-fix bot.
+
+**A blind spot worth keeping:** the watchdog watches the *event loop*, not
+the *event pipeline*. A consumer coroutine wedged on an await is invisible to
+it, because the loop stays responsive. Its silence was still decisive — that
+is what ruled the loop-stall theory out — but a pipeline-level instrument
+(warn when daemon events sit unprocessed for tens of seconds, or when one
+Telegram call exceeds a sane budget) is the follow-on if this shape recurs.
+
+## If it is the host, the fix is capacity or load, not code — but it wasn't the cause
 
 Recorded here rather than acted on, because it is the user's call: the box is
 too small for five resident backends. Options, cheapest first: stop idle

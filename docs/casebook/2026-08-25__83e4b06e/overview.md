@@ -78,10 +78,12 @@ already sent is gone". ~~They mean the daemon's event loop stalled long enough
 to miss a ping~~ — **investigated 2026-08-25, and that framing was wrong**: the
 aligned logs show *both* processes silent in overlapping windows, next to a
 session spawn, on a 1-vCPU/951MB host that sits 1.1GB into swap — pointing at
-host-wide memory thrash, not the daemon's loop specifically. The logs cannot
-decide it conclusively, which is this case's thesis in miniature; a stall
-watchdog now runs in both processes and will attribute the next occurrence
-itself. Full reconstruction and the shipped instrumentation:
+host-wide memory thrash, not the daemon's loop specifically. **Resolved the
+same day:** a fresh occurrence at 10:08:33 with the new watchdog live ruled
+out both loop stall and host freeze — the cause was the bot's event pipeline
+wedging on hung Telegram API calls, which backpressured the websocket until
+both sides' keepalives starved. Fixed in `0de482f`. Full reconstruction,
+mechanism and the watchdog's one blind spot:
 [keepalive-stalls-finding.md](keepalive-stalls-finding.md).
 
 ## The case proving itself (2026-08-25, 07:03)
