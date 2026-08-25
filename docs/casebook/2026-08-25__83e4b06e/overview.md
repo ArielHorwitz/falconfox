@@ -189,6 +189,28 @@ The round that answers the case's central sentence. What landed, in one deploy:
 - **The stall watchdog** in both processes (see
   [keepalive-stalls-finding.md](keepalive-stalls-finding.md)).
 
+## First live catch (2026-08-25, 09:06 — within the hour of deploying)
+
+The very first turn after the observability deploy told a story the old logs
+could not have told, end to end from the journal alone:
+
+- `turn start … turn=954ff824 prompt_chars=55` → `turn complete … outcome=error
+  … duration=8.27s … chars=2043` in the daemon, and the cause sitting next to
+  it as a notice: **the backend hit its session usage limit** ("resets 9:50am
+  UTC"). The chat saw the error notice and the 2043 streamed chars were still
+  delivered. Under the old logs this was "the bot went quiet".
+- The bot's timestamps exposed a second, older defect: `turn started` at
+  09:06:13, then **nothing until a burst at 09:06:58** — the exact 40-second
+  signature of a Telegram read timeout. A hung `sendChatAction`, awaited
+  inline in the event handler, had head-of-line-blocked every queued daemon
+  event and delayed the finished reply by 45 seconds. **Fixed the same hour:**
+  the indicator send is now a detached task — it is droppable decoration, and
+  the pipeline is not allowed to wait for it. Content sends stay inline,
+  because reply ordering is a correctness property.
+
+Both diagnoses took minutes, from timestamps in ordinary INFO lines. That is
+the case doing what it was opened to do.
+
 ## The shape of the problem
 
 `idle` was misread as "turn over" when it means "not currently running a

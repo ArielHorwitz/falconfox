@@ -138,6 +138,7 @@ class FalconFoxTelegramBot:
         self._turn_id: dict[str, str] = {}
         self._delivered: dict[str, int] = {}
         self._turn_started_at: dict[str, float] = {}
+        self._action_sends: set[asyncio.Task] = set()
         self._ws = None
         self._ws_lock = asyncio.Lock()
 
@@ -474,8 +475,16 @@ class FalconFoxTelegramBot:
         self._activity_state[session_id] = state
         # Streamed output fires an event per chunk; only a *change* is worth an
         # API call. A fresh loop sends immediately, so it needs no second one.
+        #
+        # Detached, never awaited inline: this sits on the event-pipeline path,
+        # and one hung Telegram call here stalls every queued daemon event
+        # behind it. Observed live (2026-08-25, 09:06): a 40s read timeout
+        # delayed a finished reply by 45 seconds. The indicator is droppable
+        # decoration; the pipeline is not allowed to wait for it.
         if not started:
-            await self._send_action(session_id, chat_id)
+            task = asyncio.create_task(self._send_action(session_id, chat_id))
+            self._action_sends.add(task)
+            task.add_done_callback(self._action_sends.discard)
         # Output has stopped while the turn continues -- the moment to hand over
         # what has arrived so far.
         if previous == "streaming":

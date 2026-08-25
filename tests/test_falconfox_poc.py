@@ -221,17 +221,24 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             bot.telegram = fake
             bot._turn_chat["session"] = 20
             bot._reply_parts["session"] = []
+            # The drains between events: action sends are detached tasks now
+            # (a hung one must not stall the pipeline), so give each a tick to
+            # land before the next state change.
             await bot._handle_event({"type": "agent_state", "session_id": "session",
                                      "state": "working"})
             await asyncio.sleep(0)
             await bot._handle_event({"type": "message", "session_id": "session",
                                      "role": "agent", "text": "hello "})
+            await asyncio.sleep(0)
             await bot._handle_event({"type": "tool_call", "session_id": "session",
                                      "title": "hidden"})
+            await asyncio.sleep(0)
             await bot._handle_event({"type": "message", "session_id": "session",
                                      "role": "agent", "text": "**world**"})
+            await asyncio.sleep(0)
             await bot._handle_event({"type": "agent_state", "session_id": "session",
                                      "state": "idle"})
+            await asyncio.sleep(0)
             # One action per state *change*: a chunk-by-chunk stream must not
             # produce a call per chunk, and the tool call is visible as state
             # without being rendered as content.
@@ -306,6 +313,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             fake.action_error = None
             await bot._handle_event({"type": "message", "session_id": "session",
                                      "role": "agent", "text": "hi"})
+            await asyncio.sleep(0)
             self.assertEqual(fake.actions, [(20, TURN_ACTIONS["streaming"])])
             await bot._handle_event({"type": "agent_state", "session_id": "session",
                                      "state": "idle"})
@@ -476,6 +484,27 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             # The original turn still finishes and delivers.
             await self._idle(bot)
             self.assertEqual(bot.telegram.html_messages[0][2], "half a reply so far")
+
+    async def test_a_hung_chat_action_does_not_stall_the_event_pipeline(self):
+        # Observed live (2026-08-25, 09:06): one Telegram sendChatAction hit its
+        # 40s read timeout inside the event handler, and every daemon event
+        # queued behind it -- a finished reply reached the chat 45 seconds late.
+        # The indicator send must be detached from the pipeline.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            release = asyncio.Event()
+
+            class HangingTelegram(FakeTelegram):
+                async def chat_action(self, chat_id, action):
+                    await release.wait()
+                    await super().chat_action(chat_id, action)
+
+            bot.telegram = HangingTelegram()
+            # Must return promptly even though the chat action never has.
+            await asyncio.wait_for(self._stream(bot, "chunk"), timeout=0.5)
+            await asyncio.wait_for(self._tool_call(bot), timeout=0.5)
+            release.set()
+            await asyncio.sleep(0)
 
     async def test_turn_ended_finalizes_and_the_following_idle_is_a_no_op(self):
         # The turn's end is now a fact the daemon states, not a state the client
