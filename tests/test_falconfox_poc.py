@@ -12,8 +12,8 @@ from falconfox.cli import CliError, _guard_self_target
 from falconfox.coordinator import SessionCoordinator
 from falconfox.storage import SessionStore
 from falconfox_telegram.api import ApiError, _json_request
-from falconfox_telegram.bot import (INTERRUPTED_TURN, TURN_ACTIONS, BotConfig,
-                                    FalconFoxTelegramBot)
+from falconfox_telegram.bot import (BUSY_TURN, INTERRUPTED_TURN, TURN_ACTIONS,
+                                    BotConfig, FalconFoxTelegramBot)
 from falconfox_telegram.rendering import TELEGRAM_MESSAGE_LIMIT, render_messages
 
 
@@ -327,6 +327,10 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
                     sent.append(json.loads(payload))
 
             bot._ws = FakeWebSocket()
+            # _bot_mid_turn primes a turn; this test needs the real entry point,
+            # which now refuses to forward while one is in flight.
+            bot._turn_chat.clear()
+            bot._reply_parts.clear()
             await bot._forward("session", 20, "do the thing")
 
             # The resume's idle, before the turn has ever reported working.
@@ -341,6 +345,45 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(bot.telegram.html_messages), 1)
             self.assertEqual(bot.telegram.html_messages[0][2], "the real reply")
             self.assertNotIn("session", bot._turn_chat)
+
+    async def test_a_message_arriving_mid_turn_is_refused_not_swallowed(self):
+        # Observed live: a message sent while a turn was running was forwarded,
+        # the daemon refused it with an *info* notice the client never shows, and
+        # the forward itself reset _reply_parts -- destroying the reply in flight.
+        # The user lost both their message and the answer they were waiting for.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            sent = []
+
+            class FakeWebSocket:
+                async def send(self, payload):
+                    sent.append(json.loads(payload))
+
+            bot._ws = FakeWebSocket()
+            await self._stream(bot, "half a reply so far")
+
+            await bot._forward("session", 20, "a second message, mid-turn")
+            self.assertEqual(sent, [], "nothing may reach the daemon mid-turn")
+            self.assertEqual(bot._reply_parts["session"], ["half a reply so far"],
+                             "the in-flight reply must survive")
+            self.assertEqual(bot.telegram.messages, [(20, BUSY_TURN)])
+
+            # The original turn still finishes and delivers.
+            await self._idle(bot)
+            self.assertEqual(bot.telegram.html_messages[0][2], "half a reply so far")
+
+    async def test_a_started_turn_is_never_stranded_by_the_pre_turn_guard(self):
+        # The guard ignores an idle for a turn that never reported working. If a
+        # flag is wrong, that must not strand the session: streamed output is
+        # proof the turn began, so the idle ends it regardless.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            bot._turn_working.discard("session")
+            await self._stream(bot, "output proves the turn began")
+            await self._idle(bot)
+            self.assertNotIn("session", bot._turn_chat)
+            self.assertEqual(bot._activity_tasks, {})
+            self.assertEqual(len(bot.telegram.html_messages), 1)
 
     async def test_read_timeout_is_an_api_error_not_a_teardown(self):
         # urllib wraps a connect failure in URLError but lets a read timeout

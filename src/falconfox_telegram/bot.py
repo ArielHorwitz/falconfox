@@ -21,6 +21,10 @@ from .rendering import render_messages
 
 log = logging.getLogger("falconfox.telegram")
 
+BUSY_TURN = (
+    "Still working on the previous message, so this one was not sent — send it "
+    "again once the reply arrives."
+)
 INTERRUPTED_TURN = (
     "Lost the connection mid-turn, so anything not already sent is gone. The "
     "session still has it — ask it to repeat."
@@ -426,6 +430,14 @@ class FalconFoxTelegramBot:
             log.debug("chat action %s failed for %s: %s", action, session_id, error)
 
     async def _forward(self, session_id: str, chat_id: int, text: str) -> None:
+        if session_id in self._turn_chat:
+            # The daemon refuses a prompt while a turn is running, and says so
+            # with an *info* notice -- which this client does not surface, so the
+            # message vanished without a trace. Worse, forwarding it anyway reset
+            # the buffers below and destroyed the reply already in flight. Refuse
+            # here instead, and say so, so the text is never silently eaten.
+            await self.telegram.message(chat_id, BUSY_TURN)
+            return
         self._turn_chat[session_id] = chat_id
         self._reply_parts[session_id] = []
         self._turn_working.discard(session_id)
@@ -491,14 +503,21 @@ class FalconFoxTelegramBot:
             return
         if state != "idle":
             return
-        if session_id in self._turn_chat and session_id not in self._turn_working:
+        if (session_id in self._turn_chat and session_id not in self._turn_working
+                and not self._reply_parts.get(session_id)):
             # Resuming a stored session emits `idle` *before* the turn starts
             # (engine/session.py sets it once the ACP subprocess is up). Treating
             # that as the end of the turn tore down _turn_chat before a single
             # chunk had arrived, so the real reply streamed into a session with
             # nowhere to send it and was dropped in silence -- every first turn
             # after a daemon restart. A turn ends only if it ever began.
-            log.debug("ignoring pre-turn idle for %s", session_id)
+            #
+            # The empty-buffer condition is the safety catch: if anything has
+            # streamed, the turn plainly began, so an idle ends it whatever the
+            # state flags say. Without it, one confused flag strands the session
+            # forever -- observed live, with the indicator left running for 54
+            # minutes and every later message refused.
+            log.info("ignoring pre-turn idle for session=%s", session_id)
             return
         self._turn_working.discard(session_id)
         activity = self._activity_tasks.pop(session_id, None)
