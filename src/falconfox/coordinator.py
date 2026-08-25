@@ -105,7 +105,6 @@ class SessionCoordinator:
         event.setdefault("ts", _now_iso())
         session_id = event.get("session_id")
         event_type = event.get("type")
-        previous_state = self._metadata.get(session_id, {}).get("state") if session_id else None
         if event_type == "agent_state" and session_id in self._metadata:
             self._metadata[session_id]["state"] = event.get("state")
         if event_type == "usage" and session_id in self._metadata:
@@ -124,17 +123,37 @@ class SessionCoordinator:
                 self._persist_meta(session_id)
                 self.store.append_event(session_id, event)
         self.bus.publish(event)
-        self._log_event(event, previous_state)
+        self._log_event(event)
         if event_type in ("agent_state", "session_added", "session_updated", "session_removed"):
             self._report_activity()
 
-    def _log_event(self, event: dict, previous_state: Optional[str]) -> None:
+    def _log_event(self, event: dict) -> None:
         event_type = event.get("type")
         session_id = event.get("session_id")
         name = self._metadata.get(session_id, {}).get("name") if session_id else None
         if event_type == "agent_state":
-            if event.get("state") == "idle" and previous_state == "working":
-                self.log.info("turn complete: session=%s name=%s", session_id, name)
+            return  # turns log themselves below; idle/working are mere states
+        if event_type == "turn_started":
+            self.log.info("turn start: session=%s name=%s turn=%s prompt_chars=%s",
+                          session_id, name, event.get("turn_id"),
+                          event.get("prompt_chars"))
+            return
+        if event_type == "turn_ended":
+            line = ("turn complete: session=%s name=%s turn=%s outcome=%s stop=%s "
+                    "duration=%ss chunks=%s chars=%s thoughts=%s tools=%s")
+            values = (session_id, name, event.get("turn_id"), event.get("outcome"),
+                      event.get("stop_reason"), event.get("duration"),
+                      event.get("message_chunks"), event.get("output_chars"),
+                      event.get("thought_chunks"), event.get("tool_calls"))
+            silent = (event.get("output_chars") == 0
+                      and event.get("outcome") == "completed"
+                      and event.get("stop_reason") != "cancelled")
+            if silent:
+                # The recurring failure shape: a turn ends with nothing to show
+                # and nobody notices. Detectable right here, so it is a warning.
+                self.log.warning(line + " — turn produced NO output", *values)
+            else:
+                self.log.info(line, *values)
             return
         if event_type == "notice":
             self.log.info("notice[%s]: session=%s msg=%s", event.get("level", "info"),

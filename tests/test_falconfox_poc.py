@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from falconfox.cli import CliError, _guard_self_target
 from falconfox.coordinator import SessionCoordinator
+from falconfox.engine.session import AgentSession
 from falconfox.storage import SessionStore
+from falconfox.watchdog import StallWatchdog
 from falconfox_telegram.api import ApiError, _json_request
 from falconfox_telegram.bot import (BUSY_TURN, DAEMON_DOWN, INTERRUPTED_TURN,
                                     TURN_ACTIONS, BotConfig, FalconFoxTelegramBot)
@@ -66,6 +70,27 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
                          "focus")
         self.assertFalse(Path(self.temporary.name, "focus").exists())
 
+    async def test_a_turn_that_produced_no_output_is_a_warning(self):
+        # The recurring failure shape: a turn ends with nothing to show and
+        # nobody notices. The daemon now notices, at the moment it happens.
+        self.coordinator._metadata["s"] = {
+            "session_id": "s", "name": "quiet", "path": "/tmp", "backend": "echo",
+            "always_allow": True, "ephemeral": True, "state": "working",
+            "live": True, "created": "1", "last_active": "1",
+        }
+        turn = {"type": "turn_ended", "session_id": "s", "turn_id": "t1",
+                "outcome": "completed", "stop_reason": "end_turn", "duration": 1.0,
+                "message_chunks": 0, "output_chars": 0, "thought_chunks": 0,
+                "tool_calls": 0}
+        with self.assertLogs("falconfox.coordinator", level="WARNING") as captured:
+            self.coordinator._emit(dict(turn))
+        self.assertIn("NO output", captured.output[0])
+        # A turn that did produce output logs at INFO, not WARNING.
+        with self.assertLogs("falconfox.coordinator", level="INFO") as captured:
+            self.coordinator._emit({**turn, "output_chars": 42, "message_chunks": 3})
+        self.assertNotIn("WARNING", captured.output[0])
+        self.assertIn("turn complete", captured.output[0])
+
     async def test_snapshot_contains_metadata_not_transcripts(self):
         self.coordinator._metadata["one"] = {
             "session_id": "one", "name": "one", "path": "/tmp", "backend": "echo",
@@ -76,6 +101,86 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         snapshot = self.coordinator.snapshot()
         self.assertEqual(snapshot["sessions"][0]["session_id"], "one")
         self.assertNotIn("transcripts", snapshot)
+
+
+class EngineTurnTests(unittest.IsolatedAsyncioTestCase):
+    """The turn as a first-class fact: id, boundaries, and what it produced."""
+
+    def _session(self, events):
+        session = AgentSession(
+            session_id="s", name="n", path=Path("/tmp"), backend=None,
+            emit=events.append, request_permission=None,
+        )
+        session._acp_session_id = "acp"
+        return session
+
+    async def test_a_turn_reports_its_own_start_end_and_output(self):
+        events = []
+        session = self._session(events)
+
+        class FakeConn:
+            async def prompt(self, **_kwargs):
+                # What the ACP client would emit while the prompt runs.
+                session._guarded_emit({"session_id": "s", "type": "message",
+                                       "role": "agent", "text": "hello"})
+                session._guarded_emit({"session_id": "s", "type": "message",
+                                       "role": "thought", "text": "hmm"})
+                session._guarded_emit({"session_id": "s", "type": "tool_call",
+                                       "tool_call_id": "t1", "status": "pending"})
+                session._guarded_emit({"session_id": "s", "type": "tool_call",
+                                       "tool_call_id": "t1", "status": "completed"})
+
+                class Response:
+                    stop_reason = "end_turn"
+                    usage = None
+                return Response()
+
+        session._conn = FakeConn()
+        await session.send("hi")
+        types = [event["type"] for event in events]
+        started = next(event for event in events if event["type"] == "turn_started")
+        ended = next(event for event in events if event["type"] == "turn_ended")
+        self.assertEqual(started["turn_id"], ended["turn_id"])
+        self.assertEqual(ended["outcome"], "completed")
+        self.assertEqual(ended["stop_reason"], "end_turn")
+        self.assertEqual(ended["output_chars"], len("hello"))
+        self.assertEqual(ended["message_chunks"], 1)
+        self.assertEqual(ended["thought_chunks"], 1)
+        # Two updates for one tool call count once.
+        self.assertEqual(ended["tool_calls"], 1)
+        # The end of the turn is announced before the idle state, so clients
+        # can finalize on the fact and treat the state as the no-op it is.
+        self.assertLess(types.index("turn_ended"), len(types) - 1)
+        self.assertEqual(events[-1], {"session_id": "s", "type": "agent_state",
+                                      "state": "idle"})
+
+    async def test_a_failed_prompt_still_ends_its_turn(self):
+        events = []
+        session = self._session(events)
+
+        class BrokenConn:
+            async def prompt(self, **_kwargs):
+                raise RuntimeError("backend fell over")
+
+        session._conn = BrokenConn()
+        await session.send("hi")
+        ended = next(event for event in events if event["type"] == "turn_ended")
+        self.assertEqual(ended["outcome"], "error")
+        self.assertEqual(ended["output_chars"], 0)
+
+
+class WatchdogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_blocked_loop_is_reported(self):
+        log = logging.getLogger("falconfox.test.watchdog")
+        dog = StallWatchdog(log, interval=0.05, threshold=0.2)
+        dog.start()
+        try:
+            with self.assertLogs(log, level="WARNING") as captured:
+                time.sleep(0.8)  # block the event loop, not just this coroutine
+                await asyncio.sleep(0.2)  # let the heartbeat land again
+            self.assertTrue(any("stall" in line for line in captured.output))
+        finally:
+            dog.stop()
 
 
 class CliSafetyTests(unittest.TestCase):
@@ -371,6 +476,87 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             # The original turn still finishes and delivers.
             await self._idle(bot)
             self.assertEqual(bot.telegram.html_messages[0][2], "half a reply so far")
+
+    async def test_turn_ended_finalizes_and_the_following_idle_is_a_no_op(self):
+        # The turn's end is now a fact the daemon states, not a state the client
+        # infers. The idle that follows must find nothing left to do.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            await self._stream(bot, "the reply")
+            await bot._handle_event({"type": "turn_ended", "session_id": "session",
+                                     "turn_id": "t1", "outcome": "completed",
+                                     "stop_reason": "end_turn", "output_chars": 9})
+            self.assertEqual(len(bot.telegram.html_messages), 1)
+            self.assertEqual(bot.telegram.html_messages[0][2], "the reply")
+            self.assertNotIn("session", bot._turn_chat)
+            self.assertEqual(bot._activity_tasks, {})
+            await self._idle(bot)
+            self.assertEqual(len(bot.telegram.html_messages), 1,
+                             "the idle after turn_ended must not deliver twice")
+            self.assertEqual(bot.telegram.messages, [],
+                             "a delivered turn must not be reported as silent")
+
+    async def test_a_turn_that_delivered_nothing_is_said_out_loud(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            await bot._handle_event({"type": "turn_ended", "session_id": "session",
+                                     "turn_id": "t1", "outcome": "completed",
+                                     "stop_reason": "refusal", "output_chars": 0})
+            self.assertEqual(bot.telegram.html_messages, [])
+            self.assertEqual(len(bot.telegram.messages), 1)
+            self.assertIn("without delivering", bot.telegram.messages[0][1])
+            self.assertIn("refusal", bot.telegram.messages[0][1])
+
+    async def test_output_lost_in_the_client_reads_differently_from_no_output(self):
+        # The daemon streamed 500 characters; none reached this chat. That is a
+        # client-side loss -- the resume-idle bug's exact shape -- and the report
+        # must not blame the agent for it.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            await bot._handle_event({"type": "turn_ended", "session_id": "session",
+                                     "turn_id": "t1", "outcome": "completed",
+                                     "stop_reason": "end_turn", "output_chars": 500})
+            self.assertEqual(len(bot.telegram.messages), 1)
+            self.assertIn("lost", bot.telegram.messages[0][1])
+            self.assertIn("500", bot.telegram.messages[0][1])
+
+    async def test_an_errored_or_cancelled_turn_is_not_double_reported(self):
+        # The error notice already told the chat; a cancelled turn is empty on
+        # purpose. Neither deserves a second message.
+        for outcome, stop in (("error", None), ("completed", "cancelled")):
+            with tempfile.TemporaryDirectory() as directory:
+                bot = self._bot_mid_turn(directory)
+                await bot._handle_event({"type": "turn_ended", "session_id": "session",
+                                         "turn_id": "t1", "outcome": outcome,
+                                         "stop_reason": stop, "output_chars": 0})
+                self.assertEqual(bot.telegram.messages, [],
+                                 f"outcome={outcome} stop={stop} must stay quiet")
+                self.assertNotIn("session", bot._turn_chat)
+
+    async def test_status_reports_the_daemon_and_the_bot_view(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            bot._turn_id["session"] = "t123"
+            bot._turn_started_at["session"] = time.monotonic() - 5
+            bot._activity_state["session"] = "streaming"
+            bot._reply_parts["session"] = ["buffered text"]
+            bot._pointer_value = "session"
+
+            class FakeDaemon:
+                async def version(self):
+                    return {"version": "9.9-test"}
+
+                async def sessions(self):
+                    return [{"session_id": "session", "name": "work thing",
+                             "state": "working", "path": "/tmp"}]
+
+            bot.daemon = FakeDaemon()
+            handled = await bot._command(20, "/status")
+            self.assertTrue(handled)
+            report = bot.telegram.messages[0][1]
+            for expected in ("9.9-test", "work thing", "t123", "streaming",
+                             f"buffered={len('buffered text')}"):
+                self.assertIn(expected, report)
 
     async def test_a_started_turn_is_never_stranded_by_the_pre_turn_guard(self):
         # The guard ignores an idle for a turn that never reported working. If a

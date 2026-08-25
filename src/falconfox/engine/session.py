@@ -11,6 +11,7 @@ agent; acceptable, and swappable later for shared-connection multiplexing.
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
@@ -34,6 +35,35 @@ CLIENT_CAPABILITIES = ClientCapabilities(
 
 
 @dataclass
+class _TurnStats:
+    """What one prompt turn actually produced — the turn's *facts*.
+
+    A turn used to exist only as an implication of state transitions, which is
+    how `idle` came to mean two different things and how a turn could end having
+    delivered nothing with no layer able to notice. These counters make it a
+    first-class thing the daemon can log and clients can trust.
+    """
+
+    turn_id: str
+    started: float = field(default_factory=time.monotonic)
+    message_chunks: int = 0
+    output_chars: int = 0
+    thought_chunks: int = 0
+    tool_call_ids: set = field(default_factory=set)
+
+    def observe(self, event: dict) -> None:
+        event_type = event.get("type")
+        if event_type == "message" and event.get("role") == "agent":
+            self.message_chunks += 1
+            self.output_chars += len(event.get("text") or "")
+        elif event_type == "message" and event.get("role") == "thought":
+            self.thought_chunks += 1
+        elif event_type == "tool_call":
+            # Updates reuse the id; count calls, not status changes.
+            self.tool_call_ids.add(event.get("tool_call_id"))
+
+
+@dataclass
 class AgentSession:
     session_id: str
     name: str
@@ -47,6 +77,7 @@ class AgentSession:
     _client: Any = field(default=None, init=False)
     _acp_session_id: Optional[str] = field(default=None, init=False)
     _busy: bool = field(default=False, init=False)
+    _turn: Optional[_TurnStats] = field(default=None, init=False)
     _supports_load: bool = field(default=False, init=False)
     _suppress_emit: bool = field(default=False, init=False)
     # Every option the backend advertises via ACP `configOptions` — model,
@@ -80,8 +111,11 @@ class AgentSession:
     def _guarded_emit(self, event: dict) -> None:
         # Dropped while replaying a loaded session — that history is already on
         # disk, so re-emitting it would duplicate the transcript.
-        if not self._suppress_emit:
-            self.emit(event)
+        if self._suppress_emit:
+            return
+        if self._turn is not None:
+            self._turn.observe(event)
+        self.emit(event)
 
     async def _spawn(self) -> None:
         """Spawn the subprocess, initialize the connection, note its capabilities."""
@@ -190,6 +224,9 @@ class AgentSession:
             self._notify("agent is still responding; wait for the current turn")
             return
         self._busy = True
+        turn = _TurnStats(turn_id=uuid.uuid4().hex[:8])
+        self._turn = turn
+        outcome, stop_reason = "completed", None
         self.emit(
             {
                 "session_id": self.session_id,
@@ -199,6 +236,10 @@ class AgentSession:
                 "system": system,
             }
         )
+        self.emit(
+            {"session_id": self.session_id, "type": "turn_started",
+             "turn_id": turn.turn_id, "prompt_chars": len(text)}
+        )
         self._set_state("working")
         try:
             response = await self._conn.prompt(
@@ -206,14 +247,35 @@ class AgentSession:
                 session_id=self._acp_session_id,
                 message_id=str(uuid.uuid4()),
             )
+            stop_reason = getattr(response, "stop_reason", None)
             self._report_usage(getattr(response, "usage", None))
         except Exception as error:  # surface, don't crash the engine
             # The user sees the summary as a notice; keep the traceback for DEBUG
             # so a backend/protocol failure mid-turn is diagnosable.
             log.debug("prompt failed for session=%s", self.session_id, exc_info=True)
             self._notify(f"agent error: {error}", level="error")
+            outcome = "error"
         finally:
+            self._turn = None
             self._busy = False
+            # Ended before idle: the end of a turn is a fact with contents,
+            # while idle is a state a session can be in for other reasons —
+            # conflating them is how replies got dropped. Clients that finalize
+            # on turn_ended see the idle that follows as the no-op it is.
+            self.emit(
+                {
+                    "session_id": self.session_id,
+                    "type": "turn_ended",
+                    "turn_id": turn.turn_id,
+                    "outcome": outcome,
+                    "stop_reason": str(stop_reason) if stop_reason is not None else None,
+                    "duration": round(time.monotonic() - turn.started, 2),
+                    "message_chunks": turn.message_chunks,
+                    "output_chars": turn.output_chars,
+                    "thought_chunks": turn.thought_chunks,
+                    "tool_calls": len(turn.tool_call_ids),
+                }
+            )
             self._set_state("idle")
 
     async def cancel(self) -> None:

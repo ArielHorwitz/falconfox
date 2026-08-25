@@ -16,6 +16,11 @@ from watchfiles import awatch
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
+# Diagnostic machinery, not daemon protocol: the 2026-08-25 keepalive stalls
+# could not even be attributed to a side, because neither process recorded its
+# own freezes. Both run the same watchdog; sharing it crosses no boundary.
+from falconfox.watchdog import StallWatchdog
+
 from .api import ApiError, DaemonApi, TelegramApi
 from .rendering import render_messages
 
@@ -34,6 +39,9 @@ INTERRUPTED_TURN = (
     "Lost the connection mid-turn, so anything not already sent is gone. The "
     "session still has it — ask it to repeat."
 )
+# The recurring silent failure: a turn ends, nothing was ever delivered, and no
+# layer had an error to report. Now the moment it happens, the chat hears it.
+SILENT_TURN = "⚠️ The turn ended without delivering a reply ({detail})."
 
 
 @dataclass(frozen=True)
@@ -124,10 +132,17 @@ class FalconFoxTelegramBot:
         self._activity_state: dict[str, str] = {}
         self._last_flush: dict[str, float] = {}
         self._turn_working: set[str] = set()
+        # The daemon's id for the turn this client is carrying, plus what this
+        # client has actually handed to Telegram for it — the two facts that
+        # let a turn which delivered nothing be caught instead of shrugged at.
+        self._turn_id: dict[str, str] = {}
+        self._delivered: dict[str, int] = {}
+        self._turn_started_at: dict[str, float] = {}
         self._ws = None
         self._ws_lock = asyncio.Lock()
 
     async def run(self) -> None:
+        StallWatchdog(logging.getLogger("falconfox.telegram.watchdog")).start()
         self._prepare_focus_workspace()
         ws_url = self.config.daemon_url.replace("http://", "ws://", 1).replace(
             "https://", "wss://", 1
@@ -210,6 +225,9 @@ class FalconFoxTelegramBot:
         self._activity_state.clear()
         self._last_flush.clear()
         self._turn_working.clear()
+        self._turn_id.clear()
+        self._delivered.clear()
+        self._turn_started_at.clear()
         interrupted = sorted(set(self._turn_chat.values()))
         self._turn_chat.clear()
         self._reply_parts.clear()
@@ -353,6 +371,12 @@ class FalconFoxTelegramBot:
             await self.telegram.message(chat_id, f"Invalid command: {error}")
             return True
         command = parts[0].split("@", 1)[0]
+        if command == "/status":
+            # Diagnosis from the phone: what the daemon knows about sessions,
+            # and what this bot *believes* is in flight — the five parallel
+            # dicts that every silent failure so far has been a hidden state of.
+            await self.telegram.message(chat_id, await self._status_report())
+            return True
         if command == "/list":
             sessions = await self.daemon.sessions()
             listing = "\n".join(
@@ -386,6 +410,41 @@ class FalconFoxTelegramBot:
             await self.telegram.message(chat_id, f"Renamed session to {' '.join(parts[1:])}.")
             return True
         return False
+
+    async def _status_report(self) -> str:
+        try:
+            version = (await self.daemon.version()).get("version")
+        except Exception:
+            version = "daemon unreachable"
+        sessions = await self.daemon.sessions()
+        names = {item["session_id"]: item["name"] for item in sessions}
+        lines = [f"FalconFox {version}"]
+        focused = self._pointer_value or self._read_pointer()
+        match = next((item for item in sessions if item["session_id"] == focused), None)
+        if match:
+            lines.append(f"Focused: {match['name']} ({focused}) [{match['state']}] "
+                         f"— {match['path']}")
+        else:
+            lines.append(f"Focused: {focused or 'none'}")
+        for item in sessions:
+            lines.append(f"  {item['session_id']}  {item['name']}  [{item['state']}]")
+        if not self._turn_chat:
+            lines.append("No turn in flight (bot view).")
+        else:
+            lines.append("In flight (bot view):")
+            now = time.monotonic()
+            for session_id, turn_chat in self._turn_chat.items():
+                chat = "focus" if turn_chat == self.config.focus_chat_id else "work"
+                started = self._turn_started_at.get(session_id)
+                age = f"{now - started:.0f}s ago" if started is not None else "unknown"
+                buffered = sum(len(part) for part in self._reply_parts.get(session_id, []))
+                lines.append(
+                    f"  {names.get(session_id, session_id)}: chat={chat} "
+                    f"turn={self._turn_id.get(session_id) or '?'} "
+                    f"activity={self._activity_state.get(session_id) or '?'} "
+                    f"buffered={buffered} delivered={self._delivered.get(session_id, 0)} "
+                    f"started {age}")
+        return "\n".join(lines)
 
     def _start_activity(self, session_id: str, chat_id: int) -> bool:
         """Ensure a refresh loop is running. True if this call started one."""
@@ -443,8 +502,11 @@ class FalconFoxTelegramBot:
         # Keep the list -- the turn is not over, and what comes next belongs to
         # the same reply.
         self._reply_parts[session_id] = []
+        log.info("flush %s: session=%s chat=%s chars=%d",
+                 "final" if final else "partial", session_id, chat_id, len(text))
         for rendered in render_messages(text):
             await self.telegram.html_message(chat_id, rendered.html, rendered.plain)
+        self._delivered[session_id] = self._delivered.get(session_id, 0) + len(text)
 
     async def _send_action(self, session_id: str, chat_id: int) -> None:
         action = TURN_ACTIONS.get(
@@ -465,10 +527,14 @@ class FalconFoxTelegramBot:
             # message vanished without a trace. Worse, forwarding it anyway reset
             # the buffers below and destroyed the reply already in flight. Refuse
             # here instead, and say so, so the text is never silently eaten.
+            log.info("refused mid-turn message: session=%s chat=%s", session_id, chat_id)
             await self.telegram.message(chat_id, BUSY_TURN)
             return
+        log.info("forward: session=%s chat=%s chars=%d", session_id, chat_id, len(text))
         self._turn_chat[session_id] = chat_id
         self._reply_parts[session_id] = []
+        self._delivered[session_id] = 0
+        self._turn_started_at[session_id] = time.monotonic()
         self._turn_working.discard(session_id)
         # Type from the moment the prompt goes out. Waiting for the daemon to
         # report `working` leaves the whole backend-startup window silent: a
@@ -519,6 +585,20 @@ class FalconFoxTelegramBot:
             if chat_id:
                 await self.telegram.message(chat_id, f"FalconFox error: {event.get('message', '')}")
             return
+        if event_type == "turn_started":
+            # The daemon's own name for the turn this chat is waiting on. Turns
+            # driven by other clients (the focus agent's CLI sends, the web UI)
+            # have no chat here and are none of our business.
+            if session_id in self._turn_chat:
+                self._turn_id[session_id] = event.get("turn_id") or ""
+                log.info("turn started: session=%s turn=%s", session_id, event.get("turn_id"))
+            return
+        if event_type == "turn_ended":
+            # The authoritative end of a turn. `idle` below stays only as a
+            # backstop — it is a state, not an event, and reading it as "turn
+            # over" is how replies used to vanish.
+            await self._finish_turn(session_id, event)
+            return
         if event_type != "agent_state":
             return
         state = event.get("state")
@@ -548,16 +628,49 @@ class FalconFoxTelegramBot:
             # minutes and every later message refused.
             log.info("ignoring pre-turn idle for session=%s", session_id)
             return
+        # Normally a no-op: turn_ended has already finalized, and _finish_turn
+        # is idempotent. Kept so a daemon that never sent one (or a turn whose
+        # end this client somehow missed) still cannot strand the session.
+        await self._finish_turn(session_id, None)
+
+    async def _finish_turn(self, session_id: str, event: dict | None) -> None:
+        """Close out a turn: deliver the remainder, stop the indicator, account
+        for what was handed over — and say so when that is nothing. Idempotent:
+        the `idle` that follows a `turn_ended` finds nothing left to do."""
         self._turn_working.discard(session_id)
         activity = self._activity_tasks.pop(session_id, None)
         if activity:
             activity.cancel()
         self._activity_state.pop(session_id, None)
         chat_id = self._turn_chat.pop(session_id, None)
+        turn_id = self._turn_id.pop(session_id, None) or (event or {}).get("turn_id")
+        started = self._turn_started_at.pop(session_id, None)
         if chat_id is not None:
             await self._flush_reply(session_id, chat_id, final=True)
+        delivered = self._delivered.pop(session_id, 0)
         self._reply_parts.pop(session_id, None)
         self._last_flush.pop(session_id, None)
+        if chat_id is not None:
+            outcome = (event or {}).get("outcome")
+            stop = (event or {}).get("stop_reason")
+            elapsed = time.monotonic() - started if started is not None else -1.0
+            log.info("turn ended: session=%s turn=%s outcome=%s stop=%s "
+                     "delivered=%d chars in %.1fs",
+                     session_id, turn_id, outcome, stop, delivered, elapsed)
+            if delivered == 0 and outcome != "error" and stop != "cancelled":
+                # An errored turn already surfaced its error notice, and a
+                # cancelled one is empty on purpose. Anything else that ends
+                # with nothing delivered is the silent failure this client
+                # kept producing -- so it stops being silent, in both places.
+                streamed = (event or {}).get("output_chars")
+                if streamed:
+                    detail = (f"the agent wrote {streamed} characters "
+                              "that were lost on the way to this chat")
+                else:
+                    detail = f"the agent produced no output; stop reason: {stop or 'unknown'}"
+                log.warning("turn delivered nothing: session=%s turn=%s %s",
+                            session_id, turn_id, detail)
+                await self.telegram.message(chat_id, SILENT_TURN.format(detail=detail))
         if session_id == self.focus_session_id and self._rotate_pending:
             await self._rotate_focus_session()
 

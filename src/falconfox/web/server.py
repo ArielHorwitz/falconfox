@@ -18,6 +18,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from .. import config, get_version, logsetup, state
 from ..coordinator import SessionCoordinator
 from ..errors import FalconFoxError
+from ..watchdog import StallWatchdog
 
 STATIC_DIR = Path(__file__).parent.joinpath("static")
 log = logsetup.get_logger("server")
@@ -35,6 +36,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: Starlette):
+        # The keepalive-timeout stalls of 2026-08-25 were unattributable because
+        # nothing recorded what (or whether) this process was doing. See watchdog.py.
+        watchdog = StallWatchdog(logsetup.get_logger("watchdog"))
+        watchdog.start()
         if write_info:
             state.write_server_info(bound_port)
         if open_browser:
@@ -43,6 +48,7 @@ def create_app(
         try:
             yield
         finally:
+            watchdog.stop()
             if write_info:
                 state.remove_server_info()
             await coordinator.shutdown()
@@ -59,6 +65,11 @@ def create_app(
             return JSONResponse(coordinator.list_sessions(include_ephemeral=include))
         try:
             body = await request.json()
+            # Mirrors the ws path's action= lines: the CLI drives the daemon
+            # over HTTP, so without this the focus agent's actions (spawn,
+            # send, delete, …) never appear in the log at all.
+            coordinator.log.info("action=spawn via=http path=%s name=%s backend=%s",
+                                 body.get("path"), body.get("name"), body.get("backend"))
             session_id = await coordinator.add_session(
                 path=body.get("path"),
                 name=body.get("name"),
@@ -73,6 +84,7 @@ def create_app(
         session_id = request.path_params["session_id"]
         try:
             if request.method == "DELETE":
+                coordinator.log.info("action=delete via=http session=%s", session_id)
                 await coordinator.delete_session(session_id)
                 return JSONResponse({"deleted": session_id})
             return JSONResponse({
@@ -85,6 +97,7 @@ def create_app(
     async def session_action(request: Request) -> JSONResponse:
         session_id = request.path_params["session_id"]
         action = request.path_params["action"]
+        coordinator.log.info("action=%s via=http session=%s", action, session_id)
         try:
             body = await request.json() if request.headers.get("content-length") not in (None, "0") else {}
             if action == "send":
