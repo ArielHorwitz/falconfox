@@ -194,15 +194,26 @@ class CliSafetyTests(unittest.TestCase):
 class FakeTelegram:
     def __init__(self):
         self.messages = []
+        self.message_replies = []
         self.html_messages = []
+        self.html_replies = []
+        self.edits = []
         self.actions = []
         self.action_error = None
+        self._next_id = 100
 
-    async def message(self, chat_id, text):
+    async def message(self, chat_id, text, reply_to=None):
         self.messages.append((chat_id, text))
+        self.message_replies.append(reply_to)
+        self._next_id += 1
+        return self._next_id
 
-    async def html_message(self, chat_id, html_text, plain_fallback):
+    async def html_message(self, chat_id, html_text, plain_fallback, reply_to=None):
         self.html_messages.append((chat_id, html_text, plain_fallback))
+        self.html_replies.append(reply_to)
+
+    async def edit_message(self, chat_id, message_id, text):
+        self.edits.append((chat_id, message_id, text))
 
     async def chat_action(self, chat_id, action):
         if self.action_error is not None:
@@ -241,16 +252,22 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             # One action per state *change*: a chunk-by-chunk stream must not
             # produce a call per chunk, and the tool call is visible as state
-            # without being rendered as content.
+            # without being rendered as a message of its own.
             self.assertEqual(fake.actions, [
                 (20, TURN_ACTIONS["working"]),
                 (20, TURN_ACTIONS["streaming"]),
                 (20, TURN_ACTIONS["tool"]),
                 (20, TURN_ACTIONS["streaming"]),
             ])
-            self.assertEqual(fake.messages, [])
+            # The text before the tool call was narration introducing it; both
+            # land in the finalized progress message. The reply is only the
+            # final block -- the answer, not the working chatter.
+            self.assertEqual(len(fake.messages), 1)
+            self.assertIn("✅ Turn finished", fake.messages[0][1])
+            self.assertIn("hello", fake.messages[0][1])
+            self.assertIn("⚙️ hidden", fake.messages[0][1])
             self.assertEqual(fake.html_messages,
-                             [(20, "hello <b>world</b>", "hello **world**")])
+                             [(20, "<b>world</b>", "**world**")])
 
 
     async def test_activity_starts_when_the_prompt_is_sent(self):
@@ -369,61 +386,96 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
         await bot._handle_event({"type": "agent_state", "session_id": "session",
                                  "state": "idle"})
 
-    async def test_a_tool_call_flushes_what_has_streamed_so_far(self):
+    async def test_the_run_on_narration_bug_is_structurally_gone(self):
+        # The report that forced this design (2026-08-25): three remarks made
+        # between tool calls arrived glued together with no separators, each
+        # colon pointing at an action the chat suppresses. Narration now lives
+        # in the progress message as distinct lines with its tool markers, and
+        # the reply carries only the final block.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot_mid_turn(directory)
-            await self._stream(bot, "x" * 300)
+            await self._stream(bot, "Now the new test class:")
             await self._tool_call(bot)
-            # Handed over as soon as output stopped, rather than held to the end.
-            self.assertEqual(len(bot.telegram.html_messages), 1)
-            self.assertIn("x" * 300, bot.telegram.html_messages[0][1])
-
-            await self._stream(bot, "tail")
+            await self._stream(bot, "Add the quiet field:")
+            await self._tool_call(bot)
+            await self._stream(bot, "All 44 tests pass.")
+            self.assertEqual(bot.telegram.html_messages, [],
+                             "nothing is delivered as a reply mid-turn")
+            self.assertEqual(bot._progress_lines["session"], [
+                "Now the new test class:", "⚙️ hidden",
+                "Add the quiet field:", "⚙️ hidden",
+            ])
             await self._idle(bot)
-            # The remainder is a second message, and nothing is sent twice.
-            self.assertEqual(len(bot.telegram.html_messages), 2)
-            self.assertEqual(bot.telegram.html_messages[1][2], "tail")
-            bot._activity_tasks and [t.cancel() for t in bot._activity_tasks.values()]
+            self.assertEqual(len(bot.telegram.html_messages), 1)
+            self.assertEqual(bot.telegram.html_messages[0][2], "All 44 tests pass.")
 
-    async def test_a_short_partial_reply_waits_for_the_end_of_the_turn(self):
+    async def test_the_progress_message_is_created_once_then_edited(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot_mid_turn(directory)
-            await self._stream(bot, "short")
+            await self._stream(bot, "first remark")
             await self._tool_call(bot)
-            self.assertEqual(bot.telegram.html_messages, [])
-            await self._idle(bot)
-            self.assertEqual(len(bot.telegram.html_messages), 1)
-            self.assertEqual(bot.telegram.html_messages[0][2], "short")
+            await bot._update_progress("session", 20)
+            self.assertEqual(len(bot.telegram.messages), 1)
+            self.assertIn("Working", bot.telegram.messages[0][1])
+            self.assertIn("first remark", bot.telegram.messages[0][1])
+            message_id = bot._progress_msg["session"]
 
-    async def test_a_partial_reply_is_not_cut_inside_a_code_block(self):
-        with tempfile.TemporaryDirectory() as directory:
-            bot = self._bot_mid_turn(directory)
-            fence = "```python\n" + "y = 1\n" * 80
-            await self._stream(bot, fence)
+            await self._stream(bot, "second remark")
             await self._tool_call(bot)
-            # Long enough to flush, but the fence is still open.
-            self.assertGreater(len(fence), 240)
-            self.assertEqual(bot.telegram.html_messages, [])
-            await self._stream(bot, "```\ndone")
-            await bot._handle_event({"type": "message", "session_id": "session",
-                                     "role": "thought", "text": ""})
-            # Balanced now, so the same guard lets it through.
-            self.assertEqual(len(bot.telegram.html_messages), 1)
+            await bot._update_progress("session", 20)
+            # Edited in place: no new message, and the edit carries the tail.
+            self.assertEqual(len(bot.telegram.messages), 1)
+            self.assertEqual(len(bot.telegram.edits), 1)
+            self.assertEqual(bot.telegram.edits[0][1], message_id)
+            self.assertIn("second remark", bot.telegram.edits[0][2])
+            # Nothing dirty, nothing sent: the refresh tick must be a no-op.
+            await bot._update_progress("session", 20)
+            self.assertEqual(len(bot.telegram.edits), 1)
             await self._idle(bot)
 
-    async def test_partial_flushes_are_rate_limited(self):
+    async def test_repeated_tool_calls_collapse_into_one_marker(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot_mid_turn(directory)
-            await self._stream(bot, "a" * 300)
-            await self._tool_call(bot)
-            self.assertEqual(len(bot.telegram.html_messages), 1)
-            # A second burst inside the window is held rather than sent.
-            await self._stream(bot, "b" * 300)
-            await self._tool_call(bot)
-            self.assertEqual(len(bot.telegram.html_messages), 1)
+            for _ in range(3):
+                await self._tool_call(bot)
+            self.assertEqual(bot._progress_lines["session"], ["⚙️ hidden ×3"])
             await self._idle(bot)
-            self.assertEqual(len(bot.telegram.html_messages), 2)
-            self.assertEqual(bot.telegram.html_messages[1][2], "b" * 300)
+
+    async def test_a_trailing_tool_call_does_not_eat_the_answer(self):
+        # A turn that says its piece and then runs one last trivial tool would
+        # otherwise file its real answer as narration and reply with nothing.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            await self._stream(bot, "the real answer, stated before a cleanup step")
+            await self._tool_call(bot)
+            await self._idle(bot)
+            self.assertEqual(len(bot.telegram.html_messages), 1)
+            self.assertEqual(bot.telegram.html_messages[0][2],
+                             "the real answer, stated before a cleanup step")
+
+    async def test_the_reply_threads_to_the_prompt_message(self):
+        # Threading is also the notification story: in a group, a reply (like
+        # a mention) cuts through a muted chat, so the progress message can be
+        # spam-tolerant while the answer still pings.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = FalconFoxTelegramBot(BotConfig(
+                "token", 10, 20, pointer_file=Path(directory, "focus"),
+                default_path=Path(directory),
+            ))
+            bot.telegram = FakeTelegram()
+
+            class FakeWebSocket:
+                async def send(self, payload):
+                    pass
+
+            bot._ws = FakeWebSocket()
+            await bot._forward("session", 20, "question", prompt_msg=555)
+            await self._stream(bot, "answer")
+            await bot._handle_event({"type": "turn_ended", "session_id": "session",
+                                     "turn_id": "t1", "outcome": "completed",
+                                     "stop_reason": "end_turn", "output_chars": 6})
+            self.assertEqual(bot.telegram.html_messages[0][2], "answer")
+            self.assertEqual(bot.telegram.html_replies, [555])
 
     async def test_the_idle_from_resuming_a_stored_session_is_not_the_turn_ending(self):
         # Sending to a stored session resumes it, and engine/session.py sets

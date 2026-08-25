@@ -314,7 +314,11 @@ carries two kinds of agent text, *working narration* and *the actual answer*,
 and the chat renders their concatenation minus the context that makes
 narration legible.
 
-Option space, discussed with the user (decision pending):
+Option space as discussed. **Decided (user, 2026-08-25): D, without the
+replacement** — the progress message stays in the chat as the record of the
+chain of work, and the final response is its own message. Plus the user's
+notification idea: make the final response the thing that pings (they mute the
+bot, mentions/replies cut through). Built the same day — see the next section.
 
 - **A. Separators only** — paragraph break where a tool call interrupted the
   text. Minimum fix; needed under every option below except E.
@@ -333,6 +337,61 @@ Option space, discussed with the user (decision pending):
   call", and a turn ending in a trivial tool call would misfile its real
   answer as narration. The old blast-radius argument for flushing is weaker
   now (transcript recovery exists), which makes E viable at all.
+
+## Built: the two-message turn (2026-08-25)
+
+The reply format decided above, shipped. Every turn now produces at most two
+artifacts in the chat:
+
+- **A progress message** — created lazily (a turn with nothing to narrate gets
+  none), edited in place as the turn proceeds, and left standing when it ends,
+  stamped "✅ Turn finished · 132s · 14 tool calls" (or ⚠️/✖️). It carries the
+  chain of work: each narration block as its own paragraph, each tool call as
+  a compact "⚙️ title" line, consecutive repeats collapsed ("⚙️ Bash ×12").
+  Plain text, capped by trimming its oldest lines. All progress I/O rides the
+  activity loop, never the event pipeline — a hung edit cannot stall queued
+  daemon events (the 09:06 lesson). Edits never trigger notifications.
+- **The reply** — the text after the last tool call, rendered as before and
+  sent as a Telegram *reply to the user's prompt message*. Threading is also
+  the notification design: in a group, replies (like mentions) cut through a
+  muted chat, so the user can mute the bot and still be pinged by answers.
+  Reply-threading was chosen over literal @mentions: same notification
+  behavior, no username configuration, and it marks *which* prompt each answer
+  belongs to — closing the old "reaction on the prompt" idea for free.
+
+Mechanics worth remembering:
+
+- **Blocks.** A tool_call event is a block boundary: text before it is
+  narration (→ progress), the final block is the answer (→ reply). If the
+  final block is empty — the agent said its piece and then ran a trailing
+  cleanup tool — the reply falls back to the last narration paragraph rather
+  than delivering nothing.
+- **Everything ping-worthy threads to the prompt**: the reply, error notices,
+  quiet-turn warnings, silent-turn reports, the mid-turn refusal (to the
+  refused message). Progress and its edits stay unthreaded and silent.
+- **The persisted turn map** gained `prompt_msg`, `progress_msg` and the
+  progress lines, so an adopted turn keeps editing the same progress message
+  and its recovered reply still threads.
+- **Mid-turn partial flushes are gone**, and with them the char/fence/rate
+  guards — narration reaches the user via progress edits instead, which is
+  strictly more immediate and adds zero messages. `_flush_reply` became
+  `_close_block`/`_send_reply`/`_update_progress`.
+- The run-on narration bug has a named regression test reproducing the
+  reported garbage verbatim.
+
+**Not in the progress message: actual thinking.** Thought chunks remain a
+state signal only. Narration + tool markers are the chain of work; raw
+chain-of-thought is high-volume and was not part of the decision. Revisit if
+the progress message feels too sparse in use.
+
+**User-side steps for the mute-but-ping payoff** (bot side is done): the work
+chat is currently a *private* chat, and Telegram's mention/reply notification
+exception only exists in groups. To get it: create a group with the bot, say
+anything in it, read the group's chat id from the bot log ("ignoring message
+from unconfigured chat …"), set it as `FALCONFOX_TELEGRAM_WORK_CHAT_ID` in
+`~/.config/falconfox/telegram.env`, restart the bot, then mute the group. No
+BotFather privacy change needed — the focus chat is already a group and the
+bot sees plain messages there.
 
 ## Design direction (user, 2026-08-24)
 

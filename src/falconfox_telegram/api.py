@@ -90,24 +90,51 @@ class TelegramApi:
             body["offset"] = offset
         return await self.call("getUpdates", body)
 
-    async def message(self, chat_id: int, text: str) -> None:
+    @staticmethod
+    def _reply(body: dict, reply_to: int | None) -> dict:
+        # Threading a message to the prompt it answers is also the notification
+        # lever: in a group, replies (like mentions) cut through a muted chat,
+        # so progress can stay silent while the answer still pings.
+        if reply_to is not None:
+            body["reply_parameters"] = {"message_id": reply_to,
+                                        "allow_sending_without_reply": True}
+        return body
+
+    async def message(self, chat_id: int, text: str,
+                      reply_to: int | None = None) -> int | None:
         # Bot API text is capped at 4096 characters. Plain sends (notices,
         # command output, fallbacks) are truncated rather than split.
         if len(text) > 4096:
             text = text[:4080] + "\n…[truncated]"
-        await self.call("sendMessage", {"chat_id": chat_id, "text": text})
+        result = await self.call("sendMessage", self._reply(
+            {"chat_id": chat_id, "text": text}, reply_to))
+        return (result or {}).get("message_id")
 
-    async def html_message(self, chat_id: int, html_text: str, plain_fallback: str) -> None:
+    async def html_message(self, chat_id: int, html_text: str, plain_fallback: str,
+                           reply_to: int | None = None) -> None:
         # Telegram rejects the whole message on any HTML entity error, so a
         # failed formatted send falls back to the plain source text.
         try:
-            await self.call("sendMessage", {
+            await self.call("sendMessage", self._reply({
                 "chat_id": chat_id, "text": html_text, "parse_mode": "HTML",
                 "link_preview_options": {"is_disabled": True},
-            })
+            }, reply_to))
         except ApiError as error:
             log.warning("HTML send failed (%s); falling back to plain text", error)
-            await self.message(chat_id, plain_fallback)
+            await self.message(chat_id, plain_fallback, reply_to=reply_to)
+
+    async def edit_message(self, chat_id: int, message_id: int, text: str) -> None:
+        if len(text) > 4096:
+            text = text[:4080] + "\n…[truncated]"
+        try:
+            await self.call("editMessageText", {
+                "chat_id": chat_id, "message_id": message_id, "text": text,
+            })
+        except ApiError as error:
+            # Re-sending identical text is not an error worth surfacing.
+            if "not modified" in str(error):
+                return
+            raise
 
     async def chat_action(self, chat_id: int, action: str) -> None:
         await self.call("sendChatAction", {"chat_id": chat_id, "action": action})
