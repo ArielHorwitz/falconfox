@@ -809,7 +809,9 @@ class TurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             old = self._bot(directory)
             old._turn_chat["session"] = 20
-            old._turn_started_at["session"] = time.monotonic()
+            # Long-running: without a seeded quiet clock, adoption would fire
+            # a spurious "quiet" warning off the inherited start time.
+            old._turn_started_at["session"] = time.monotonic() - 600
             old._persist_turns()
 
             bot = self._bot(directory)
@@ -818,6 +820,9 @@ class TurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await bot._reconcile_persisted_turns()
             self.assertEqual(bot._turn_chat, {"session": 20})
             self.assertIn("session", bot._adopted)
+            await bot._check_quiet("session", 20)
+            self.assertEqual(bot.telegram.messages, [],
+                             "adoption must not trigger the quiet warning")
             # Post-adoption chunks accumulate but must not be delivered from
             # the gappy buffer: the settled transcript at turn end is the only
             # complete source, and nothing may be sent twice.

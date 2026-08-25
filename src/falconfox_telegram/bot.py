@@ -370,6 +370,11 @@ class FalconFoxTelegramBot:
             self._progress_msg[session_id] = record["progress_msg"]
         if record.get("progress"):
             self._progress_lines[session_id] = list(record["progress"])
+        # Seed the quiet clock: the turn has a past, but this process has no
+        # event history for it. Without this, adoption instantly fired a
+        # spurious "quiet for 10 min" warning (observed on the first live
+        # adoption, 2026-08-25 16:23) because the fallback is the start time.
+        self._last_event_at[session_id] = time.monotonic()
         self._turn_working.add(session_id)
         self._adopted.add(session_id)
 
