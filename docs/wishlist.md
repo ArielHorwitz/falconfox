@@ -35,6 +35,31 @@ parts were built.
 Wanted, and not a blocker. Text first was the right order; voice is now its own
 effort rather than an unfinished corner of the pivot.
 
+## Don't drop a message sent mid-turn — queue it or interrupt
+
+*From the phone, 2026-08-25.*
+
+Today a message sent while a turn is running is refused with "send it again
+once the reply arrives" — itself a fix over the previous behaviour, which
+silently destroyed both the message and the in-flight reply. But refusal
+still loses the user's words unless they retype them, which is exactly wrong
+on a phone.
+
+Wanted: the message is kept, not bounced. Two reasonable fates, and possibly
+both offered as inline buttons on the bot's "still working" response:
+
+- **Queue** — hold the text and forward it the moment the turn ends.
+- **Interrupt** — cancel the running turn and send now (the daemon already
+  supports `cancel`; the turn-feedback work already delivers partial output,
+  so an interrupted turn's progress is not lost).
+
+Notes for whoever builds it: queuing belongs in the bot (the daemon
+deliberately refuses mid-turn prompts and should keep doing so); a queued
+message needs to survive a bot restart (the persisted turn map in
+`turns.json` is the established pattern); and the buttons need the bot's
+first callback-query handling — the same machinery a future "cancel turn"
+button on the progress message would use.
+
 ## Choose the model when spawning a session
 
 *From the phone, 2026-08-25.*
