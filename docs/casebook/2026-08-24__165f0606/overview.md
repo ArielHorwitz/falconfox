@@ -289,6 +289,51 @@ carries `quiet=<n>s` per in-flight turn.
 the recovery path and the 180-second threshold all need real restarts and real
 long turns. The first live restart mid-turn is the test that matters.
 
+## Reported from use: the reply is a run-on of narration (2026-08-25)
+
+First live feedback on the flush design, from the phone, with a sample:
+
+> Now the new recovery test class, inserted before RenderingTests:Add the
+> quiet field to the /status test, then run the suite:All 44 tests pass, …
+
+Diagnosis: those are three separate remarks the agent made *between tool
+calls* — narration written to introduce actions the chat deliberately does not
+show. Two compounding causes:
+
+1. **Message boundaries are lost.** The client concatenates every agent chunk
+   of the turn into one buffer; where one remark ends and the next begins
+   (i.e. where a tool call sat between them), no separator is inserted — hence
+   the missing newlines.
+2. **The narration's referents are invisible.** Each remark introduces a tool
+   call ("inserted before RenderingTests:") that is suppressed as content, so
+   the text dangles.
+
+**The early flush is not the culprit** — held to the end of the turn, the
+final message would contain the same glued text. The real shape: the stream
+carries two kinds of agent text, *working narration* and *the actual answer*,
+and the chat renders their concatenation minus the context that makes
+narration legible.
+
+Option space, discussed with the user (decision pending):
+
+- **A. Separators only** — paragraph break where a tool call interrupted the
+  text. Minimum fix; needed under every option below except E.
+- **B. Compact transcript** — A, plus one-line tool markers inline in the
+  same batched messages ("⚙️ edit tests/…"), repeats collapsed. Message count
+  unchanged; every message becomes self-explanatory. A bounded reversal of
+  "tool calls stay suppressed": they appear as inline lines, not messages.
+- **C. Chat-native updates** — each narration block is its own small message
+  at the moment it happens. Most like texting a colleague; a tool-heavy turn
+  is ~15 messages and ~15 notification pings.
+- **D. One live progress message per turn, edited in place** (narration +
+  recent tool titles), with the turn's reply carrying only the final answer.
+  Cleanest chat; the most engineering; no pings for progress.
+- **E. Suppress narration; deliver only the final answer.** Quietest. Riskier
+  than it sounds: "final answer" is structurally "text after the last tool
+  call", and a turn ending in a trivial tool call would misfile its real
+  answer as narration. The old blast-radius argument for flushing is weaker
+  now (transcript recovery exists), which makes E viable at all.
+
 ## Design direction (user, 2026-08-24)
 
 Three proposals, recorded before they are built. The first two are decisions to
