@@ -133,8 +133,38 @@ refreshes whatever the current state is.
 pass is to see the states become visible at all. Which glyph means what comes
 after watching it.
 
-Not built yet: flushing the reply when the stream stops. That is the next step
-and the one with the real payoff.
+## Built: flushing the reply when the stream stops (2026-08-25)
+
+The payoff step. `_flush_reply` sends what has accumulated the moment the state
+leaves `streaming` — the agent has gone to a tool, so output has stopped while
+the turn has not. The remainder follows at `idle` as usual, and nothing is sent
+twice: the buffer is emptied rather than dropped, because the rest of the reply
+belongs to the same turn.
+
+A partial flush has to earn its message, so three guards, all in
+`_flush_reply`:
+
+- **At least `MIN_FLUSH_CHARS` (240).** Below a paragraph it is noise.
+- **Not inside a code block.** An odd number of fences means the stream stopped
+  mid-block. The renderer tolerates an unclosed fence — `_split_blocks` handles
+  it — but the reader would get half a block and an unfenced remainder, so the
+  flush waits for the next opportunity instead.
+- **`MIN_FLUSH_SECONDS` (15) between partial flushes.** A tool-heavy turn is
+  where this design is most wanted and most likely to hit Telegram's per-chat
+  message limit.
+
+The final flush at `idle` ignores all three: the turn is over, so whatever is
+left is sent regardless of length, fences, or timing.
+
+Follow-on: `INTERRUPTED_TURN` now says "anything not already sent is gone"
+rather than "that reply is gone", which is the honest wording once part of a
+turn may already have been delivered. This is the blast-radius reduction the
+design predicted — text already handed over cannot be lost with the
+connection.
+
+**Still unverified in use.** Both this and the state code are deployed but have
+only been exercised by tests; whether the flush fires at useful moments, and
+whether the guards are tuned anywhere near right, needs real turns.
 
 ## Design direction (user, 2026-08-24)
 

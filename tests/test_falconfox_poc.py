@@ -231,6 +231,84 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(bot._activity_tasks["session"].done())
             bot._activity_tasks["session"].cancel()
 
+    def _bot_mid_turn(self, directory):
+        bot = FalconFoxTelegramBot(BotConfig(
+            "token", 10, 20, pointer_file=Path(directory, "focus"),
+            default_path=Path(directory),
+        ))
+        bot.telegram = FakeTelegram()
+        bot._turn_chat["session"] = 20
+        bot._reply_parts["session"] = []
+        return bot
+
+    async def _stream(self, bot, text):
+        await bot._handle_event({"type": "message", "session_id": "session",
+                                 "role": "agent", "text": text})
+
+    async def _tool_call(self, bot):
+        await bot._handle_event({"type": "tool_call", "session_id": "session",
+                                 "title": "hidden"})
+
+    async def _idle(self, bot):
+        await bot._handle_event({"type": "agent_state", "session_id": "session",
+                                 "state": "idle"})
+
+    async def test_a_tool_call_flushes_what_has_streamed_so_far(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            await self._stream(bot, "x" * 300)
+            await self._tool_call(bot)
+            # Handed over as soon as output stopped, rather than held to the end.
+            self.assertEqual(len(bot.telegram.html_messages), 1)
+            self.assertIn("x" * 300, bot.telegram.html_messages[0][1])
+
+            await self._stream(bot, "tail")
+            await self._idle(bot)
+            # The remainder is a second message, and nothing is sent twice.
+            self.assertEqual(len(bot.telegram.html_messages), 2)
+            self.assertEqual(bot.telegram.html_messages[1][2], "tail")
+            bot._activity_tasks and [t.cancel() for t in bot._activity_tasks.values()]
+
+    async def test_a_short_partial_reply_waits_for_the_end_of_the_turn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            await self._stream(bot, "short")
+            await self._tool_call(bot)
+            self.assertEqual(bot.telegram.html_messages, [])
+            await self._idle(bot)
+            self.assertEqual(len(bot.telegram.html_messages), 1)
+            self.assertEqual(bot.telegram.html_messages[0][2], "short")
+
+    async def test_a_partial_reply_is_not_cut_inside_a_code_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            fence = "```python\n" + "y = 1\n" * 80
+            await self._stream(bot, fence)
+            await self._tool_call(bot)
+            # Long enough to flush, but the fence is still open.
+            self.assertGreater(len(fence), 240)
+            self.assertEqual(bot.telegram.html_messages, [])
+            await self._stream(bot, "```\ndone")
+            await bot._handle_event({"type": "message", "session_id": "session",
+                                     "role": "thought", "text": ""})
+            # Balanced now, so the same guard lets it through.
+            self.assertEqual(len(bot.telegram.html_messages), 1)
+            await self._idle(bot)
+
+    async def test_partial_flushes_are_rate_limited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            await self._stream(bot, "a" * 300)
+            await self._tool_call(bot)
+            self.assertEqual(len(bot.telegram.html_messages), 1)
+            # A second burst inside the window is held rather than sent.
+            await self._stream(bot, "b" * 300)
+            await self._tool_call(bot)
+            self.assertEqual(len(bot.telegram.html_messages), 1)
+            await self._idle(bot)
+            self.assertEqual(len(bot.telegram.html_messages), 2)
+            self.assertEqual(bot.telegram.html_messages[1][2], "b" * 300)
+
     async def test_read_timeout_is_an_api_error_not_a_teardown(self):
         # urllib wraps a connect failure in URLError but lets a read timeout
         # through as TimeoutError. Escaping as OSError kills the polling task

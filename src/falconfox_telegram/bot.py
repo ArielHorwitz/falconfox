@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shlex
+import time
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
@@ -21,8 +22,8 @@ from .rendering import render_messages
 log = logging.getLogger("falconfox.telegram")
 
 INTERRUPTED_TURN = (
-    "Lost the connection mid-turn, so that reply is gone. The session still "
-    "has it — ask it to repeat."
+    "Lost the connection mid-turn, so anything not already sent is gone. The "
+    "session still has it — ask it to repeat."
 )
 
 
@@ -88,6 +89,15 @@ TURN_ACTIONS = {
 DEFAULT_ACTION = TURN_ACTIONS["working"]
 ACTION_REFRESH_SECONDS = 4
 
+# A turn's reply is normally sent as one message when the turn ends. When output
+# stops but the turn does not -- the agent has gone off to run a tool -- what has
+# accumulated is pushed early instead, so a long turn delivers progress rather
+# than a promise of it. Guarded, because the point is to make a turn feel alive,
+# not to narrate it: Telegram rate-limits messages per chat far harder than chat
+# actions, and chat clutter on a phone is a first-order cost.
+MIN_FLUSH_CHARS = 240
+MIN_FLUSH_SECONDS = 15
+
 
 class FalconFoxTelegramBot:
     def __init__(self, config: BotConfig) -> None:
@@ -103,6 +113,7 @@ class FalconFoxTelegramBot:
         self._turn_chat: dict[str, int] = {}
         self._activity_tasks: dict[str, asyncio.Task] = {}
         self._activity_state: dict[str, str] = {}
+        self._last_flush: dict[str, float] = {}
         self._ws = None
         self._ws_lock = asyncio.Lock()
 
@@ -163,6 +174,7 @@ class FalconFoxTelegramBot:
             activity.cancel()
         self._activity_tasks.clear()
         self._activity_state.clear()
+        self._last_flush.clear()
         interrupted = sorted(set(self._turn_chat.values()))
         self._turn_chat.clear()
         self._reply_parts.clear()
@@ -362,13 +374,42 @@ class FalconFoxTelegramBot:
         # Before the equality check, so this doubles as the safety net that
         # revives a loop which died mid-turn.
         started = self._start_activity(session_id, chat_id)
-        if self._activity_state.get(session_id) == state:
+        previous = self._activity_state.get(session_id)
+        if previous == state:
             return
         self._activity_state[session_id] = state
         # Streamed output fires an event per chunk; only a *change* is worth an
         # API call. A fresh loop sends immediately, so it needs no second one.
         if not started:
             await self._send_action(session_id, chat_id)
+        # Output has stopped while the turn continues -- the moment to hand over
+        # what has arrived so far.
+        if previous == "streaming":
+            await self._flush_reply(session_id, chat_id)
+
+    async def _flush_reply(self, session_id: str, chat_id: int, *,
+                           final: bool = False) -> None:
+        """Send the accumulated reply. Partial flushes must earn their message."""
+        text = "".join(self._reply_parts.get(session_id, [])).strip()
+        if not text:
+            return
+        if not final:
+            if len(text) < MIN_FLUSH_CHARS:
+                return
+            # An odd number of fences means the stream stopped inside a code
+            # block. The renderer tolerates that, but the reader would get half a
+            # block and an unfenced remainder; wait for the next chance instead.
+            if text.count("```") % 2:
+                return
+            now = time.monotonic()
+            if now - self._last_flush.get(session_id, 0.0) < MIN_FLUSH_SECONDS:
+                return
+            self._last_flush[session_id] = now
+        # Keep the list -- the turn is not over, and what comes next belongs to
+        # the same reply.
+        self._reply_parts[session_id] = []
+        for rendered in render_messages(text):
+            await self.telegram.html_message(chat_id, rendered.html, rendered.plain)
 
     async def _send_action(self, session_id: str, chat_id: int) -> None:
         action = TURN_ACTIONS.get(
@@ -451,10 +492,10 @@ class FalconFoxTelegramBot:
             activity.cancel()
         self._activity_state.pop(session_id, None)
         chat_id = self._turn_chat.pop(session_id, None)
-        reply = "".join(self._reply_parts.pop(session_id, [])).strip()
-        if chat_id and reply:
-            for rendered in render_messages(reply):
-                await self.telegram.html_message(chat_id, rendered.html, rendered.plain)
+        if chat_id is not None:
+            await self._flush_reply(session_id, chat_id, final=True)
+        self._reply_parts.pop(session_id, None)
+        self._last_flush.pop(session_id, None)
         if session_id == self.focus_session_id and self._rotate_pending:
             await self._rotate_focus_session()
 
