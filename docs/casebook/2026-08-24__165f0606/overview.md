@@ -379,10 +379,18 @@ Mechanics worth remembering:
 - The run-on narration bug has a named regression test reproducing the
   reported garbage verbatim.
 
-**Not in the progress message: actual thinking.** Thought chunks remain a
-state signal only. Narration + tool markers are the chain of work; raw
-chain-of-thought is high-volume and was not part of the decision. Revisit if
-the progress message feels too sparse in use.
+**Settled by the user the same day, and built:** the progress message is
+created *immediately* when the turn starts (not lazily) and *silently*
+(`disable_notification` — progress is ambient, only the response pings);
+**thought blocks stream into it** as "💭" lines trimmed to their first ~280
+characters (a full thinking block would evict everything else; its head
+states its intent); and the final stamp carries elapsed time plus token
+figures — context used/size from the daemon's usage events, or token totals
+where a backend reports them ("✅ Turn finished · 2m15s · 14 tool calls ·
+ctx 217k/1M"). Thoughts never touch the reply buffer or the consumed offset,
+so recovery arithmetic is unaffected. Also kept in mind as a future option
+(user liked it): a reaction on the prompt message as a zero-clutter
+turn-received/turn-done marker.
 
 **The mute-but-ping group migration is dropped** (user, 2026-08-25): with
 progress edited in place, message volume per turn is minimal, so there is

@@ -100,14 +100,18 @@ class TelegramApi:
                                         "allow_sending_without_reply": True}
         return body
 
-    async def message(self, chat_id: int, text: str,
-                      reply_to: int | None = None) -> int | None:
+    async def message(self, chat_id: int, text: str, reply_to: int | None = None,
+                      silent: bool = False) -> int | None:
         # Bot API text is capped at 4096 characters. Plain sends (notices,
         # command output, fallbacks) are truncated rather than split.
         if len(text) > 4096:
             text = text[:4080] + "\n…[truncated]"
-        result = await self.call("sendMessage", self._reply(
-            {"chat_id": chat_id, "text": text}, reply_to))
+        body = self._reply({"chat_id": chat_id, "text": text}, reply_to)
+        if silent:
+            # Delivered without a notification sound/banner -- the progress
+            # message is ambient; only the actual response should ping.
+            body["disable_notification"] = True
+        result = await self.call("sendMessage", body)
         return (result or {}).get("message_id")
 
     async def html_message(self, chat_id: int, html_text: str, plain_fallback: str,

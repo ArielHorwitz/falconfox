@@ -138,6 +138,27 @@ ACTION_REFRESH_SECONDS = 4
 # stall the event pipeline, and capped by trimming its oldest lines.
 PROGRESS_HEADER = "🛠 Working…"
 PROGRESS_LIMIT = 3500
+# Thought blocks join the progress message (user decision, 2026-08-25: the
+# chain of thought streams into it), but trimmed: a single thinking block can
+# run to thousands of characters and would evict everything else. The opening
+# of a thought states its intent, so the head is the part worth showing.
+THOUGHT_PREVIEW_CHARS = 280
+
+
+def _format_count(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M".replace(".0M", "M")
+    if count >= 1_000:
+        return f"{count / 1_000:.0f}k"
+    return str(count)
+
+
+def _format_elapsed(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
+    return f"{int(seconds // 3600)}h{int(seconds % 3600 // 60):02d}m"
 
 
 class FalconFoxTelegramBot:
@@ -180,6 +201,10 @@ class FalconFoxTelegramBot:
         self._progress_lines: dict[str, list[str]] = {}
         self._progress_dirty: set[str] = set()
         self._seen_tools: dict[str, set[str]] = {}
+        self._thought_parts: dict[str, list[str]] = {}
+        # Latest usage figures per session (context used/size, token totals),
+        # merged from the daemon's usage events for the turn's final stamp.
+        self._usage_view: dict[str, dict] = {}
         self._action_sends: set[asyncio.Task] = set()
         self._ws = None
         self._ws_lock = asyncio.Lock()
@@ -289,6 +314,8 @@ class FalconFoxTelegramBot:
         self._progress_lines.clear()
         self._progress_dirty.clear()
         self._seen_tools.clear()
+        self._thought_parts.clear()
+        self._usage_view.clear()
         self._turn_chat.clear()
         self._reply_parts.clear()
 
@@ -689,6 +716,21 @@ class FalconFoxTelegramBot:
             self._progress_dirty.add(session_id)
         self._persist_turns()
 
+    def _close_thought(self, session_id: str) -> None:
+        """A thought has ended (text or a tool call followed it): show its
+        head in the progress message. Thoughts never touch the reply buffer or
+        the consumed offset -- they are not part of the transcript's agent
+        text, so recovery arithmetic must not know about them."""
+        raw = "".join(self._thought_parts.pop(session_id, []))
+        preview = " ".join(raw.split())
+        if not preview:
+            return
+        if len(preview) > THOUGHT_PREVIEW_CHARS:
+            preview = preview[:THOUGHT_PREVIEW_CHARS].rstrip() + " …"
+        self._progress_lines.setdefault(session_id, []).append(f"💭 {preview}")
+        self._progress_dirty.add(session_id)
+        self._persist_turns()
+
     def _add_tool_marker(self, session_id: str, title: str) -> None:
         """One compact line per tool call, consecutive repeats collapsed."""
         lines = self._progress_lines.setdefault(session_id, [])
@@ -709,19 +751,22 @@ class FalconFoxTelegramBot:
         notify, so a muted chat stays quiet through any amount of progress."""
         if final_note is None and session_id not in self._progress_dirty:
             return
-        lines = self._progress_lines.get(session_id)
-        if not lines:
+        lines = self._progress_lines.get(session_id) or []
+        message_id = self._progress_msg.get(session_id)
+        # Nothing accumulated and nothing on screen to stamp: stay silent. (A
+        # normal turn has a message from _forward; this guards turns primed by
+        # other paths, e.g. adopted ones whose creation failed.)
+        if not lines and (final_note is None or message_id is None):
             return
         self._progress_dirty.discard(session_id)
         header = final_note or PROGRESS_HEADER
-        text = "\n".join([header, "", *lines])
+        text = "\n".join([header, "", *lines]) if lines else header
         while len(text) > PROGRESS_LIMIT and len(lines) > 1:
             del lines[0]
             text = "\n".join([header, "", "… (earlier progress trimmed)", *lines])
         try:
-            message_id = self._progress_msg.get(session_id)
             if message_id is None:
-                message_id = await self.telegram.message(chat_id, text)
+                message_id = await self.telegram.message(chat_id, text, silent=True)
                 if message_id is not None:
                     self._progress_msg[session_id] = message_id
                     self._persist_turns()
@@ -791,6 +836,7 @@ class FalconFoxTelegramBot:
         self._progress_lines.pop(session_id, None)
         self._progress_msg.pop(session_id, None)
         self._seen_tools.pop(session_id, None)
+        self._thought_parts.pop(session_id, None)
         self._turn_started_at[session_id] = time.monotonic()
         self._last_event_at[session_id] = time.monotonic()
         self._turn_working.discard(session_id)
@@ -805,6 +851,17 @@ class FalconFoxTelegramBot:
             await self._ws.send(json.dumps({
                 "action": "send", "session_id": session_id, "text": text,
             }))
+        # The progress message exists from the first moment of the turn (user
+        # decision, 2026-08-25) -- sent after the prompt so a slow Telegram
+        # call never delays the actual work, and silently: progress is
+        # ambient, only the response should ping.
+        try:
+            message_id = await self.telegram.message(chat_id, PROGRESS_HEADER, silent=True)
+            if message_id is not None:
+                self._progress_msg[session_id] = message_id
+                self._persist_turns()
+        except ApiError as error:
+            log.debug("could not create the progress message: %s", error)
 
     async def _receive_events(self) -> None:
         async for raw in self._ws:
@@ -822,11 +879,24 @@ class FalconFoxTelegramBot:
         if event_type == "message":
             role = event.get("role")
             if role == "agent":
+                # Text ends a thought; flush its preview first so the progress
+                # lines keep the stream's order.
+                self._close_thought(session_id)
                 self._reply_parts.setdefault(session_id, []).append(event.get("text", ""))
                 await self._set_activity(session_id, "streaming")
             elif role == "thought":
-                # Never part of the reply -- only a sign of what is happening.
+                # Never part of the reply; its head joins the progress message
+                # when the thought ends.
+                if session_id in self._turn_chat:
+                    self._thought_parts.setdefault(session_id, []).append(
+                        event.get("text", ""))
                 await self._set_activity(session_id, "thinking")
+            return
+        if event_type == "usage":
+            view = self._usage_view.setdefault(session_id, {})
+            for key, value in event.items():
+                if key not in ("type", "session_id", "ts") and value is not None:
+                    view[key] = value
             return
         if event_type == "tool_call":
             # A tool call is a block boundary: the text before it was written
@@ -841,7 +911,11 @@ class FalconFoxTelegramBot:
                 if tool_id is None or tool_id not in seen:
                     if tool_id is not None:
                         seen.add(tool_id)
+                    # Stream order: any pending text predates any pending
+                    # thought (text arriving closes thoughts), so close in
+                    # that order before the marker.
                     self._close_block(session_id)
+                    self._close_thought(session_id)
                     self._add_tool_marker(session_id, event.get("title")
                                           or event.get("tool_kind") or "tool")
             await self._set_activity(
@@ -940,6 +1014,7 @@ class FalconFoxTelegramBot:
                                 "delivering the post-adoption tail only", session_id)
             # Stamp the progress message and leave it standing (user decision:
             # the chain of work stays in the chat), then deliver the answer.
+            self._close_thought(session_id)
             tools = len(self._seen_tools.get(session_id, ()))
             if outcome == "error":
                 note = "⚠️ Turn ended with an error"
@@ -948,9 +1023,16 @@ class FalconFoxTelegramBot:
             else:
                 note = "✅ Turn finished"
             if elapsed >= 0:
-                note += f" · {elapsed:.0f}s"
+                note += f" · {_format_elapsed(elapsed)}"
             if tools:
                 note += f" · {tools} tool calls"
+            usage = self._usage_view.get(session_id) or {}
+            tokens = usage.get("total_tokens") or usage.get("output_tokens")
+            if tokens:
+                note += f" · {_format_count(tokens)} tokens"
+            elif usage.get("used") and usage.get("size"):
+                note += (f" · ctx {_format_count(usage['used'])}"
+                         f"/{_format_count(usage['size'])}")
             await self._update_progress(session_id, chat_id, final_note=note)
             await self._send_reply(session_id, chat_id)
         delivered = self._delivered.pop(session_id, 0)
@@ -964,6 +1046,7 @@ class FalconFoxTelegramBot:
         self._progress_lines.pop(session_id, None)
         self._progress_dirty.discard(session_id)
         self._seen_tools.pop(session_id, None)
+        self._thought_parts.pop(session_id, None)
         self._persist_turns()
         if chat_id is not None:
             log.info("turn ended: session=%s turn=%s outcome=%s stop=%s "

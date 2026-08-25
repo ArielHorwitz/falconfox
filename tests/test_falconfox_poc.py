@@ -195,6 +195,7 @@ class FakeTelegram:
     def __init__(self):
         self.messages = []
         self.message_replies = []
+        self.message_silent = []
         self.html_messages = []
         self.html_replies = []
         self.edits = []
@@ -202,9 +203,10 @@ class FakeTelegram:
         self.action_error = None
         self._next_id = 100
 
-    async def message(self, chat_id, text, reply_to=None):
+    async def message(self, chat_id, text, reply_to=None, silent=False):
         self.messages.append((chat_id, text))
         self.message_replies.append(reply_to)
+        self.message_silent.append(silent)
         self._next_id += 1
         return self._next_id
 
@@ -452,6 +454,61 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(bot.telegram.html_messages), 1)
             self.assertEqual(bot.telegram.html_messages[0][2],
                              "the real answer, stated before a cleanup step")
+
+    async def test_the_progress_message_appears_the_moment_the_turn_starts(self):
+        # User decision: immediate, not lazy -- and silent, since progress is
+        # ambient and only the response should ping. Even an empty turn gets
+        # its final stamp.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = FalconFoxTelegramBot(BotConfig(
+                "token", 10, 20, pointer_file=Path(directory, "focus"),
+                default_path=Path(directory),
+            ))
+            bot.telegram = FakeTelegram()
+
+            class FakeWebSocket:
+                async def send(self, payload):
+                    pass
+
+            bot._ws = FakeWebSocket()
+            await bot._forward("session", 20, "question", prompt_msg=1)
+            self.assertEqual(bot.telegram.messages, [(20, "🛠 Working…")])
+            self.assertEqual(bot.telegram.message_silent, [True])
+            self.assertIn("session", bot._progress_msg)
+            await bot._handle_event({"type": "turn_ended", "session_id": "session",
+                                     "turn_id": "t1", "outcome": "completed",
+                                     "stop_reason": "end_turn", "output_chars": 0})
+            self.assertEqual(len(bot.telegram.edits), 1)
+            self.assertIn("✅ Turn finished", bot.telegram.edits[0][2])
+
+    async def test_thoughts_stream_into_the_progress_message_but_not_the_reply(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            await bot._handle_event({"type": "message", "session_id": "session",
+                                     "role": "thought", "text": "long pondering " * 40})
+            # Ended by the text that follows it; trimmed to its head.
+            await self._stream(bot, "the answer")
+            thought_line = bot._progress_lines["session"][0]
+            self.assertTrue(thought_line.startswith("💭 long pondering"))
+            self.assertLessEqual(len(thought_line), 290)
+            self.assertTrue(thought_line.endswith("…"))
+            await self._idle(bot)
+            self.assertEqual(bot.telegram.html_messages[0][2], "the answer",
+                             "thoughts must never leak into the reply")
+
+    async def test_the_final_stamp_carries_elapsed_time_and_context_usage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            bot._turn_started_at["session"] = time.monotonic() - 135
+            await bot._handle_event({"type": "usage", "session_id": "session",
+                                     "used": 217034, "size": 1000000})
+            await self._tool_call(bot)
+            await self._stream(bot, "the answer")
+            await self._idle(bot)
+            stamp = bot.telegram.messages[-1][1]
+            self.assertIn("✅ Turn finished", stamp)
+            self.assertIn("2m15s", stamp)
+            self.assertIn("ctx 217k/1M", stamp)
 
     async def test_the_reply_threads_to_the_prompt_message(self):
         # Threading is also the notification story: in a group, a reply (like
