@@ -17,3 +17,16 @@ model = "opus"
 mode = "auto"
 effort = "high"
 fast = "off"
+
+# A second backend is how you get a second model. `env` is overlaid per
+# backend, so ANTHROPIC_MODEL selects the model for sessions spawned with
+# `falconfox spawn --backend fable` — verified working, and the variable does
+# reach the ACP subprocess. Adding a backend needs no restart: POST /api/reload
+# picks it up.
+#
+# Note the model is named exactly, unlike the coarse buckets
+# (`model = "opus"`) the backend advertises over ACP.
+#
+# [backends.fable]
+# command = ["claude-agent-acp"]
+# env = { CLAUDE_CODE_OAUTH_TOKEN = "paste-token-here", ANTHROPIC_MODEL = "claude-fable-5" }

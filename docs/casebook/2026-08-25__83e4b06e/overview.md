@@ -13,6 +13,45 @@ and from the chat itself.
 It blocks [2026-08-24__165f0606](../2026-08-24__165f0606/overview.md) (turn
 feedback), which is paused until this lands.
 
+## Handoff (2026-08-25, 08:40 UTC)
+
+Picked up next by a session on the **fable backend**, working alone in
+`~/falconfox`. State at handoff:
+
+- Repo at `7f43045`; `origin/master`, `origin/falconfox` and the working tree
+  all agree, tree clean. The deployed code **is** the committed code.
+- `falconfox-daemon` and `falconfox-telegram` both running; no timers pending;
+  no leftover test sessions.
+- Restart announcements shipped (see the section below) and verified live on
+  the 08:34 bot restart.
+
+**One change lives outside git:** `[backends.fable]` in
+`~/.config/falconfox/config.toml`, carrying
+`ANTHROPIC_MODEL=claude-fable-5`. It is the same shape of hazard as the Python
+3.12 shim in [bugs.md](../../bugs.md) — a host-side edit with no commit behind
+it, which a rebuilt host silently loses. Mitigated by documenting it as a
+commented example in `deploy/config.example.toml`, so the recipe survives even
+though the value does not.
+
+**Start with the keepalive stalls.** Everything else in this case is known work
+with a known shape; that one is a live unknown, and unknowns are what this case
+exists to make visible.
+
+**Environment facts that are not guessable**, and cost a session real time to
+rediscover:
+
+- You run inside the system you are changing. Restarting the daemon kills your
+  own turn, so changes go out as a **detached** restart — procedure in the
+  pivot case [2026-07-24__d53a46fd](../2026-07-24__d53a46fd/overview.md), worth
+  reading before the first deploy rather than after.
+- `~/falconfox` is both your working tree and the deploy checkout. **Commit and
+  push before triggering an update** — `update.sh` refuses a dirty tree.
+- A message sent while your turn is running is refused and the sender is told
+  so. To take input, end the turn.
+- A bot-only restart (`systemctl --user restart falconfox-telegram`) picks up
+  client changes without killing your turn — much cheaper than a full deploy
+  when the change is confined to the Telegram client.
+
 ## Why now: the evidence
 
 Three reply losses in two days, none of which announced itself.

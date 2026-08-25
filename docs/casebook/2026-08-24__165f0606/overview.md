@@ -52,8 +52,9 @@ Fix: survive `ApiError` in the loop, and treat a `done()` task as absent.
 `tests/test_falconfox_poc.py` covers the lifecycle but has no test for
 `telegram.typing()` raising; that is the test to add.
 
-**Do not undo two earlier decisions** (both from the first phone session, both
-recorded in bugs.md): typing starts in `_forward()` rather than on
+**Do not undo two earlier decisions** (both from the first phone session; the
+first is also commented at its site in `bot.py`, the second lives only here now
+that the fixed bug has left bugs.md): typing starts in `_forward()` rather than on
 `agent_state: working` because the daemon reports a resuming ACP subprocess as
 `state: starting` on an event this client ignores, and cancelling typing on an
 error notice was considered and rejected because `_warn_option` emits
