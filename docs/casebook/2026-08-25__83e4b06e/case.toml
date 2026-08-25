@@ -1,0 +1,6 @@
+title = "Session and turn lifecycle observability: make the daemon and Telegram client debuggable from the outside"
+status = "open"
+created = "2026-08-25T07:02:09.963792"
+keywords = ["observability", "logging", "debuggability", "turn-lifecycle", "session-lifecycle",
+            "telegram", "telegram-bot", "daemon", "silent-failure", "websocket", "keepalive",
+            "falconfox", "dogfooding", "diagnostics"]

@@ -1,5 +1,15 @@
 # Overview
 
+**PAUSED 2026-08-25, pending lifecycle observability.** The first live test of
+the state code and the mid-turn flush mostly worked — states changed, a reply
+was pushed mid-turn — but it ended in a failure nobody could explain from the
+outside, and the focus chat filled with lost-turn notices whose cause was
+invisible. Three silent reply losses in two days have all been diagnosed by
+reading daemon logs and reconstructing timelines by hand. That is the
+bottleneck, not this case's remaining work. See the observability case for what
+blocks this one.
+
+
 Two faults reported from the phone on 2026-08-24, at the close of the falconfox
 pivot case ([2026-07-24__d53a46fd](../2026-07-24__d53a46fd/overview.md)):
 
