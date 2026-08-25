@@ -384,14 +384,17 @@ state signal only. Narration + tool markers are the chain of work; raw
 chain-of-thought is high-volume and was not part of the decision. Revisit if
 the progress message feels too sparse in use.
 
-**User-side steps for the mute-but-ping payoff** (bot side is done): the work
-chat is currently a *private* chat, and Telegram's mention/reply notification
-exception only exists in groups. To get it: create a group with the bot, say
-anything in it, read the group's chat id from the bot log ("ignoring message
-from unconfigured chat …"), set it as `FALCONFOX_TELEGRAM_WORK_CHAT_ID` in
-`~/.config/falconfox/telegram.env`, restart the bot, then mute the group. No
-BotFather privacy change needed — the focus chat is already a group and the
-bot sees plain messages there.
+**The mute-but-ping group migration is dropped** (user, 2026-08-25): with
+progress edited in place, message volume per turn is minimal, so there is
+nothing to mute away from — the work chat stays a private chat. Recorded for
+completeness since the reply-threading half was built expecting it: threading
+stays (it marks which prompt an answer belongs to, and costs nothing), and if
+message volume ever grows again, the group route is: create a group with the
+bot, say anything in it, read the chat id from the bot log ("ignoring message
+from unconfigured chat …"), point `FALCONFOX_TELEGRAM_WORK_CHAT_ID` at it,
+restart the bot, mute the group. A lighter lever exists first, though:
+`disable_notification` on sends makes any single message silent even in a
+private chat — progress-message creation is the natural candidate.
 
 ## Design direction (user, 2026-08-24)
 
