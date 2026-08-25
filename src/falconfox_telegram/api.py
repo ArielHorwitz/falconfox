@@ -50,6 +50,9 @@ class DaemonApi:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
 
+    async def version(self) -> dict:
+        return await _json_request(f"{self.base_url}/api/version")
+
     async def sessions(self) -> list[dict]:
         return await _json_request(f"{self.base_url}/api/sessions")
 

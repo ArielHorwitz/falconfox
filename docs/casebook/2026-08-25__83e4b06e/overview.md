@@ -81,6 +81,32 @@ the three faults was individually defensible, none logged anything above
 seconds. An hour of silence, two lost messages, and the diagnosis still
 required reading the daemon log by hand.
 
+## Shipped: the daemon announces its own restarts (2026-08-25)
+
+The first observability fix, and the one the user asked for directly: restarts
+were **completely opaque from the phone**. The bot reconnected in silence, and
+unless a turn happened to be in flight — the only path that said anything —
+nothing was ever reported. Since self-updating from inside a session makes
+restarts routine, the most common event in this system was also its least
+visible.
+
+The bot now announces both edges to the work chat: a lost daemon connection
+when it happens, and `FalconFox is up (<revision>)` on every connection. Two
+decisions worth keeping:
+
+- **Announced on every connection, not only on a reconnect.** A deploy restarts
+  the bot too, so the process that watched the daemon go down is rarely the one
+  that sees it return — pairing the messages in memory would have produced
+  silence in exactly the case that matters. A bare "up" after a bot-only
+  restart is worth saying anyway, since it reports that restart.
+- **The revision comes from `GET /api/version`, not from importing
+  `falconfox`.** The bot is a client of the daemon; the number it prints should
+  be the daemon's own, and asking over the API keeps the layer boundary intact.
+
+`_announce` swallows every exception. It is called from the reconnect path, so
+an announcement that raised would turn a blip into an outage — and the version
+lookup is a nicety that must not be able to swallow the announcement itself.
+
 ## The shape of the problem
 
 `idle` was misread as "turn over" when it means "not currently running a

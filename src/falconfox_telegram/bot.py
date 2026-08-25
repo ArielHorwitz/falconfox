@@ -21,6 +21,11 @@ from .rendering import render_messages
 
 log = logging.getLogger("falconfox.telegram")
 
+# A daemon restart used to be invisible from the phone: the bot reconnected in
+# silence, and unless a turn happened to be in flight nothing was ever said. Self
+# -updating from inside a session makes restarts routine, so they get announced.
+DAEMON_DOWN = "\u26a0\ufe0f Daemon connection lost \u2014 reconnecting."
+DAEMON_UP = "\u2705 FalconFox is up"
 BUSY_TURN = (
     "Still working on the previous message, so this one was not sent — send it "
     "again once the reply arrives."
@@ -135,6 +140,7 @@ class FalconFoxTelegramBot:
                 await self._run_connected(websocket)
             except (ConnectionClosed, ApiError, OSError) as error:
                 log.warning("daemon connection lost (%s); reconnecting", error)
+                await self._announce(DAEMON_DOWN)
                 await asyncio.sleep(2)
                 continue
 
@@ -143,6 +149,11 @@ class FalconFoxTelegramBot:
         snapshot = json.loads(await websocket.recv())
         if snapshot.get("type") != "snapshot":
             raise RuntimeError("FalconFox did not send an initial snapshot")
+        # Announced on every connection, not only on a reconnect: a deploy
+        # restarts the bot too, so the process that saw the daemon go down is
+        # rarely the one that sees it return. A bare "up" after a bot-only
+        # restart is worth saying anyway -- it reports the restart.
+        await self._announce_daemon_up()
         await self._ensure_work_pointer()
         # Rotate rather than plain-spawn: after a reconnect that was not a
         # daemon restart, this also cleans up the previous focus session.
@@ -169,6 +180,24 @@ class FalconFoxTelegramBot:
                     await self.telegram.message(chat_id, INTERRUPTED_TURN)
                 except Exception:
                     log.warning("could not report the lost turn to %s", chat_id)
+
+    async def _announce(self, text: str) -> None:
+        """Tell the work chat something about the bot itself. Never fatal."""
+        try:
+            await self.telegram.message(self.config.work_chat_id, text)
+        except Exception:
+            # An announcement failing must not take down the connection it is
+            # announcing -- that would turn a blip into an outage.
+            log.warning("could not announce to the work chat: %s", text)
+
+    async def _announce_daemon_up(self) -> None:
+        # Over the API rather than importing falconfox: the bot is a client of
+        # the daemon, and the revision it reports should be the daemon's own.
+        try:
+            version = (await self.daemon.version()).get("version")
+        except Exception:
+            version = None
+        await self._announce(f"{DAEMON_UP} ({version})." if version else f"{DAEMON_UP}.")
 
     def _reset_connection_state(self) -> list[int]:
         """Clear per-connection state; return chats left mid-turn."""

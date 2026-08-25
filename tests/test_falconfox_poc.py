@@ -12,8 +12,8 @@ from falconfox.cli import CliError, _guard_self_target
 from falconfox.coordinator import SessionCoordinator
 from falconfox.storage import SessionStore
 from falconfox_telegram.api import ApiError, _json_request
-from falconfox_telegram.bot import (BUSY_TURN, INTERRUPTED_TURN, TURN_ACTIONS,
-                                    BotConfig, FalconFoxTelegramBot)
+from falconfox_telegram.bot import (BUSY_TURN, DAEMON_DOWN, INTERRUPTED_TURN,
+                                    TURN_ACTIONS, BotConfig, FalconFoxTelegramBot)
 from falconfox_telegram.rendering import TELEGRAM_MESSAGE_LIMIT, render_messages
 
 
@@ -384,6 +384,52 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("session", bot._turn_chat)
             self.assertEqual(bot._activity_tasks, {})
             self.assertEqual(len(bot.telegram.html_messages), 1)
+
+    async def test_the_daemon_coming_back_is_announced_with_its_revision(self):
+        # A restart used to be invisible from the phone unless a turn happened
+        # to be in flight. Self-updating from inside a session makes restarts
+        # routine, so both edges get said out loud.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+
+            class FakeDaemon:
+                async def version(self):
+                    return {"version": "0.1.0-abc1234"}
+
+            bot.daemon = FakeDaemon()
+            await bot._announce_daemon_up()
+            self.assertEqual(len(bot.telegram.messages), 1)
+            chat_id, text = bot.telegram.messages[0]
+            self.assertEqual(chat_id, 20)  # the work chat, not the focus chat
+            self.assertIn("0.1.0-abc1234", text)
+
+    async def test_an_unreachable_daemon_still_announces_that_it_is_up(self):
+        # The version lookup is a nicety; failing it must not swallow the
+        # announcement, which is the part the user actually needs.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+
+            class BrokenDaemon:
+                async def version(self):
+                    raise ApiError("connection refused")
+
+            bot.daemon = BrokenDaemon()
+            await bot._announce_daemon_up()
+            self.assertEqual(len(bot.telegram.messages), 1)
+            self.assertIn("up", bot.telegram.messages[0][1])
+
+    async def test_a_failed_announcement_never_propagates(self):
+        # An announcement that raised would turn a reconnect blip into an
+        # outage -- it is called from the reconnect path itself.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+
+            class BrokenTelegram(FakeTelegram):
+                async def message(self, chat_id, text):
+                    raise ApiError("Too Many Requests")
+
+            bot.telegram = BrokenTelegram()
+            await bot._announce(DAEMON_DOWN)  # must not raise
 
     async def test_read_timeout_is_an_api_error_not_a_teardown(self):
         # urllib wraps a connect failure in URLError but lets a read timeout
