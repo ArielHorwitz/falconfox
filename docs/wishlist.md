@@ -64,6 +64,30 @@ nothing distinguishes a long turn from a hung one. That needs a notion of time
 since the last event, not just the current state — which is new bookkeeping,
 either in the bot or in the daemon's session metadata.
 
+## Choose the model when spawning a session
+
+*From the phone, 2026-08-25.*
+
+`falconfox spawn` takes `--path`, `--name`, `--backend` and `--ephemeral` — but
+not a model. Today the only way to run a session on a different model is to
+declare a **second backend** in `config.toml` with its own `env` or
+`config_options`, then `spawn --backend <name>`. That works (verified with
+`ANTHROPIC_MODEL=claude-fable-5`), but it means every model is a config edit
+plus a daemon config reload, and the choice is baked into a backend name rather
+than made per session.
+
+Wanted: `falconfox spawn --model <id>`, so a session can be started on a
+different model without touching config — most usefully from the focus chat,
+which is where sessions actually get spawned.
+
+The design constraint is the case's own layer boundary: the daemon knows
+nothing about models, and shouldn't start. The model is a **backend concern**,
+already expressed two ways per backend (`env` for vendor-specific selection,
+`config_options` for ACP-advertised options). A `--model` flag would have to
+resolve to one of those rather than becoming a daemon-level concept — likely by
+setting the ACP `model` config option at session start, with the env-var route
+staying the escape hatch for values a backend does not advertise.
+
 ## Rename the `falconfox-pointer` skill to match its job
 
 *From the falconfox pivot case, 2026-08-24.*

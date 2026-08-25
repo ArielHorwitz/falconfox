@@ -16,7 +16,12 @@ closest match and say which one you chose.
 pointer file named in `AGENTS.md`. The bot watches that file and confirms every
 switch in the work chat, so a wrong resolution is immediately visible. If no
 session matches and the user names a path or project, create one first:
-`falconfox spawn --path <path> [--name <name>]`, then point at the printed id.
+`falconfox spawn --path <path> [--name <name>] [--backend <name>]`, then point
+at the printed id. `--backend` picks which agent runs the session — the
+backends declared in the user's config, each with its own model. Run
+`falconfox spawn --help` if you need the current list of flags; if the user
+asks for a session on a particular model or backend by name, pass it through
+rather than telling them it cannot be done.
 
 **Managing sessions.** `falconfox rename <id> <name>`, `falconfox stop <id>`,
 and `falconfox delete <id>` are yours to run. Renaming is how a flat session
