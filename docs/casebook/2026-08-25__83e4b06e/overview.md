@@ -1,5 +1,21 @@
 # Overview
 
+**Status: CLOSED (2026-08-25).** Opened and closed the same day, which is the
+measure of it: the instrumentation it shipped solved the case's own open
+unknown before the day was out. What landed — turns as first-class daemon
+facts with ids and stats, happy-path logging on both sides, `/status` from
+the phone, silence-as-error in the log and the chat, HTTP action logging, and
+a stall watchdog in both processes — is described in the shipped sections
+below. The keepalive stalls are **solved** (the bot's event pipeline wedging
+on hung Telegram calls; fixed in `0de482f`; see
+[keepalive-stalls-finding.md](keepalive-stalls-finding.md)). Deferred work is
+filed, not dropped: the turn→chat map surviving bot restarts and the
+watchdog's pipeline blind spot are in [wishlist.md](../../wishlist.md) and the
+finding doc respectively; host capacity (1 vCPU / 951 MB, swapping) is
+recorded as the user's call. This case's purpose was to unblock
+[2026-08-24__165f0606](../2026-08-24__165f0606/overview.md) (turn feedback),
+which is now unpaused.
+
 Every bug in the Telegram client so far has been **silent**, and every one has
 been diagnosed the same way: read `journalctl` for two units on the host and
 reconstruct a timeline by hand from log lines written for other purposes. That

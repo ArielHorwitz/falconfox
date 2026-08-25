@@ -1,13 +1,24 @@
 # Overview
 
-**PAUSED 2026-08-25, pending lifecycle observability.** The first live test of
-the state code and the mid-turn flush mostly worked — states changed, a reply
-was pushed mid-turn — but it ended in a failure nobody could explain from the
-outside, and the focus chat filled with lost-turn notices whose cause was
-invisible. Three silent reply losses in two days have all been diagnosed by
-reading daemon logs and reconstructing timelines by hand. That is the
-bottleneck, not this case's remaining work. See the observability case for what
-blocks this one.
+**UNPAUSED 2026-08-25 — the blocker landed and closed the same day.** The
+observability case ([2026-08-25__83e4b06e](../2026-08-25__83e4b06e/overview.md))
+shipped what this case was waiting for, and it changes this case's ground:
+turns are now first-class daemon facts (`turn_started`/`turn_ended` events
+with id, duration, output stats, outcome, stop reason — `turn_ended` arrives
+*before* the trailing idle), the bot finalizes turns on those events instead
+of inferring from `idle`, a turn that delivers nothing already tells the chat,
+`/status` exists in both chats, and delivery is accounted per turn
+(`buffered`/`delivered`). The unexplained stop that paused this case is the
+kind of thing the logs now answer in one line. Build the presentation layer on
+the turn events, not on state transitions. Related items worth picking up
+together, both in [wishlist.md](../../wishlist.md): persisting the turn→chat
+map across bot restarts, and the original "tell the user what a session is
+actually doing" entry.
+
+*(Original pause note, kept for history: the first live test of the state code
+ended in a failure nobody could explain from the outside, and diagnosis meant
+reading daemon logs and reconstructing timelines by hand — that bottleneck,
+not this case's remaining work, was the blocker.)*
 
 
 Two faults reported from the phone on 2026-08-24, at the close of the falconfox
