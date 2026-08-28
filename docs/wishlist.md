@@ -113,6 +113,30 @@ marker half is still available and independent of it. The case it came from
 shipped enough turn feedback that this is now a refinement rather than a gap,
 which is exactly why it is here and not in that case.
 
+## Make use of Telegram message streaming
+
+*From the phone, 2026-08-28.*
+
+Bot API 9.3 (2025-12-31) added `sendMessageDraft`, "allowing partial messages
+to be streamed to a user while being generated" — a message that fills in as
+it is produced, rather than one that is sent whole or edited in place. It
+takes `can_stop` / `keep_on_stop`, so the user can halt a generation from the
+chat.
+
+Wanted; **how is deliberately open**. Everything the bot shows today is built
+from whole messages — a progress message created up front and edited as work
+happens, a reply sent once the turn ends. Streaming is a different primitive
+underneath both of those, and it postdates the design that chose them, so the
+right question is not "where do we bolt this on" but "what would the turn look
+like if this had existed". Whether it carries the reply, replaces the progress
+message, does both, or neither, is exactly what has not been decided.
+
+Worth reading the turn-feedback case
+([2026-08-24__165f0606](casebook/2026-08-24__165f0606/overview.md)) first:
+it settled the two-message turn against the constraints of whole messages,
+and it records why each of those choices was made — which is what tells you
+whether streaming actually improves on them or just moves them.
+
 ## Deliberately not planned
 
 **Off-loopback remote access + bearer token.** Listed in the pivot case as the
