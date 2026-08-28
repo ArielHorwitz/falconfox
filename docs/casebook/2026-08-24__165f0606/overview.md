@@ -1,10 +1,25 @@
 # Overview
 
-*Current state and what is left:
-["Where this stands"](#where-this-stands-session-closed-2026-08-28), then
-["First live use"](#first-live-use-user-2026-08-28) for the first report from
-the phone. The sections before them are the build narrative in order; the ones
-after them are the original proposals, kept for their reasoning.*
+**Status: CLOSED (2026-08-28).** Closed on live use rather than on tests,
+which is the standard it set for itself: after a couple of days of Telegram
+use from the phone, the per-turn granularity works well and the feedback is
+much better — see ["First live use"](#first-live-use-user-2026-08-28). Fault 1
+(the dying indicator) is fixed at the cause; fault 2 (idle / working / stuck)
+is answered three times over at three altitudes — the five-state chat action,
+the live progress message, and the quiet-turn warning. The two-message turn,
+thought streaming, the stats stamp, reply threading, turn adoption and
+transcript recovery all landed, with the suite green at 48 tests. What is
+*not* settled is named rather than dropped: a live restart mid-turn is still
+unobserved, and `QUIET_TURN_SECONDS` (180), the ~280-character thought trim
+and `TURN_ACTIONS` are still desk guesses — closed on the user's judgment that
+these are either not bothersome or will resurface in use. Two items are filed
+in [wishlist.md](../../wishlist.md) instead: the still-refused mid-turn
+message, and the parked reaction-as-turn-marker.
+
+*The sections below are the build narrative in order, then
+["Where this stands"](#where-this-stands-session-closed-2026-08-28) and
+["First live use"](#first-live-use-user-2026-08-28); the ones after those are
+the original proposals, kept for their reasoning.*
 
 **UNPAUSED 2026-08-25 — the blocker landed and closed the same day.** The
 observability case ([2026-08-25__83e4b06e](../2026-08-25__83e4b06e/overview.md))
@@ -477,8 +492,9 @@ standing doubt in the section before this one is therefore no longer the whole
 truth: the *shape* of the thing — one turn, one progress message, one threaded
 reply — has now been lived with rather than only tested.
 
-The case stays **open**, because a good report at the coarse grain does not
-reach the threads that were named:
+A good report at the coarse grain does not reach the threads that were named.
+They are recorded here rather than resolved — the case was closed on the
+user's judgment that they are either not bothersome or will resurface in use:
 
 1. **A live restart mid-turn is still unobserved.** The daemon and bot were
    restarted on 2026-08-28 (the checkout moved to `~/projects/falconfox`, so
@@ -499,7 +515,8 @@ reach the threads that were named:
    [wishlist.md](../../wishlist.md).
 
 So: the case's premise is holding up in use, which is what it was left open to
-find out. What is left is the sharp edges, not the shape.
+find out. What is left is the sharp edges, not the shape — and sharp edges
+announce themselves. Closed.
 
 ## Design direction (user, 2026-08-24)
 

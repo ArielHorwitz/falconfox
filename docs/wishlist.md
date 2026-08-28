@@ -98,6 +98,21 @@ so renaming the directory today would leave **both** the old and new skill
 discoverable, with conflicting instructions. Fix the pruning first — see
 [bugs.md](bugs.md).
 
+## A reaction on the prompt message as a turn marker
+
+*From the turn-feedback case, 2026-08-28.*
+
+Liked rather than rejected, and parked when that case closed. React to the
+user's own prompt message to mark the turn — one glyph on receipt, another on
+completion — giving turn-received and turn-done feedback at **zero message
+cost**, in a chat where every added message is clutter on a phone screen.
+
+Reply-threading already took the notification half of the original idea (the
+reply quotes the prompt, so the phone notification carries its context). The
+marker half is still available and independent of it. The case it came from
+shipped enough turn feedback that this is now a refinement rather than a gap,
+which is exactly why it is here and not in that case.
+
 ## Deliberately not planned
 
 **Off-loopback remote access + bearer token.** Listed in the pivot case as the
