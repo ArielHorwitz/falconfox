@@ -1,6 +1,8 @@
-title = "Turn feedback in Telegram: fix the dying typing indicator and show whether a session is idle, working or stuck"
+title = "Turn feedback in Telegram: from a dying typing indicator to the two-message turn (live progress + threaded reply)"
 status = "open"
 created = "2026-08-24T18:22:10.478996"
 keywords = ["telegram", "telegram-bot", "typing-indicator", "chat-action", "sendChatAction",
             "ux", "turn-feedback", "session-state", "stuck-detection", "observability",
+            "progress-message", "editMessageText", "reply-threading", "notifications",
+            "turn-recovery", "turn-persistence", "quiet-turn", "narration", "thought-chunks",
             "falconfox", "dogfooding"]

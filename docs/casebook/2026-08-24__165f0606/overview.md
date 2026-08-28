@@ -1,5 +1,10 @@
 # Overview
 
+*Current state and what is left:
+["Where this stands"](#where-this-stands-session-closed-2026-08-28). The
+sections before it are the build narrative in order; the ones after it are
+the original proposals, kept for their reasoning.*
+
 **UNPAUSED 2026-08-25 — the blocker landed and closed the same day.** The
 observability case ([2026-08-25__83e4b06e](../2026-08-25__83e4b06e/overview.md))
 shipped what this case was waiting for, and it changes this case's ground:
@@ -403,6 +408,59 @@ from unconfigured chat …"), point `FALCONFOX_TELEGRAM_WORK_CHAT_ID` at it,
 restart the bot, mute the group. A lighter lever exists first, though:
 `disable_notification` on sends makes any single message silent even in a
 private chat — progress-message creation is the natural candidate.
+
+## Where this stands (session closed 2026-08-28)
+
+Left **open deliberately.** Both faults have an answer in the tree and the
+suite is green (48 tests), but the thing this case exists to produce — a chat
+that tells the truth about a turn — has been judged almost entirely by tests.
+Closing it now would file "unverified" as "done".
+
+Answered, and by what:
+
+- **Fault 1 (the dying indicator)** — fixed at the cause, with regression
+  tests for both halves (a raising chat action must not end the loop; a dead
+  loop must be revived). This one is genuinely settled.
+- **Fault 2 (idle / working / stuck)** — answered three times over, each at a
+  different altitude: the activity loop's five-state chat action (a liveness
+  blink), the live progress message (the chain of work as it happens), and the
+  quiet-turn warning (the only thing that can say *stuck*, and it says it as an
+  observable fact rather than a verdict). The case's original framing — that
+  the chat-action channel could never answer fault 2 — held; the answer came
+  from message content, not from the action vocabulary.
+
+**What has actually been watched in use is narrow.** The run-on narration
+report is the only live feedback any of this has received, and it arrived
+against the flush design that the two-message turn then replaced. Everything
+in the last two build sections — progress messages and their edits, thought
+streaming, the stats stamp, reply threading, turn adoption, transcript
+recovery, the 180-second quiet threshold — has been exercised by tests and by
+the sessions that wrote it, not by a phone over a long day.
+
+Open threads for whoever picks this up, roughly in the order they will teach
+something:
+
+1. **Watch a real restart mid-turn.** Adoption and recovery are the highest-
+   risk paths in the case (they reason about a gap in a stream from a settled
+   transcript) and the least observed. The first live restart mid-turn is the
+   test that matters.
+2. **Tune the numbers against real turns.** `QUIET_TURN_SECONDS` (180) and the
+   ~280-character thought trim are guesses made at the desk. So is
+   `TURN_ACTIONS`, which was provisional *by decision* from the day it landed —
+   which glyph means what was always meant to come after watching it.
+3. **Judge the progress message as a reader, not an author.** Whether the
+   collapsed tool lines and trimmed thoughts read as a legible chain of work,
+   or as a wall, is the question the two-message turn was built to ask.
+4. **The mid-turn message is still refused**, and refusal still loses the
+   user's words — see "Don't drop a message sent mid-turn — queue it or
+   interrupt" in [wishlist.md](../../wishlist.md). This case built the refusal
+   (over the earlier behaviour, which destroyed the message *and* the reply);
+   the wishlist entry carries the design for what should replace it, including
+   why queuing belongs in the bot and not the daemon.
+
+Also parked, and liked rather than rejected: a **reaction on the prompt
+message** as a zero-clutter turn-received / turn-done marker. Reply-threading
+took the notification half of that idea; the marker half is still available.
 
 ## Design direction (user, 2026-08-24)
 
