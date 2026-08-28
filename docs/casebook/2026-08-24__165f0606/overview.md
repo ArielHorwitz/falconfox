@@ -1,9 +1,10 @@
 # Overview
 
 *Current state and what is left:
-["Where this stands"](#where-this-stands-session-closed-2026-08-28). The
-sections before it are the build narrative in order; the ones after it are
-the original proposals, kept for their reasoning.*
+["Where this stands"](#where-this-stands-session-closed-2026-08-28), then
+["First live use"](#first-live-use-user-2026-08-28) for the first report from
+the phone. The sections before them are the build narrative in order; the ones
+after them are the original proposals, kept for their reasoning.*
 
 **UNPAUSED 2026-08-25 — the blocker landed and closed the same day.** The
 observability case ([2026-08-25__83e4b06e](../2026-08-25__83e4b06e/overview.md))
@@ -435,7 +436,8 @@ against the flush design that the two-message turn then replaced. Everything
 in the last two build sections — progress messages and their edits, thought
 streaming, the stats stamp, reply threading, turn adoption, transcript
 recovery, the 180-second quiet threshold — has been exercised by tests and by
-the sessions that wrote it, not by a phone over a long day.
+the sessions that wrote it, not by a phone over a long day. *(Partly overtaken
+the same day — see ["First live use"](#first-live-use-user-2026-08-28).)*
 
 Open threads for whoever picks this up, roughly in the order they will teach
 something:
@@ -461,6 +463,43 @@ something:
 Also parked, and liked rather than rejected: a **reaction on the prompt
 message** as a zero-clutter turn-received / turn-done marker. Reply-threading
 took the notification half of that idea; the marker half is still available.
+
+## First live use (user, 2026-08-28)
+
+Reported from the phone after **a couple of days of using FalconFox over
+Telegram**: very happy with the **per-turn granularity**, it seems to be
+working well, and the feedback feels much better.
+
+This is the first live report the two-message turn has received, and the first
+to judge the design that actually shipped — the run-on narration report above
+was aimed at the flush design that the two-message turn then replaced. The
+standing doubt in the section before this one is therefore no longer the whole
+truth: the *shape* of the thing — one turn, one progress message, one threaded
+reply — has now been lived with rather than only tested.
+
+The case stays **open**, because a good report at the coarse grain does not
+reach the threads that were named:
+
+1. **A live restart mid-turn is still unobserved.** The daemon and bot were
+   restarted on 2026-08-28 (the checkout moved to `~/projects/falconfox`, so
+   the units were re-rendered against the new path), but the restart fell
+   *between* turns — the acting session's turn had already ended when the
+   units went down. Adoption and transcript recovery were not exercised, and
+   they remain the highest-risk, least-watched paths in the case.
+2. **The guessed numbers are untouched.** A positive report is not a tuning
+   signal. `QUIET_TURN_SECONDS` (180), the ~280-character thought trim and
+   `TURN_ACTIONS` are still desk guesses; nothing here says whether they are
+   the right ones.
+3. **Reading the progress message is answered only at the coarse grain.**
+   "Much better feedback" is a verdict on the turn as a unit. Whether the
+   collapsed tool lines and trimmed thoughts read as a legible chain of work
+   or as a wall is the finer question, and this report does not reach it.
+4. **The refused mid-turn message is unchanged** — still refused, still losing
+   the user's words, with the replacement design in
+   [wishlist.md](../../wishlist.md).
+
+So: the case's premise is holding up in use, which is what it was left open to
+find out. What is left is the sharp edges, not the shape.
 
 ## Design direction (user, 2026-08-24)
 
