@@ -17,13 +17,14 @@ or run the manual equivalent): git, curl, Node.js + npm (>=18),
 ## Bootstrap (once, as the deploy user)
 
 ```sh
-git clone -b falconfox git@github.com:ArielHorwitz/falconfox.git ~/falconfox
+REPO=~/projects/falconfox   # the location is free; this host uses this one
+git clone -b falconfox git@github.com:ArielHorwitz/falconfox.git "$REPO"
 mkdir -p ~/.config/falconfox
-cp ~/falconfox/deploy/telegram.env.example ~/.config/falconfox/telegram.env
-cp ~/falconfox/deploy/config.example.toml ~/.config/falconfox/config.toml
+cp "$REPO"/deploy/telegram.env.example ~/.config/falconfox/telegram.env
+cp "$REPO"/deploy/config.example.toml ~/.config/falconfox/config.toml
 # fill in telegram.env (bot token + the two chat ids)
 # paste a `claude setup-token` token into config.toml
-~/falconfox/deploy/setup.sh
+"$REPO"/deploy/setup.sh
 ```
 
 `setup.sh` is idempotent: it syncs the venv, installs and starts both units,
@@ -74,12 +75,12 @@ loads code only at process start, so the running daemon is untouched until the
 restart.
 
 - **From a FalconFox agent session (Telegram):**
-  `~/falconfox/deploy/update.sh --detach-restart` — pulls and syncs inline,
-  then restarts *detached* a few seconds later, because the restart kills the
+  `~/projects/falconfox/deploy/update.sh --detach-restart` — pulls and syncs
+  inline, then restarts *detached* a few seconds later, because it kills the
   daemon and with it the agent's own turn. The agent should announce the
   update and end its turn; the session itself survives and resumes on the next
   message.
-- **From SSH:** `~/falconfox/deploy/update.sh` — everything inline.
+- **From SSH:** `~/projects/falconfox/deploy/update.sh` — everything inline.
 
 After restarting, the script health-checks (daemon answers `falconfox list`,
 bot unit active). On failure it **rolls back** to the previous revision,
