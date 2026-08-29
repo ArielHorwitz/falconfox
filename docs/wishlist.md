@@ -84,20 +84,6 @@ resolve to one of those rather than becoming a daemon-level concept — likely b
 setting the ACP `model` config option at session start, with the env-var route
 staying the escape hatch for values a backend does not advertise.
 
-## Rename the `falconfox-pointer` skill to match its job
-
-*From the falconfox pivot case, 2026-08-24.*
-
-The skill now manages sessions — focus, spawn, rename, stop, delete — but its
-directory is still named for the pointer alone, which undersells it to the very
-agent reading it.
-
-Blocked on a real hazard, not on effort: `_prepare_focus_workspace` writes the
-packaged skill into the focus workspace but never prunes what is already there,
-so renaming the directory today would leave **both** the old and new skill
-discoverable, with conflicting instructions. Fix the pruning first — see
-[bugs.md](bugs.md).
-
 ## A reaction on the prompt message as a turn marker
 
 *From the turn-feedback case, 2026-08-28.*

@@ -100,13 +100,24 @@ class TelegramApi:
                                         "allow_sending_without_reply": True}
         return body
 
+    @staticmethod
+    def _thread(body: dict, thread: int | None) -> dict:
+        # None means the General topic, which is addressed by *omitting* the
+        # field -- not by sending null. A message with no thread id and no
+        # reply lands in General; one that replies into a topic inherits that
+        # topic even without this field (measured, not documented).
+        if thread is not None:
+            body["message_thread_id"] = thread
+        return body
+
     async def message(self, chat_id: int, text: str, reply_to: int | None = None,
-                      silent: bool = False) -> int | None:
+                      silent: bool = False, thread: int | None = None) -> int | None:
         # Bot API text is capped at 4096 characters. Plain sends (notices,
         # command output, fallbacks) are truncated rather than split.
         if len(text) > 4096:
             text = text[:4080] + "\n…[truncated]"
-        body = self._reply({"chat_id": chat_id, "text": text}, reply_to)
+        body = self._thread(self._reply({"chat_id": chat_id, "text": text}, reply_to),
+                            thread)
         if silent:
             # Delivered without a notification sound/banner -- the progress
             # message is ambient; only the actual response should ping.
@@ -115,17 +126,19 @@ class TelegramApi:
         return (result or {}).get("message_id")
 
     async def html_message(self, chat_id: int, html_text: str, plain_fallback: str,
-                           reply_to: int | None = None) -> None:
+                           reply_to: int | None = None,
+                           thread: int | None = None) -> None:
         # Telegram rejects the whole message on any HTML entity error, so a
         # failed formatted send falls back to the plain source text.
         try:
-            await self.call("sendMessage", self._reply({
+            await self.call("sendMessage", self._thread(self._reply({
                 "chat_id": chat_id, "text": html_text, "parse_mode": "HTML",
                 "link_preview_options": {"is_disabled": True},
-            }, reply_to))
+            }, reply_to), thread))
         except ApiError as error:
             log.warning("HTML send failed (%s); falling back to plain text", error)
-            await self.message(chat_id, plain_fallback, reply_to=reply_to)
+            await self.message(chat_id, plain_fallback, reply_to=reply_to,
+                               thread=thread)
 
     async def edit_message(self, chat_id: int, message_id: int, text: str) -> None:
         if len(text) > 4096:
@@ -140,6 +153,41 @@ class TelegramApi:
                 return
             raise
 
-    async def chat_action(self, chat_id: int, action: str) -> None:
-        await self.call("sendChatAction", {"chat_id": chat_id, "action": action})
+    async def chat_action(self, chat_id: int, action: str,
+                          thread: int | None = None) -> None:
+        await self.call("sendChatAction",
+                        self._thread({"chat_id": chat_id, "action": action}, thread))
+
+    # --- forum topics ---------------------------------------------------
+    #
+    # Measured against the live API (see the topics case): a supergroup forum
+    # supports the whole lifecycle, a private-chat forum refuses close/reopen
+    # on chat type. `editMessageText` needs no thread id -- chat plus message
+    # id is enough -- which is why there is no threaded variant of it.
+
+    async def create_topic(self, chat_id: int, name: str) -> int:
+        result = await self.call("createForumTopic",
+                                 {"chat_id": chat_id, "name": name[:128]})
+        return result["message_thread_id"]
+
+    async def rename_topic(self, chat_id: int, thread: int, name: str) -> None:
+        await self.call("editForumTopic", {
+            "chat_id": chat_id, "message_thread_id": thread, "name": name[:128],
+        })
+
+    async def close_topic(self, chat_id: int, thread: int) -> None:
+        # A closed topic still accepts *bot* writes; it only stops members
+        # posting. That is what makes it the right shape for a stopped
+        # session -- the record stays, the user cannot prompt a dead session,
+        # and the bot can still deliver a final notice.
+        await self.call("closeForumTopic",
+                        {"chat_id": chat_id, "message_thread_id": thread})
+
+    async def reopen_topic(self, chat_id: int, thread: int) -> None:
+        await self.call("reopenForumTopic",
+                        {"chat_id": chat_id, "message_thread_id": thread})
+
+    async def delete_topic(self, chat_id: int, thread: int) -> None:
+        await self.call("deleteForumTopic",
+                        {"chat_id": chat_id, "message_thread_id": thread})
 

@@ -8,23 +8,6 @@ Record what fails, under what conditions, and how bad it is — enough that
 whoever picks it up does not have to rediscover it. Delete the entry when the
 fix lands.
 
-## The focus workspace never prunes stale skills
-
-*Found while widening the focus skill, 2026-08-24.*
-
-`_prepare_focus_workspace` in the Telegram bot writes the packaged
-`falconfox-pointer` skill into `<pointer dir>/.agents/skills/` on every start,
-but never removes skill directories that are already there. Nothing is broken
-today, because the name has never changed.
-
-It breaks the moment one does: renaming or splitting the skill leaves the old
-directory in place, and the focus agent discovers **both**, with conflicting
-instructions about what it may do. That is a silent failure — the agent behaves
-oddly rather than erroring — and it currently blocks a wanted rename.
-
-Fix: treat the skills directory as owned by the bot and reconcile it to exactly
-what the package ships, rather than writing into it additively.
-
 ## A rebuilt VPS loses the Python 3.12 shim
 
 *From the first phone session, 2026-08-24.*

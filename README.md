@@ -72,19 +72,24 @@ channel. Then run the client next to the daemon:
 
 ```bash
 export FALCONFOX_TELEGRAM_TOKEN=…
-export FALCONFOX_TELEGRAM_FOCUS_CHAT_ID=…
-export FALCONFOX_TELEGRAM_WORK_CHAT_ID=…
+export FALCONFOX_TELEGRAM_FORUM_CHAT_ID=…
 export FALCONFOX_TELEGRAM_DEFAULT_PATH="$HOME"
 # Optional: FALCONFOX_URL, FALCONFOX_TELEGRAM_POINTER_FILE,
 # FALCONFOX_TELEGRAM_FOCUS_BACKEND
 falconfox-telegram
 ```
 
-The focus chat is backed by a rotating ephemeral session and a pointer skill
-shipped with the bot. The bot owns and watches the pointer file, announcing every
-valid change. The work chat forwards to the pointed-at session. `/new`, `/list`,
-`/switch`, `/name`, and `/home` are explicit fast paths; other focus-chat text is
-resolved naturally by the focus agent. During turns the bot refreshes Telegram's
+Every session gets its **own topic** in the forum, created by the bot when the
+session appears and kept in step with it: a rename retitles the topic, a stop
+closes it (a closed topic still accepts the bot's writes, so the record and any
+final notice survive), and a delete removes it. You talk to a session by
+writing in its topic, so sessions run in parallel without interfering.
+
+**General** holds the session manager — an ephemeral session with a skill for
+spawning, renaming, stopping and deleting. `/new`, `/list`, `/name`, `/home`
+and `/status` are explicit fast paths; other General text is resolved naturally
+by the manager agent. There is no focus pointer and no `/switch`: a topic *is*
+the address, so there is nothing left to switch. During turns the bot refreshes Telegram's
 typing indicator, suppresses tool calls, and sends the final reply as one message.
 
 Voice messages and interactive permissions are intentionally deferred. The PoC
