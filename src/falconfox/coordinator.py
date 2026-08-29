@@ -367,6 +367,17 @@ class SessionCoordinator:
         victim = candidates[0]
         self.log.info("session limit %d reached: stopping least-recently-used %s (%s)",
                       limit, victim, self._metadata[victim].get("name"))
+        # Said before the stop, in the victim's own words, so a topic that
+        # closes under the user reads as the system managing memory rather
+        # than as their session mysteriously dying. `kind` marks the notices a
+        # client should surface: most notices are internal chatter.
+        self._emit({
+            "type": "notice", "session_id": victim, "level": "info",
+            "kind": "capacity",
+            "message": f"Stopped to free a session slot — {limit} of {limit} were "
+                       f"active and this one was idle longest. Nothing is lost: "
+                       f"send a message here to pick it up again.",
+        })
         await self.stop_session(victim)
         return True
 
@@ -376,8 +387,10 @@ class SessionCoordinator:
         self.log.info("session %s queued for a slot (%d live, limit %d)",
                       session_id, live, self.config.max_active_sessions)
         self._emit({"type": "notice", "session_id": session_id, "level": "info",
-                    "message": f"waiting for a free session slot — {live} of "
-                               f"{self.config.max_active_sessions} are active and busy"})
+                    "kind": "capacity",
+                    "message": f"Waiting for a free session slot — {live} of "
+                               f"{self.config.max_active_sessions} are active and "
+                               f"busy. This starts as soon as one goes idle."})
 
     def _schedule_drain(self) -> None:
         if self._draining:

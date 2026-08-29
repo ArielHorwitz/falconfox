@@ -1230,6 +1230,37 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
             # The second update was still handled: the loop survived the first.
             self.assertEqual(len(seen), 2)
 
+    async def test_a_capacity_notice_lands_in_the_evicted_topic(self):
+        # A topic that closes under the user must say why, or it reads as the
+        # session mysteriously dying rather than the system managing memory.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._bind("evicted", 12)
+            await bot._handle_event({
+                "type": "notice", "session_id": "evicted", "level": "info",
+                "kind": "capacity", "message": "Stopped to free a session slot"})
+            self.assertEqual(bot.telegram.messages,
+                             [(12, "⏸ Stopped to free a session slot")])
+
+    async def test_ordinary_notices_do_not_reach_the_topic(self):
+        # Most notices are internal chatter (auto-allowed tools, re-sent
+        # context); only those marked as capacity are for the user.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._bind("alpha", 12)
+            await bot._handle_event({
+                "type": "notice", "session_id": "alpha",
+                "message": "auto-allowed: read_file"})
+            self.assertEqual(bot.telegram.messages, [])
+
+    async def test_a_capacity_notice_for_an_untracked_session_is_dropped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            await bot._handle_event({
+                "type": "notice", "session_id": "nobody", "level": "info",
+                "kind": "capacity", "message": "Stopped"})
+            self.assertEqual(bot.telegram.messages, [])
+
     async def test_a_new_session_gets_a_topic_and_it_survives_a_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)

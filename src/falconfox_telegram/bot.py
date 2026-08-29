@@ -1026,6 +1026,15 @@ class FalconFoxTelegramBot:
             if event.get("state") == "starting":
                 await self._set_activity(session_id, "starting")
             return
+        if event_type == "notice" and event.get("kind") == "capacity":
+            # Capacity notices are about the session itself rather than a
+            # turn, so they go to its topic whether or not it is mid-turn --
+            # and a closed topic still accepts bot writes, so this lands even
+            # when it follows the close.
+            thread = self._topics.get(session_id)
+            if thread is not None:
+                await self._say(thread, f"⏸ {event.get('message', '')}")
+            return
         if event_type == "notice" and event.get("level") == "error":
             if session_id in self._turn_thread:
                 await self._say(
