@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -1087,6 +1088,52 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
             bot = self._bot(directory)
             with self.assertNoLogs("falconfox.telegram", level="INFO"):
                 await bot._handle_update({"my_chat_member": {"chat": {"id": -1001}}})
+
+    async def test_new_spawns_and_confirms_without_a_pointer(self):
+        # /new used to write the focus pointer. The pointer is gone, so the
+        # call raised AttributeError -- which killed the whole bot, observed
+        # live. The topic now comes from the daemon's session_added event.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            spawned = []
+
+            class _Daemon:
+                async def spawn(self, path, name=None, backend=None, ephemeral=False):
+                    spawned.append((path, name))
+                    return {"session_id": "new1", "name": name}
+            bot.daemon = _Daemon()
+            handled = await bot._command(None, "/new /tmp a name")
+            self.assertTrue(handled)
+            self.assertEqual(spawned, [("/tmp", "a name")])
+            self.assertIn("new1", bot.telegram.messages[0][1])
+
+    async def test_one_bad_update_does_not_kill_the_poll_loop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            seen = []
+
+            async def _explode(update):
+                seen.append(update)
+                if len(seen) == 1:
+                    raise RuntimeError("boom")
+
+            bot._handle_update = _explode
+
+            class _Telegram:
+                def __init__(self):
+                    self.calls = 0
+
+                async def updates(self, offset):
+                    self.calls += 1
+                    if self.calls > 2:
+                        raise asyncio.CancelledError
+                    return [{"update_id": self.calls}]
+            bot.telegram = _Telegram()
+            with self.assertLogs("falconfox.telegram", level="ERROR"):
+                with contextlib.suppress(asyncio.CancelledError):
+                    await bot._poll_telegram()
+            # The second update was still handled: the loop survived the first.
+            self.assertEqual(len(seen), 2)
 
     async def test_a_new_session_gets_a_topic_and_it_survives_a_restart(self):
         with tempfile.TemporaryDirectory() as directory:

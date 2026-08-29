@@ -607,6 +607,15 @@ class FalconFoxTelegramBot:
             except ApiError as error:
                 log.warning("Telegram polling failed: %s", error)
                 await asyncio.sleep(2)
+            except Exception:
+                # One bad update must not end the bot. Before this, a single
+                # unhandled error in _handle_update propagated out of the poll
+                # loop, through asyncio.wait().result(), and killed the
+                # process -- a stale /new call took the whole client down and
+                # it stayed down. Losing one update is a far smaller failure
+                # than losing every future one.
+                log.exception("dropping an update that could not be handled")
+                await asyncio.sleep(1)
 
     async def _handle_update(self, update: dict) -> None:
         message = update.get("message") or {}
@@ -676,11 +685,17 @@ class FalconFoxTelegramBot:
             await self._say(thread, listing)
             return True
         if command in ("/new", "/home"):
-            path = str(self.config.default_path) if command == "/home" or len(parts) < 2 else parts[1]
+            path = (str(self.config.default_path)
+                    if command == "/home" or len(parts) < 2 else parts[1])
             name_start = 1 if command == "/home" else 2
             name = " ".join(parts[name_start:]) or None
             session = await self.daemon.spawn(path=path, name=name)
-            self._write_pointer(session["session_id"])
+            # Nothing to point at any more: the daemon's session_added event
+            # gives the session its topic. Confirm here anyway, because the
+            # topic appears elsewhere in the forum and a silent /new in
+            # General reads as a command that did nothing.
+            await self._say(thread, f"Spawned {session.get('name') or 'session'} "
+                                    f"({session['session_id']}) — see its topic.")
             return True
         # /switch is gone with the pointer: a session is addressed by writing
         # in its topic, so there is nothing left to switch.
