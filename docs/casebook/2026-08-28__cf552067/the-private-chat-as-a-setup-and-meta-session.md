@@ -182,14 +182,30 @@ What must still be *given*, because it cannot be derived by looking:
 These are invariants of the platform rather than of this deployment, which is
 exactly why they are durable enough to write down.
 
-### The posture, not a state machine
+### Context, not a posture either
 
-"A DM means something is broken" is the right **default posture** but not a
-fact: once the forum works, the DM is also the general help and meta channel.
-So the session should *assume* something needs attention, check, and — finding
-nothing wrong — be a help channel instead. That ordering costs one round of
-introspection and removes the need to enumerate failure modes in advance,
-which is the part that would rot fastest.
+A first draft of this said the session should *assume* something is broken,
+check, and fall through to helping. That was the same mistake one level up — a
+prescribed opening ritual instead of a prescribed checklist. It would make
+every request for help pay for a diagnostic sweep, and most requests are not
+about a broken forum at all.
+
+What the session needs is not a default posture but **situational context**:
+
+> This is the private chat. It is the one channel that works without any
+> configuration, so it is where the user arrives *before the forum exists* and
+> where they come back *if the forum breaks*. It is also the general help and
+> meta channel for FalconFox.
+
+That is a fact about the channel, and it is enough. A session that knows it
+will diagnose when the user reports something wrong, set up when they ask to
+get started, and answer when they ask a question — because reading intent is
+what the agent is for. Prescribing the order in which it does those things
+buys nothing and costs an unnecessary investigation on every message.
+
+Introspection stays *available* — `getChat`, `getChatMember`, `falconfox
+list`, its own configuration — but it is triggered by the conversation rather
+than by a mandatory opening move.
 
 ## Shape, if built
 
