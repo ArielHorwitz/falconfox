@@ -36,8 +36,19 @@ private chats, but it works. That settles the case's opening question: the bot
 can own the topic namespace, so the flow is the natural one — spawn a session,
 a topic appears — rather than the inverted "open a topic, a session spawns".
 
-**Stop and resume have no representation in route A.** Every other lifecycle
-verb maps to a method; this one does not. Workarounds are cosmetic (rename
+**Stop and resume have no representation in route A, and no permission can
+change that.** Re-tested on 2026-08-29 after granting the bot every setting
+available: `getMe` came back byte-identical and both methods failed with the
+same text. The error is a **chat-type** error, not a rights error — a private
+chat is not a supergroup, and no permission alters what type a chat is.
+
+Confirmed by contrast: the bot holds *zero* rights in the focus group (status
+`member`, empty rights object) yet `createForumTopic` there fails with "the
+chat is not a forum" rather than a rights complaint — Telegram checks chat
+type before it checks permissions. In the private chat the bot is likewise no
+kind of admin, and `createForumTopic` works anyway.
+
+Every other lifecycle verb maps to a method; this one does not. Workarounds are cosmetic (rename
 with a prefix, change the icon colour) rather than structural. A supergroup
 forum (route B) has `closeForumTopic`/`reopenForumTopic` and would map exactly.
 This is the strongest argument route B has.
