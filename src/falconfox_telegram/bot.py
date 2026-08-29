@@ -194,6 +194,10 @@ class FalconFoxTelegramBot:
         self.telegram = TelegramApi(config.token)
         self.state_dir = config.state_dir.resolve()
         self.manager_session_id: str | None = None
+        # The private chat's own session. Spawned lazily, on the first message
+        # that arrives there: a deployment whose forum works may never need it,
+        # and an unused session is a live subprocess against the cap.
+        self.concierge_session_id: str | None = None
         self._reply_parts: dict[str, list[str]] = {}
         # session -> the topic it owns, and the reverse. A turn's destination
         # is now just a thread id: the chat is always the forum. None means
@@ -253,6 +257,7 @@ class FalconFoxTelegramBot:
         # forget, or it would ask the user to set up a forum that exists.
         self._forum_file = self.state_dir.joinpath("forum.json")
         self._learned_forum: int | None = None
+        self._bot_username: str | None = None
 
     async def run(self) -> None:
         StallWatchdog(logging.getLogger("falconfox.telegram.watchdog")).start()
@@ -290,7 +295,8 @@ class FalconFoxTelegramBot:
             await self._reconcile_persisted_turns()
         except Exception:
             log.warning("turn reconciliation failed", exc_info=True)
-        await self._spawn_manager_session()
+        if self.forum_chat_id is not None:
+            await self._spawn_manager_session()
         try:
             await self._reconcile_topics()
         except Exception:
@@ -504,9 +510,9 @@ class FalconFoxTelegramBot:
         )
 
     SKILL_NAME = "falconfox-sessions"
+    SETUP_SKILL_NAME = "falconfox-setup"
 
-    def _prepare_manager_workspace(self) -> None:
-        root = self.state_dir
+    def _prepare_workspace(self, root: Path, skill: str, orientation: str) -> None:
         root.mkdir(parents=True, exist_ok=True)
         skills_root = root.joinpath(".agents", "skills")
         skills_root.mkdir(parents=True, exist_ok=True)
@@ -516,13 +522,13 @@ class FalconFoxTelegramBot:
         # renaming the skill left the agent reading *both*, with conflicting
         # instructions -- a silent failure that blocked exactly this rename.
         for stale in skills_root.iterdir():
-            if stale.is_dir() and stale.name != self.SKILL_NAME:
+            if stale.is_dir() and stale.name != skill:
                 shutil.rmtree(stale, ignore_errors=True)
                 log.info("pruned stale manager skill: %s", stale.name)
-        skill_dir = skills_root.joinpath(self.SKILL_NAME)
+        skill_dir = skills_root.joinpath(skill)
         skill_dir.mkdir(parents=True, exist_ok=True)
         packaged_skill = files("falconfox_telegram").joinpath(
-            "skills", self.SKILL_NAME, "SKILL.md"
+            "skills", skill, "SKILL.md"
         ).read_text()
         skill_dir.joinpath("SKILL.md").write_text(packaged_skill)
         # Claude discovers skills under .claude/skills; bridge with a symlink.
@@ -531,6 +537,11 @@ class FalconFoxTelegramBot:
         skills_link = claude_dir.joinpath("skills")
         if not skills_link.is_symlink() and not skills_link.exists():
             skills_link.symlink_to(Path("..", ".agents", "skills"))
+        # Both files, so every agent runtime picks the orientation up natively.
+        root.joinpath("AGENTS.md").write_text(orientation)
+        root.joinpath("CLAUDE.md").write_text(orientation)
+
+    def _prepare_manager_workspace(self) -> None:
         orientation = (
             "You are the FalconFox Telegram session manager, running in the "
             "General topic of a forum where every session has its own topic. "
@@ -544,10 +555,25 @@ class FalconFoxTelegramBot:
             "before `stop` or `delete`. Never orient on or work in any "
             "project. When greeting or unsure, ask what the user wants.\n"
         )
-        # Both files, so every agent runtime picks the orientation up natively.
-        root.joinpath("AGENTS.md").write_text(orientation)
-        root.joinpath("CLAUDE.md").write_text(orientation)
-        self.manager_workspace = root
+        self.manager_workspace = self.state_dir
+        self._prepare_workspace(self.manager_workspace, self.SKILL_NAME, orientation)
+
+    def _prepare_concierge_workspace(self) -> None:
+        bot_name = self._bot_username or "your_bot"
+        orientation = (
+            "You are the FalconFox private chat: the channel that works "
+            "without any configuration, so it is where the user arrives "
+            "before a forum exists and returns if the forum breaks, and it is "
+            "also the general help and meta channel. For every user message, "
+            f"follow the {self.SETUP_SKILL_NAME} skill "
+            f"(.agents/skills/{self.SETUP_SKILL_NAME}). Your bot username is "
+            f"@{bot_name}. Read what the user actually wants rather than "
+            "assuming something is broken. You may run any `falconfox` "
+            "command and nothing else; never do project work here.\n"
+        )
+        self.concierge_workspace = self.state_dir.joinpath("concierge")
+        self._prepare_workspace(self.concierge_workspace,
+                                self.SETUP_SKILL_NAME, orientation)
 
     async def _spawn_manager_session(self) -> None:
         old = self.manager_session_id
@@ -561,6 +587,28 @@ class FalconFoxTelegramBot:
                 await self.daemon.delete(old)
             except ApiError:
                 log.warning("could not delete old manager session %s", old, exc_info=True)
+
+    async def _ensure_concierge(self) -> str | None:
+        """The private chat's session, spawned on first use."""
+        if self.concierge_session_id:
+            return self.concierge_session_id
+        if self._bot_username is None:
+            try:
+                self._bot_username = (await self.telegram.call("getMe") or {}).get("username")
+            except ApiError:
+                log.warning("could not read the bot username", exc_info=True)
+        self._prepare_concierge_workspace()
+        try:
+            session = await self.daemon.spawn(
+                path=str(self.concierge_workspace), name="telegram private chat",
+                backend=self.config.manager_backend, ephemeral=True,
+            )
+        except ApiError:
+            log.warning("could not spawn the private-chat session", exc_info=True)
+            return None
+        self.concierge_session_id = session["session_id"]
+        log.info("private-chat session spawned: %s", self.concierge_session_id)
+        return self.concierge_session_id
 
     # --- topics ----------------------------------------------------------
 
@@ -704,11 +752,7 @@ class FalconFoxTelegramBot:
                       "FALCONFOX_TELEGRAM_FORUM_CHAT_ID to it and restart",
                       moved_to)
             return
-        if chat_id != self.forum_chat_id:
-            log.info("ignoring message from unconfigured chat %s", chat_id)
-            return
-        thread = message.get("message_thread_id")
-        dest = Dest(chat_id, thread)
+        dest = Dest(chat_id, message.get("message_thread_id"))
         text = message.get("text")
         if not text:
             if any(key.startswith("forum_topic_") or key in _JOIN_EVENTS
@@ -718,10 +762,27 @@ class FalconFoxTelegramBot:
                 return
             await self._say(dest, "Text messages only in this PoC.")
             return
+        if chat_id == self.config.owner_id:
+            # The owner's private chat. Answered whether or not a forum is
+            # configured -- being reachable when nothing else is, is the whole
+            # point of this channel.
+            target = await self._ensure_concierge()
+            if target is None:
+                await self._say(dest, "Could not start the private-chat session.")
+                return
+            if text.startswith("/") and await self._command(dest, text):
+                return
+            await self._forward(target, dest, text,
+                                prompt_msg=message.get("message_id"))
+            return
+        if chat_id != self.forum_chat_id:
+            log.info("ignoring message from unconfigured chat %s", chat_id)
+            return
         if text.startswith("/"):
             if await self._command(dest, text):
                 return
-        target = self.manager_session_id if thread is None else self._threads.get(thread)
+        target = (self.manager_session_id if dest.thread is None
+                  else self._threads.get(dest.thread))
         if not target:
             await self._say(dest, "No FalconFox session owns this topic.")
             return

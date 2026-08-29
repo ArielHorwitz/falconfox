@@ -314,6 +314,9 @@ class FakeTelegram:
     async def edit_message(self, chat_id, message_id, text):
         self.edits.append((chat_id, message_id, text))
 
+    async def call(self, method, body=None):
+        return {"username": "test_bot"} if method == "getMe" else {}
+
     async def create_topic(self, chat_id, name):
         self.topics = getattr(self, "topics", [])
         self.topics.append(name)
@@ -1230,6 +1233,69 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
                     await bot._poll_telegram()
             # The second update was still handled: the loop survived the first.
             self.assertEqual(len(seen), 2)
+
+    async def test_the_private_chat_reaches_a_session_of_its_own(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot.manager_session_id = "manager"
+            spawned = []
+
+            class _Daemon:
+                async def spawn(self, path, name=None, backend=None, ephemeral=False):
+                    spawned.append(name)
+                    return {"session_id": "concierge", "name": name}
+            bot.daemon = _Daemon()
+            forwarded = []
+
+            async def _forward(session, dest, text, prompt_msg=None):
+                forwarded.append((session, dest))
+            bot._forward = _forward
+            await bot._handle_update({"message": {
+                "chat": {"id": 7}, "from": {"id": 7},
+                "message_id": 1, "text": "is my forum ok?"}})
+            self.assertEqual(forwarded, [("concierge", Dest(7, None))])
+            self.assertEqual(spawned, ["telegram private chat"])
+
+    async def test_the_private_chat_session_is_spawned_only_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            spawns = []
+
+            class _Daemon:
+                async def spawn(self, path, name=None, backend=None, ephemeral=False):
+                    spawns.append(name)
+                    return {"session_id": "concierge", "name": name}
+            bot.daemon = _Daemon()
+
+            async def _forward(session, dest, text, prompt_msg=None):
+                pass
+            bot._forward = _forward
+            for _ in range(3):
+                await bot._handle_update({"message": {
+                    "chat": {"id": 7}, "from": {"id": 7},
+                    "message_id": 1, "text": "hello"}})
+            self.assertEqual(len(spawns), 1)
+
+    async def test_the_private_chat_works_with_no_forum_configured(self):
+        # The whole point of the channel: reachable when nothing else is.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = FalconFoxTelegramBot(BotConfig("token", 7, state_dir=Path(directory)))
+            bot.telegram = FakeTelegram()
+            self.assertIsNone(bot.forum_chat_id)
+
+            class _Daemon:
+                async def spawn(self, path, name=None, backend=None, ephemeral=False):
+                    return {"session_id": "concierge", "name": name}
+            bot.daemon = _Daemon()
+            forwarded = []
+
+            async def _forward(session, dest, text, prompt_msg=None):
+                forwarded.append(session)
+            bot._forward = _forward
+            await bot._handle_update({"message": {
+                "chat": {"id": 7}, "from": {"id": 7},
+                "message_id": 1, "text": "help me set up"}})
+            self.assertEqual(forwarded, ["concierge"])
 
     async def test_a_message_from_anyone_but_the_owner_is_ignored(self):
         # "Which chat" used to answer "who". It no longer will, once the
