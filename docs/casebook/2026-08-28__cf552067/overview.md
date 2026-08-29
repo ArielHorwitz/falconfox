@@ -156,6 +156,24 @@ more than one conversation.
    sessions had no per-topic identity to hang it on. This case should own the
    question.
 
+## Next: the private chat as a setup and meta session
+
+*Proposed by the user, 2026-08-29.* The forum needs configuration before it
+can carry anything; the private chat needs none, because Telegram gives a bot
+its DMs for free. So the DM becomes a session of its own whose subject is the
+deployment: set the forum up if there is none, diagnose and repair it if it is
+wrong, and serve as a general help channel otherwise.
+
+It replaces the worst step in the current bootstrap — `deploy/README.md` tells
+the operator to read the forum's chat id out of `journalctl`, which is the one
+part of setup that cannot be done from a phone. The bot already receives that
+id; only the delivery is wrong.
+
+Design, the decisions it forces (configuration that can be *learned* rather
+than only read from the environment, and an owner allowlist, which is the
+first authentication this project has ever needed) in
+[the-private-chat-as-a-setup-and-meta-session.md](the-private-chat-as-a-setup-and-meta-session.md).
+
 ## Related wishlist entries
 
 Two entries in [wishlist.md](../../wishlist.md) are touched, one of them

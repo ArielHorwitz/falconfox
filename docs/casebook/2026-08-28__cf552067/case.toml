@@ -4,4 +4,5 @@ created = "2026-08-28T19:01:43.212676"
 keywords = ["telegram", "telegram-bot", "forum-topics", "topics", "threaded-mode",
             "message-thread-id", "botfather", "supergroup", "parallel-sessions",
             "concurrency", "routing", "focus-chat", "work-chat", "pointer-file",
-            "session-manager", "bot-api-9.3", "bot-api-6.3", "ux", "falconfox"]
+            "session-manager", "bot-api-9.3", "bot-api-6.3", "ux", "bootstrap", "setup", "self-repair", "owner-allowlist",
+            "falconfox"]
