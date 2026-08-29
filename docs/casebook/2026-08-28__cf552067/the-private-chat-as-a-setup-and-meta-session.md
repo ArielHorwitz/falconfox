@@ -141,6 +141,56 @@ wrong. The verification step is worth building even though it sounds
 redundant — `getChat` and `getChatMember` turn "it silently does nothing" into
 a specific sentence about which of the three conditions failed.
 
+## What the session is told — motive, not playbook
+
+*User, 2026-08-29:* a message arriving in the private chat means either the
+forum is not set up or it is unusable for some reason; the private chat is the
+**fallback**. The open question was whether to brief the session with a
+checklist of what to look for, or to give it the reason and motive and let it
+work out the rest — "this project is moving so quickly that maybe it should
+just know the reason and motive without a playbook."
+
+**Motive, not playbook, and the project has already proved why.** The
+`falconfox-pointer` skill described a pointer that stopped existing halfway
+through the work that replaced it, and [bugs.md](../../bugs.md) recorded that
+a stale skill is not merely useless but *actively harmful* — the agent
+discovers both the old and the new and follows conflicting instructions.
+Telegram's own blog still says Topics require 100 members; a one-member group
+disproved it on 2026-08-29. Every confident description of current state
+written into this case has had a shorter life than the case.
+
+The rule that follows:
+
+> **Give it the motive and the invariants. Let it discover the state.**
+
+Anything checkable at runtime should be *checked*, never described — `getChat`
+for `is_forum`, `getChatMember` for its own rights, `falconfox list` for
+sessions, its own configuration for what it thinks the forum is. A method for
+finding out does not go stale; a description of what it will find does.
+
+What must still be *given*, because it cannot be derived by looking:
+
+- **The deep link form** — `t.me/<bot>?startgroup&admin=manage_topics`. No
+  amount of introspection yields a URL syntax.
+- **The ordering constraint** — Topics must be enabled *before* the bot is
+  added, because enabling it changes the chat id. This is a rule about
+  consequences, not a state that can be observed.
+- **Capability boundaries** — close/reopen need a supergroup forum; a bot
+  cannot create a group or enable Topics at all. Knowing what is impossible
+  stops it from trying and reporting a failure as the user's problem.
+
+These are invariants of the platform rather than of this deployment, which is
+exactly why they are durable enough to write down.
+
+### The posture, not a state machine
+
+"A DM means something is broken" is the right **default posture** but not a
+fact: once the forum works, the DM is also the general help and meta channel.
+So the session should *assume* something needs attention, check, and — finding
+nothing wrong — be a help channel instead. That ordering costs one round of
+introspection and removes the need to enumerate failure modes in advance,
+which is the part that would rot fastest.
+
 ## Shape, if built
 
 An ephemeral session like the manager, in the DM, with a setup/repair skill
