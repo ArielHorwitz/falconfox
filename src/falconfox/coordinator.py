@@ -433,13 +433,32 @@ class SessionCoordinator:
         self.sessions.add(session)
         meta.update(state="starting", live=True)
         self._emit({"type": "session_updated", **meta})
+        stored_acp_id = self._acp_ids.get(session_id)
         try:
-            loaded = await session.resume(self._acp_ids.get(session_id))
-        except Exception:
-            self.sessions.pop(session_id)
-            meta.update(state="stored", live=False)
-            self._emit({"type": "session_updated", **meta})
-            raise
+            loaded = await session.resume(stored_acp_id)
+        except Exception as error:
+            # The backend's own session id can go stale -- it is not found if
+            # the backend never persisted anything for it (a session stopped
+            # before its first turn is the common case, and automatic eviction
+            # under the live-session cap makes that common). Falling back to a
+            # fresh backend session is exactly the degraded path `loaded=False`
+            # already exists for: the transcript is ours, so the conversation
+            # is replayed as context rather than lost.
+            if stored_acp_id is None:
+                self.sessions.pop(session_id)
+                meta.update(state="stored", live=False)
+                self._emit({"type": "session_updated", **meta})
+                raise
+            self.log.warning("could not load backend session for %s (%s); "
+                             "starting a fresh one", session_id, error)
+            self._acp_ids[session_id] = None
+            try:
+                loaded = await session.resume(None)
+            except Exception:
+                self.sessions.pop(session_id)
+                meta.update(state="stored", live=False)
+                self._emit({"type": "session_updated", **meta})
+                raise
         self._acp_ids[session_id] = session.acp_session_id
         await self._apply_config_options(session_id, session)
         self._persist_meta(session_id)
