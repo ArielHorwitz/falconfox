@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import replace
 import json
 import logging
 import os
@@ -102,6 +103,100 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         snapshot = self.coordinator.snapshot()
         self.assertEqual(snapshot["sessions"][0]["session_id"], "one")
         self.assertNotIn("transcripts", snapshot)
+
+
+class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
+    """A ceiling on sessions holding a live agent subprocess.
+
+    Sessions are the unit of memory cost -- each runs its own ACP backend --
+    and the daemon was OOM-killed carrying ten of them on a 951 MB host.
+    """
+
+    async def asyncSetUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.config_home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.config_home.cleanup)
+        self.env = patch.dict(os.environ, {"XDG_CONFIG_HOME": self.config_home.name})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.coordinator = SessionCoordinator(Path(self.temporary.name))
+        self.stopped = []
+
+        async def _stop(session_id):
+            self.stopped.append(session_id)
+            meta = self.coordinator._metadata[session_id]
+            meta.update(state="stored", live=False)
+        self.coordinator.stop_session = _stop
+
+    def _live(self, session_id, *, last_active, state="idle", ephemeral=False):
+        self.coordinator._metadata[session_id] = {
+            "session_id": session_id, "name": session_id, "path": "/tmp",
+            "backend": "echo", "always_allow": True, "ephemeral": ephemeral,
+            "state": state, "live": True, "created": "1", "last_active": last_active,
+        }
+
+    def _limit(self, value):
+        self.coordinator.config = replace(self.coordinator.config,
+                                          max_active_sessions=value)
+
+    async def test_a_slot_is_free_below_the_limit(self):
+        self._limit(3)
+        self._live("a", last_active="1")
+        self.assertTrue(await self.coordinator._ensure_slot())
+        self.assertEqual(self.stopped, [])
+
+    async def test_the_least_recently_used_idle_session_is_evicted(self):
+        # Not the oldest *activation*: that would take the session you have
+        # had open all day. last_active is what "stopped touching" means.
+        self._limit(2)
+        self._live("old-but-busy", last_active="1", state="working")
+        self._live("stale", last_active="2")
+        self._live("fresh", last_active="9")
+        self.assertTrue(await self.coordinator._ensure_slot())
+        self.assertEqual(self.stopped, ["stale"])
+
+    async def test_a_working_session_is_never_evicted(self):
+        self._limit(1)
+        self._live("busy", last_active="1", state="working")
+        self.assertFalse(await self.coordinator._ensure_slot())
+        self.assertEqual(self.stopped, [])
+
+    async def test_the_ephemeral_manager_is_exempt_but_still_counts(self):
+        # It is the control channel: if it cannot start, the user has no way
+        # to stop anything else. Stopping an ephemeral session deletes it.
+        self._limit(1)
+        self._live("manager", last_active="1", ephemeral=True)
+        self.assertFalse(await self.coordinator._ensure_slot())
+        self.assertTrue(await self.coordinator._ensure_slot(ephemeral=True))
+        self.assertEqual(self.stopped, [])
+
+    async def test_zero_disables_the_cap(self):
+        self._limit(0)
+        self._live("a", last_active="1", state="working")
+        self.assertTrue(await self.coordinator._ensure_slot())
+
+    async def test_a_queued_send_holds_the_text_instead_of_losing_it(self):
+        self._limit(1)
+        self._live("busy", last_active="1", state="working")
+        self.coordinator._metadata["waiting"] = {
+            "session_id": "waiting", "name": "waiting", "path": "/tmp",
+            "backend": "echo", "always_allow": True, "ephemeral": False,
+            "state": "stored", "live": False, "created": "1", "last_active": "1",
+        }
+        await self.coordinator.send("waiting", "do the thing")
+        self.assertEqual(self.coordinator._queued, {"waiting": "do the thing"})
+
+    async def test_a_queued_session_is_retried_when_one_goes_idle(self):
+        self._limit(1)
+        self._live("busy", last_active="1", state="working")
+        self.coordinator._queued["waiting"] = None
+        drained = []
+        self.coordinator._drain_queue = lambda: drained.append(True) or asyncio.sleep(0)
+        self.coordinator._emit({"type": "agent_state", "session_id": "busy",
+                                "state": "idle"})
+        await asyncio.sleep(0)
+        self.assertEqual(drained, [True])
 
 
 class EngineTurnTests(unittest.IsolatedAsyncioTestCase):

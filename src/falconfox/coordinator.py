@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 from pathlib import Path
@@ -57,6 +58,12 @@ class SessionCoordinator:
         self._persisted: set[str] = set()
         self._usage: dict[str, dict] = {}
         self._busy_ids: set[str] = set()
+        # Sessions waiting for a live slot, with the message that is waiting
+        # with them (None when only activation was asked for). A session over
+        # the cap is stored, not refused: its transcript, its metadata and --
+        # for the Telegram client -- its topic all already exist.
+        self._queued: dict[str, Optional[str]] = {}
+        self._draining = False
 
     # --- persistence and event flow ------------------------------------
 
@@ -126,6 +133,10 @@ class SessionCoordinator:
         self._log_event(event)
         if event_type in ("agent_state", "session_added", "session_updated", "session_removed"):
             self._report_activity()
+        # A session going idle is the only thing that makes an occupied slot
+        # evictable, so it is the moment to retry anything waiting for one.
+        if self._queued and event_type == "agent_state" and event.get("state") == "idle":
+            self._schedule_drain()
 
     def _log_event(self, event: dict) -> None:
         event_type = event.get("type")
@@ -257,6 +268,25 @@ class SessionCoordinator:
         session_id = self.sessions.new_session_id()
         auto_named = not bool((name or "").strip())
         display_name = (name or "").strip() or f"Session {len(self._metadata) + 1}"
+        # Decided before the subprocess exists: a new session over the limit
+        # is created *stored*, so it has an id, metadata, a transcript and --
+        # for the Telegram client -- a topic, and simply is not running yet.
+        # Refusing instead would deny the user something the interface invites.
+        has_slot = await self._ensure_slot(ephemeral=ephemeral)
+        now = _now_iso()
+        if not has_slot:
+            self._acp_ids[session_id] = None
+            self._auto_named[session_id] = auto_named
+            self._metadata[session_id] = {
+                "session_id": session_id, "name": display_name,
+                "path": str(working_path), "backend": backend.name,
+                "always_allow": True, "ephemeral": bool(ephemeral),
+                "state": "stored", "live": False, "created": now, "last_active": now,
+            }
+            self._persist_meta(session_id)
+            self._emit({"type": "session_added", **self._metadata[session_id]})
+            self._enqueue(session_id, None)
+            return session_id
         session = AgentSession(
             session_id=session_id,
             name=display_name,
@@ -266,7 +296,6 @@ class SessionCoordinator:
             request_permission=self._request_permission,
         )
         self.sessions.add(session)
-        now = _now_iso()
         self._acp_ids[session_id] = None
         self._auto_named[session_id] = auto_named
         self._metadata[session_id] = {
@@ -301,9 +330,90 @@ class SessionCoordinator:
         self._persist_meta(session_id)
         return session_id
 
+    # --- the live-session cap ------------------------------------------
+
+    def live_session_ids(self) -> list[str]:
+        return [sid for sid, meta in self._metadata.items() if meta.get("live")]
+
+    async def _ensure_slot(self, *, ephemeral: bool = False) -> bool:
+        """Make room for one more live session. True if there is room now.
+
+        Sessions are the unit of memory cost -- each holds its own ACP backend
+        subprocess -- and this daemon has been OOM-killed carrying ten of them.
+        Eviction is least-recently-used among *idle* sessions: evicting by
+        oldest activation would take the session you have had open all day,
+        and evicting a working one would destroy a turn in flight.
+        """
+        limit = self.config.max_active_sessions
+        if limit <= 0:
+            return True
+        live = self.live_session_ids()
+        if len(live) < limit:
+            return True
+        if ephemeral:
+            # The manager session is the control channel: if it cannot start,
+            # the user has no way to stop anything else. It counts toward the
+            # limit but is never made to wait for it.
+            self.log.warning("over the %d-session limit for an ephemeral session", limit)
+            return True
+        candidates = sorted(
+            (sid for sid in live
+             if not self._metadata[sid].get("ephemeral")
+             and self._metadata[sid].get("state") == "idle"),
+            key=lambda sid: self._metadata[sid].get("last_active") or "",
+        )
+        if not candidates:
+            return False
+        victim = candidates[0]
+        self.log.info("session limit %d reached: stopping least-recently-used %s (%s)",
+                      limit, victim, self._metadata[victim].get("name"))
+        await self.stop_session(victim)
+        return True
+
+    def _enqueue(self, session_id: str, text: Optional[str]) -> None:
+        self._queued[session_id] = text or self._queued.get(session_id)
+        live = len(self.live_session_ids())
+        self.log.info("session %s queued for a slot (%d live, limit %d)",
+                      session_id, live, self.config.max_active_sessions)
+        self._emit({"type": "notice", "session_id": session_id, "level": "info",
+                    "message": f"waiting for a free session slot — {live} of "
+                               f"{self.config.max_active_sessions} are active and busy"})
+
+    def _schedule_drain(self) -> None:
+        if self._draining:
+            return
+        self._draining = True
+        asyncio.create_task(self._drain_queue())
+
+    async def _drain_queue(self) -> None:
+        """Activate queued sessions while slots can be freed. Never fatal."""
+        try:
+            for session_id in list(self._queued):
+                if session_id not in self._metadata:
+                    self._queued.pop(session_id, None)
+                    continue
+                if not await self._ensure_slot():
+                    return
+                text = self._queued.pop(session_id, None)
+                try:
+                    await self.resume_session(session_id)
+                    if text:
+                        await self.send(session_id, text)
+                except Exception as error:
+                    self.log.warning("could not activate queued session %s: %s",
+                                     session_id, error, exc_info=True)
+                    self._emit({"type": "notice", "session_id": session_id,
+                                "level": "error",
+                                "message": f"could not start after waiting: {error}"})
+        finally:
+            self._draining = False
+
     async def resume_session(self, session_id: str) -> None:
         meta = self._require(session_id)
         if meta.get("live"):
+            return
+        if not await self._ensure_slot(ephemeral=bool(meta.get("ephemeral"))):
+            self._enqueue(session_id, None)
             return
         path = Path(meta["path"])
         if not path.is_dir():
@@ -359,6 +469,12 @@ class SessionCoordinator:
             await self.resume_session(session_id)
         session = self.sessions.get(session_id)
         if session is None:
+            if session_id in self._queued:
+                # Held, not lost. Blocking here instead would be worse than
+                # useless: `send` is an HTTP call with a 40-second client
+                # timeout, and the slot may not free for many minutes.
+                self._enqueue(session_id, text)
+                return
             raise FalconFoxError(f"could not resume session: {session_id}")
         pending = self._pending_context.pop(session_id, None)
         if pending:
@@ -382,6 +498,7 @@ class SessionCoordinator:
         if session is not None:
             await session.stop()
         meta.update(state="stored", live=False)
+        self._queued.pop(session_id, None)
         self._config_options.pop(session_id, None)
         self._commands.pop(session_id, None)
         self._pending_context.pop(session_id, None)

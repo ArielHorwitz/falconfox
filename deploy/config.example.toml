@@ -2,6 +2,17 @@
 # Copy to ~/.config/falconfox/config.toml and paste your token.
 
 default_backend = "claude"
+
+# Sessions holding a live agent subprocess at once. Each session runs its own
+# ACP backend process, so this is a ceiling on host memory rather than on your
+# work: a session over the limit is created *stored* and activates when a slot
+# frees, evicting the least-recently-used idle session to make room. A working
+# session is never evicted. 0 disables the cap.
+#
+# Sized for a small VPS. This daemon has been OOM-killed carrying ten sessions
+# on a 951 MB host.
+max_active_sessions = 5
+
 default_always_allow = true
 
 [backends.claude]

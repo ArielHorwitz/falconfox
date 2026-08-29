@@ -39,6 +39,13 @@ ECHO_BACKEND_NAME = "echo"
 # the global config, or the FALCONFOX_LOG_LEVEL environment variable.
 DEFAULT_LOG_LEVEL = "INFO"
 
+# How many sessions may hold a live agent subprocess at once. Sessions are the
+# unit of memory cost -- each one runs its own ACP backend process -- so this
+# is a ceiling on the host, not on the user's work: a session over the limit is
+# stored rather than refused, and activates when a slot frees. 0 disables the
+# cap. Override with a top-level `max_active_sessions = N` in config.toml.
+DEFAULT_MAX_ACTIVE_SESSIONS = 5
+
 # The instructions handed to the model when asked to name a session. Override it
 # in config.toml with a top-level `naming_prompt = "..."`.
 DEFAULT_NAMING_PROMPT = (
@@ -142,6 +149,8 @@ class Config:
     naming_backend: Optional[str] = None
     # Whether new sessions start with always-allow enabled.
     default_always_allow: bool = False
+    # Ceiling on sessions holding a live agent subprocess. See the constant.
+    max_active_sessions: int = DEFAULT_MAX_ACTIVE_SESSIONS
     # Action -> key, or a list of keys (the browser binds each to that action).
     hotkeys: dict = field(default_factory=lambda: dict(DEFAULT_HOTKEYS))
     ui: dict = field(default_factory=lambda: dict(DEFAULT_UI))
@@ -220,6 +229,8 @@ def load_config() -> Config:
         naming_prompt=data.get("naming_prompt", DEFAULT_NAMING_PROMPT),
         naming_backend=data.get("naming_backend"),
         default_always_allow=bool(data.get("default_always_allow", False)),
+        max_active_sessions=max(0, int(
+            data.get("max_active_sessions", DEFAULT_MAX_ACTIVE_SESSIONS))),
         hotkeys={**DEFAULT_HOTKEYS, **data.get("hotkeys", {})},
         ui=_merge_ui(data.get("ui", {})),
     )
