@@ -53,27 +53,32 @@ says "groups from 100 members or more", and third-party pages say 200; both
 are stale. Treat the published threshold as gone, not as a constraint to
 design around.
 
-### The one thing still unconfirmed
+### Answered: the bot creates topics (2026-08-29)
 
-Whether the **HTTP Bot API can create a topic in a private-chat forum**
-(route A). The 9.3 changelog extends `message_thread_id` to private chats but
-does *not* list `createForumTopic` as extended there. At MTProto level the
-capability plainly exists — `bot_forum_can_manage_topics` governs who may
-create topics in a bot forum, and unauthorized attempts raise
-`BOT_FORUM_CREATE_FORBIDDEN` — and the fact that user-created threads can be
-*disabled* strongly implies the bot can still make them. But "strongly
-implies" is not a method signature.
+The opening question — whether the HTTP Bot API can create a topic in a
+private-chat forum — was **measured live and the answer is yes**, even though
+the 9.3 changelog does not list `createForumTopic` as extended to private
+chats. So the flow is the natural one: spawn a session, a topic appears for
+it; the session list *is* the topic list. It is not inverted.
 
-This is the first thing to settle, because it decides the direction of the
-whole flow:
+Full results in
+[bot-api-forum-topic-capabilities-measured-live.md](bot-api-forum-topic-capabilities-measured-live.md).
+The three findings that change the work:
 
-- **Bot creates topics** → spawn a session, a topic appears for it. The
-  session list *is* the topic list.
-- **Only the user creates topics** → open a topic, the bot spawns a session
-  into it. Inverted, and the topic list is the source of truth.
+- **Stop/resume has no representation in route A.** `closeForumTopic` and
+  `reopenForumTopic` fail with "the chat is not a supergroup forum"; every
+  other lifecycle verb maps to a working method. This is now the *only*
+  substantive argument for route B.
+- **A reply inherits its parent's topic.** A message sent with no thread id
+  but with `reply_parameters` pointing into a topic lands in that topic. The
+  turn-feedback case threaded replies to their prompt for notification
+  reasons, so the reply path is already correct here by accident.
+- **The break is the plain sends**: the progress message, reply continuation
+  chunks, and every notice. A long answer today splits — first part in the
+  topic, continuation in General — which reads as lost text, not misrouting.
 
-Route B has no such doubt: `createForumTopic` is documented and unambiguous.
-If the answer for route A is "no", that alone may pick route B.
+`getMe` also reports `has_topics_enabled` and `allows_users_to_create_topics`,
+so no new configuration is needed to detect the mode.
 
 ## What this does to the focus/work divide
 
@@ -125,12 +130,13 @@ more than one conversation.
 
 ## Open decisions
 
-1. **Route A or B.** A is less setup and no group; B has a documented
-   creation API and the richer management surface.
+1. **Route A or B**, and it now reduces to one question: does stopping a
+   session need to close its topic? Route A cannot; route B can. Everything
+   else about A is cheaper — no group, no admin rights, no setup.
 2. **Where the manager lives.** The General topic is the obvious home, but a
    manager that can also *be* the thing creating topics may want its own.
-3. **Who owns the topic namespace** — follows from the unconfirmed question
-   above.
+3. ~~**Who owns the topic namespace.**~~ Settled: the bot creates topics, and
+   user-created threads can be disabled at @BotFather.
 4. **Notifications per topic.** The turn-feedback case settled on a silent
    progress message and a threaded reply that pings; per-topic muting is a
    new lever that may change that balance.
