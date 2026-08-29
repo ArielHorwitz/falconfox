@@ -677,8 +677,15 @@ class FalconFoxTelegramBot:
         title = session.get("name") or session_id
         try:
             thread = await self.telegram.create_topic(self.forum_chat_id, title)
-        except ApiError:
+        except ApiError as error:
             log.warning("could not create a topic for %s", session_id, exc_info=True)
+            # Silent here means a session spawns cleanly and simply never
+            # appears, with nothing anywhere the user can see. Say it in the
+            # private chat, which works even when the forum does not.
+            await self._tell_owner(
+                f"Could not make a topic for “{session.get('name') or session_id}” "
+                f"— the forum is not usable ({error}). Message me here and we can "
+                f"sort it out.")
             return None
         self._bind(session_id, thread)
         self._topic_names[session_id] = title
@@ -858,6 +865,15 @@ class FalconFoxTelegramBot:
                                 prompt_msg=message.get("message_id"))
             return
         if chat_id != self.forum_chat_id:
+            # A message from an unknown group is also a discovery signal. The
+            # membership update only fires once, at the moment of joining, and
+            # is gone forever after -- so a bot that was already in the group
+            # when it lost its forum could never find it again. "Say anything
+            # in the group" is a recovery path that always works.
+            if chat_id < 0:
+                await self._maybe_adopt_forum(chat_id)
+                if chat_id == self.forum_chat_id:
+                    return
             log.info("ignoring message from unconfigured chat %s", chat_id)
             return
         if text.startswith("/"):
