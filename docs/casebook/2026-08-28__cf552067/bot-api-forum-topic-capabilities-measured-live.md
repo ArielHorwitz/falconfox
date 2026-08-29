@@ -124,3 +124,69 @@ exact field the overview names as needing to become a (chat, thread) pair.
   **progress message**, the **continuation chunks**, and the **notices** —
   all of which are plain sends today.
 - No new config is needed to detect the mode (`getMe`).
+
+## Route B measured: a supergroup forum (2026-08-29)
+
+Bot added to a **supergroup** (`type: supergroup`, `is_forum: true`) and
+promoted to `administrator` with `can_manage_topics: true`. Every method
+tested passes:
+
+| Method | Private chat | Supergroup forum |
+|---|---|---|
+| `createForumTopic` | ✅ | ✅ |
+| `editForumTopic` | ✅ | ✅ |
+| `deleteForumTopic` | ✅ | ✅ |
+| `unpinAllForumTopicMessages` | ✅ | ✅ |
+| `sendMessage` / `editMessageText` / `sendChatAction` in topic | ✅ | ✅ |
+| `closeForumTopic` | ❌ | **✅** |
+| `reopenForumTopic` | ❌ | **✅** |
+| `editGeneralForumTopic` / `hide` / `unhide` / `reopenGeneral` | n/a | ✅ |
+
+**Route B is a strict superset of route A.** Nothing route A can do is lost,
+and the two verbs it cannot express both work. The placement rule is
+identical in both: a reply with no thread id inherits its parent's topic; a
+bare send lands in General.
+
+### A closed topic still accepts bot writes
+
+Measured: after `closeForumTopic`, `sendMessage` into that topic **still
+succeeds**. Closing stops *members* posting; it does not lock the bot out.
+
+That is exactly the shape a stopped session wants: the topic stays in the
+list as a record, the user cannot type into a session that is not running,
+and the bot can still deliver a final reply or a notice. Route A has no way
+to express any of this.
+
+### Topic icons are a per-session state channel
+
+`getForumTopicIconStickers` returns **112** custom emoji, and
+`editForumTopic` sets or clears one per topic (passing `""` clears it). Both
+verified.
+
+This is worth flagging against the **closed** turn-feedback case
+([2026-08-24__165f0606](../2026-08-24__165f0606/overview.md)), whose central
+difficulty was that the chat-action channel had too small an alphabet to say
+*idle* vs *working* vs *stuck* — it settled for a five-state blink plus
+message content. A topic icon is **persistent, per-session, visible in the
+topic list without opening anything, and has 112 values**. It is a strictly
+better channel for exactly the problem that case could not solve cleanly, and
+it did not exist in that case's design space because sessions had no per-topic
+identity to attach it to.
+
+Not a reason to reopen that case. It is a reason for this one to own the
+question of what a session's state looks like at a glance.
+
+### The General topic can host the manager
+
+`editGeneralForumTopic` renames it, and `hide`/`unhide` work — so the manager
+session has a natural home that cannot be deleted and always sorts first.
+`closeGeneralForumTopic` returned `TOPIC_NOT_MODIFIED` (already in that
+state); `reopenGeneralForumTopic` succeeded.
+
+### Topic management is rate-limited
+
+`unpinAllForumTopicMessages` returned `Too Many Requests: retry after 3`
+during a run of back-to-back calls. Not a capability limit, but it means
+bulk topic work — reconciling many sessions at startup, say — needs the same
+retry discipline as any other Telegram call, and cannot assume a tight loop
+will succeed.

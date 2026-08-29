@@ -53,6 +53,10 @@ says "groups from 100 members or more", and third-party pages say 200; both
 are stale. Treat the published threshold as gone, not as a constraint to
 design around.
 
+Then measured end to end (2026-08-29) with the bot promoted to administrator
+with `can_manage_topics`: **every method passes, including the two a private
+chat refuses.** Route B is a strict superset of route A.
+
 ### Answered: the bot creates topics (2026-08-29)
 
 The opening question — whether the HTTP Bot API can create a topic in a
@@ -130,9 +134,13 @@ more than one conversation.
 
 ## Open decisions
 
-1. **Route A or B**, and it now reduces to one question: does stopping a
-   session need to close its topic? Route A cannot; route B can. Everything
-   else about A is cheaper — no group, no admin rights, no setup.
+1. ~~**Route A or B.**~~ **Settled: route B** (a supergroup forum). It is a
+   strict superset — everything route A does, plus `closeForumTopic` /
+   `reopenForumTopic`. And a **closed topic still accepts bot writes**, which
+   is precisely the shape a stopped session wants: it stays in the list as a
+   record, the user cannot type into a session that is not running, and the
+   bot can still deliver a final notice. The cost is one-time setup (a
+   supergroup, bot promoted) which is already done.
 2. **Where the manager lives.** The General topic is the obvious home, but a
    manager that can also *be* the thing creating topics may want its own.
 3. ~~**Who owns the topic namespace.**~~ Settled: the bot creates topics, and
@@ -140,6 +148,13 @@ more than one conversation.
 4. **Notifications per topic.** The turn-feedback case settled on a silent
    progress message and a threaded reply that pings; per-topic muting is a
    new lever that may change that balance.
+5. **What a session's state looks like at a glance.** `editForumTopic` sets a
+   topic icon from **112** custom emoji, per topic, persistent, visible in
+   the topic list without opening anything. That is a far better channel for
+   *idle / working / stuck* than the five-state chat action the turn-feedback
+   case settled for — and it was outside that case's design space, because
+   sessions had no per-topic identity to hang it on. This case should own the
+   question.
 
 ## Related wishlist entries
 
