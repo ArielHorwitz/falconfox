@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
+from typing import NamedTuple
 
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
@@ -59,6 +60,19 @@ QUIET_TURN = (
     "long tool call looks just like a stuck turn from here — /status shows "
     "the daemon's view."
 )
+class Dest(NamedTuple):
+    """Where a turn talks: a chat, and a topic within it.
+
+    The forum collapsed this to a bare thread id for a while, on the premise
+    that the chat is always the forum. The owner's private chat breaks that
+    premise -- it needs no configuration and exists before any forum does --
+    so both halves travel together again.
+    """
+
+    chat: int
+    thread: int | None = None
+
+
 QUIET_TURN_SECONDS = 180
 # Service messages that are not prompts. Topic events are the bot's own
 # lifecycle calls echoing back through the update stream.
@@ -190,7 +204,7 @@ class FalconFoxTelegramBot:
         # stream of session_updated events only acts on real transitions.
         self._topic_names: dict[str, str] = {}
         self._closed_topics: set[str] = set()
-        self._turn_thread: dict[str, int | None] = {}
+        self._turn_dest: dict[str, Dest] = {}
         self._activity_tasks: dict[str, asyncio.Task] = {}
         self._activity_state: dict[str, str] = {}
         self._turn_working: set[str] = set()
@@ -303,18 +317,20 @@ class FalconFoxTelegramBot:
             # keepalive stalls it filled the chat with copies of itself.
             self._reset_connection_state()
 
-    async def _say(self, thread: int | None, text: str, *,
+    async def _say(self, dest: Dest, text: str, *,
                    reply_to: int | None = None, silent: bool = False) -> int | None:
-        """Send into a topic. The chat is always the forum, so a destination
-        is just a thread id; None is General, the manager's topic."""
+        """Send to a destination. A thread of None is the chat itself --
+        General in a forum, or simply the conversation in a private chat."""
         return await self.telegram.message(
-            self.forum_chat_id, text,
-            reply_to=reply_to, silent=silent, thread=thread)
+            dest.chat, text, reply_to=reply_to, silent=silent, thread=dest.thread)
 
     async def _announce(self, text: str) -> None:
         """Tell the manager topic something about the bot itself. Never fatal."""
         try:
-            await self._say(None, text)
+            forum = self.forum_chat_id
+            if forum is None:
+                return  # nothing configured yet; nowhere to announce
+            await self._say(Dest(forum, None), text)
         except Exception:
             # An announcement failing must not take down the connection it is
             # announcing -- that would turn a blip into an outage.
@@ -352,17 +368,18 @@ class FalconFoxTelegramBot:
         self._seen_tools.clear()
         self._thought_parts.clear()
         self._usage_view.clear()
-        self._turn_thread.clear()
+        self._turn_dest.clear()
         self._reply_parts.clear()
 
     def _persist_turns(self) -> None:
         """Write the in-flight turn map to disk, atomically. Never fatal."""
         now_wall, now_mono = time.time(), time.monotonic()
         entries = {}
-        for session_id, thread in self._turn_thread.items():
+        for session_id, dest in self._turn_dest.items():
             started = self._turn_started_at.get(session_id)
             entries[session_id] = {
-                "thread": thread,
+                "chat": dest.chat,
+                "thread": dest.thread,
                 "turn_id": self._turn_id.get(session_id),
                 "consumed": self._consumed.get(session_id, 0),
                 "delivered": self._delivered.get(session_id, 0),
@@ -398,14 +415,14 @@ class FalconFoxTelegramBot:
             return
         states = {item["session_id"]: item["state"] for item in await self.daemon.sessions()}
         for session_id, record in entries.items():
-            if "thread" not in record:
+            if "chat" not in record or "thread" not in record:
                 # Written by a pre-forum build, whose "chat" ids mean nothing
                 # here. Dropping is right: the cutover changed the config, so
                 # such a record cannot be delivered anywhere sensible.
                 log.info("dropping pre-forum persisted turn for %s", session_id)
                 continue
-            thread = record["thread"]
-            if thread is None:
+            dest = Dest(record["chat"], record["thread"])
+            if dest.thread is None and dest.chat == self.forum_chat_id:
                 # Manager turns are session-management chatter, and the
                 # manager session is ephemeral and respawned on every connect.
                 log.info("dropping persisted manager turn for %s", session_id)
@@ -413,7 +430,7 @@ class FalconFoxTelegramBot:
             state = states.get(session_id)
             if state is None:
                 log.warning("persisted turn lost: session=%s no longer exists", session_id)
-                await self._say(thread, LOST_TURN.format(session_id=session_id))
+                await self._say(dest, LOST_TURN.format(session_id=session_id))
             elif state in ("working", "starting"):
                 self._adopt_turn(session_id, record)
                 await self._set_activity(session_id, "working")
@@ -424,7 +441,7 @@ class FalconFoxTelegramBot:
     def _adopt_turn(self, session_id: str, record: dict) -> None:
         log.info("adopting in-flight turn: session=%s turn=%s consumed=%d",
                  session_id, record.get("turn_id"), record.get("consumed", 0))
-        self._turn_thread[session_id] = record["thread"]
+        self._turn_dest[session_id] = Dest(record["chat"], record["thread"])
         self._turn_id[session_id] = record.get("turn_id") or ""
         self._consumed[session_id] = record.get("consumed", 0)
         self._delivered[session_id] = record.get("delivered", 0)
@@ -449,17 +466,17 @@ class FalconFoxTelegramBot:
         """The turn ended while the bot was away; hand over what never arrived."""
         text = await self._turn_text_from_transcript(session_id)
         remainder = (text or "")[record.get("consumed", 0):].strip()
-        thread = record["thread"]
+        dest = Dest(record["chat"], record["thread"])
         prompt_msg = record.get("prompt_msg")
         if remainder:
             log.info("recovered turn: session=%s chars=%d", session_id, len(remainder))
-            await self._say(thread, RECOVERED_TURN)
+            await self._say(dest, RECOVERED_TURN)
             for index, rendered in enumerate(render_messages(remainder)):
                 await self.telegram.html_message(
-                    self.forum_chat_id, rendered.html, rendered.plain,
-                    reply_to=prompt_msg if index == 0 else None, thread=thread)
+                    dest.chat, rendered.html, rendered.plain,
+                    reply_to=prompt_msg if index == 0 else None, thread=dest.thread)
         elif not record.get("delivered"):
-            await self._say(thread, SILENT_TURN.format(
+            await self._say(dest, SILENT_TURN.format(
                 detail="it ended while the bot was away, and nothing had been "
                        "produced"), reply_to=prompt_msg)
 
@@ -691,6 +708,7 @@ class FalconFoxTelegramBot:
             log.info("ignoring message from unconfigured chat %s", chat_id)
             return
         thread = message.get("message_thread_id")
+        dest = Dest(chat_id, thread)
         text = message.get("text")
         if not text:
             if any(key.startswith("forum_topic_") or key in _JOIN_EVENTS
@@ -698,29 +716,29 @@ class FalconFoxTelegramBot:
                 # Topic service messages are the bot's own lifecycle calls
                 # echoing back; answering them would spam every topic it makes.
                 return
-            await self._say(thread, "Text messages only in this PoC.")
+            await self._say(dest, "Text messages only in this PoC.")
             return
         if text.startswith("/"):
-            if await self._command(thread, text):
+            if await self._command(dest, text):
                 return
         target = self.manager_session_id if thread is None else self._threads.get(thread)
         if not target:
-            await self._say(thread, "No FalconFox session owns this topic.")
+            await self._say(dest, "No FalconFox session owns this topic.")
             return
-        await self._forward(target, thread, text, prompt_msg=message.get("message_id"))
+        await self._forward(target, dest, text, prompt_msg=message.get("message_id"))
 
-    async def _command(self, thread: int | None, text: str) -> bool:
+    async def _command(self, dest: Dest, text: str) -> bool:
         try:
             parts = shlex.split(text)
         except ValueError as error:
-            await self._say(thread, f"Invalid command: {error}")
+            await self._say(dest, f"Invalid command: {error}")
             return True
         command = parts[0].split("@", 1)[0]
         if command == "/status":
             # Diagnosis from the phone: what the daemon knows about sessions,
             # and what this bot *believes* is in flight — the five parallel
             # dicts that every silent failure so far has been a hidden state of.
-            await self._say(thread, await self._status_report())
+            await self._say(dest, await self._status_report())
             return True
         if command == "/list":
             sessions = await self.daemon.sessions()
@@ -728,7 +746,7 @@ class FalconFoxTelegramBot:
                 f"{item['session_id']}  {item['name']}  [{item['state']}]  {item['path']}"
                 for item in sessions
             ) or "No sessions."
-            await self._say(thread, listing)
+            await self._say(dest, listing)
             return True
         if command in ("/new", "/home"):
             path = (str(self.config.default_path)
@@ -740,20 +758,21 @@ class FalconFoxTelegramBot:
             # gives the session its topic. Confirm here anyway, because the
             # topic appears elsewhere in the forum and a silent /new in
             # General reads as a command that did nothing.
-            await self._say(thread, f"Spawned {session.get('name') or 'session'} "
+            await self._say(dest, f"Spawned {session.get('name') or 'session'} "
                                     f"({session['session_id']}) — see its topic.")
             return True
         # /switch is gone with the pointer: a session is addressed by writing
         # in its topic, so there is nothing left to switch.
         if command == "/name":
-            target = self._threads.get(thread) if thread is not None else None
+            target = (self._threads.get(dest.thread)
+                      if dest.thread is not None else None)
             if len(parts) < 2 or target is None:
-                await self._say(thread, "Usage: /name <new name> — in a session's topic.")
+                await self._say(dest, "Usage: /name <new name> — in a session's topic.")
                 return True
             await self.daemon.rename(target, " ".join(parts[1:]))
             # The topic retitle follows from the daemon's session_updated
             # event, so it happens whoever renamed the session.
-            await self._say(thread, f"Renamed session to {' '.join(parts[1:])}.")
+            await self._say(dest, f"Renamed session to {' '.join(parts[1:])}.")
             return True
         return False
 
@@ -773,13 +792,14 @@ class FalconFoxTelegramBot:
                 f"topic {thread}" if thread is not None else "no topic")
             lines.append(f"  {item['session_id']}  {item['name']}  "
                          f"[{item['state']}]  {where}")
-        if not self._turn_thread:
+        if not self._turn_dest:
             lines.append("No turn in flight (bot view).")
         else:
             lines.append("In flight (bot view):")
             now = time.monotonic()
-            for session_id, turn_thread in self._turn_thread.items():
-                chat = "General" if turn_thread is None else f"topic {turn_thread}"
+            for session_id, turn_dest in self._turn_dest.items():
+                chat = ("General" if turn_dest.thread is None
+                        else f"topic {turn_dest.thread}")
                 started = self._turn_started_at.get(session_id)
                 age = f"{now - started:.0f}s ago" if started is not None else "unknown"
                 buffered = sum(len(part) for part in self._reply_parts.get(session_id, []))
@@ -793,7 +813,7 @@ class FalconFoxTelegramBot:
                     f"quiet={quiet} started {age}")
         return "\n".join(lines)
 
-    def _start_activity(self, session_id: str, thread: int | None) -> bool:
+    def _start_activity(self, session_id: str, dest: Dest) -> bool:
         """Ensure a refresh loop is running. True if this call started one."""
         task = self._activity_tasks.get(session_id)
         # `task.done()` matters: a finished task is still *in* the dict, and the
@@ -804,19 +824,19 @@ class FalconFoxTelegramBot:
         if task is not None and not task.done():
             return False
         self._activity_tasks[session_id] = asyncio.create_task(
-            self._activity_loop(session_id, thread))
+            self._activity_loop(session_id, dest))
         return True
 
     async def _set_activity(self, session_id: str, state: str) -> None:
         """Record what the session is doing and show it in the chat."""
-        if session_id not in self._turn_thread:
+        if session_id not in self._turn_dest:
             return
         # None is a real destination (General), so membership is the test --
         # a `.get() is None` guard here would silently mute the manager topic.
-        thread = self._turn_thread[session_id]
+        dest = self._turn_dest[session_id]
         # Before the equality check, so this doubles as the safety net that
         # revives a loop which died mid-turn.
-        started = self._start_activity(session_id, thread)
+        started = self._start_activity(session_id, dest)
         previous = self._activity_state.get(session_id)
         if previous == state:
             return
@@ -830,7 +850,7 @@ class FalconFoxTelegramBot:
         # delayed a finished reply by 45 seconds. The indicator is droppable
         # decoration; the pipeline is not allowed to wait for it.
         if not started:
-            task = asyncio.create_task(self._send_action(session_id, thread))
+            task = asyncio.create_task(self._send_action(session_id, dest))
             self._action_sends.add(task)
             task.add_done_callback(self._action_sends.discard)
 
@@ -874,7 +894,7 @@ class FalconFoxTelegramBot:
             lines.append(marker)
         self._progress_dirty.add(session_id)
 
-    async def _update_progress(self, session_id: str, thread: int | None, *,
+    async def _update_progress(self, session_id: str, dest: Dest, *,
                                final_note: str | None = None) -> None:
         """Create or edit the turn's progress message. Rides the activity loop
         (and the turn's finalization), never the event pipeline: a hung
@@ -897,18 +917,18 @@ class FalconFoxTelegramBot:
             text = "\n".join([header, "", "… (earlier progress trimmed)", *lines])
         try:
             if message_id is None:
-                message_id = await self._say(thread, text, silent=True)
+                message_id = await self._say(dest, text, silent=True)
                 if message_id is not None:
                     self._progress_msg[session_id] = message_id
                     self._persist_turns()
             else:
-                await self.telegram.edit_message(self.forum_chat_id, message_id, text)
+                await self.telegram.edit_message(dest.chat, message_id, text)
         except ApiError as error:
             # Progress is decoration; a failed update waits for the next tick.
             self._progress_dirty.add(session_id)
             log.debug("progress update failed for %s: %s", session_id, error)
 
-    async def _send_reply(self, session_id: str, thread: int | None) -> None:
+    async def _send_reply(self, session_id: str, dest: Dest) -> None:
         """Deliver the turn's answer: the text after the last tool call,
         threaded to the prompt that asked for it."""
         raw = "".join(self._reply_parts.get(session_id, []))
@@ -925,20 +945,20 @@ class FalconFoxTelegramBot:
                 if not line.startswith("⚙️")), "")
         if not text:
             return
-        log.info("reply: session=%s thread=%s chars=%d", session_id, thread, len(text))
+        log.info("reply: session=%s dest=%s chars=%d", session_id, dest, len(text))
         prompt_msg = self._prompt_msg.get(session_id)
         for index, rendered in enumerate(render_messages(text)):
             await self.telegram.html_message(
-                self.forum_chat_id, rendered.html, rendered.plain,
-                reply_to=prompt_msg if index == 0 else None, thread=thread)
+                dest.chat, rendered.html, rendered.plain,
+                reply_to=prompt_msg if index == 0 else None, thread=dest.thread)
         self._delivered[session_id] = self._delivered.get(session_id, 0) + len(text)
         self._persist_turns()
 
-    async def _send_action(self, session_id: str, thread: int | None) -> None:
+    async def _send_action(self, session_id: str, dest: Dest) -> None:
         action = TURN_ACTIONS.get(
             self._activity_state.get(session_id, ""), DEFAULT_ACTION)
         try:
-            await self.telegram.chat_action(self.forum_chat_id, action, thread=thread)
+            await self.telegram.chat_action(dest.chat, action, thread=dest.thread)
         except ApiError as error:
             # Never fatal to the loop. A 429 from the rate limiter -- likeliest
             # on exactly the long turn that needs an indicator -- or one of the
@@ -946,19 +966,19 @@ class FalconFoxTelegramBot:
             # and leave the turn silent for the rest of its life.
             log.debug("chat action %s failed for %s: %s", action, session_id, error)
 
-    async def _forward(self, session_id: str, thread: int | None, text: str,
+    async def _forward(self, session_id: str, dest: Dest, text: str,
                        prompt_msg: int | None = None) -> None:
-        if session_id in self._turn_thread:
+        if session_id in self._turn_dest:
             # The daemon refuses a prompt while a turn is running, and says so
             # with an *info* notice -- which this client does not surface, so the
             # message vanished without a trace. Worse, forwarding it anyway reset
             # the buffers below and destroyed the reply already in flight. Refuse
             # here instead, and say so, so the text is never silently eaten.
-            log.info("refused mid-turn message: session=%s thread=%s", session_id, thread)
-            await self._say(thread, BUSY_TURN, reply_to=prompt_msg)
+            log.info("refused mid-turn message: session=%s dest=%s", session_id, dest)
+            await self._say(dest, BUSY_TURN, reply_to=prompt_msg)
             return
-        log.info("forward: session=%s thread=%s chars=%d", session_id, thread, len(text))
-        self._turn_thread[session_id] = thread
+        log.info("forward: session=%s dest=%s chars=%d", session_id, dest, len(text))
+        self._turn_dest[session_id] = dest
         self._reply_parts[session_id] = []
         self._delivered[session_id] = 0
         self._consumed[session_id] = 0
@@ -987,7 +1007,7 @@ class FalconFoxTelegramBot:
         # call never delays the actual work, and silently: progress is
         # ambient, only the response should ping.
         try:
-            message_id = await self._say(thread, PROGRESS_HEADER, silent=True)
+            message_id = await self._say(dest, PROGRESS_HEADER, silent=True)
             if message_id is not None:
                 self._progress_msg[session_id] = message_id
                 self._persist_turns()
@@ -1018,7 +1038,7 @@ class FalconFoxTelegramBot:
             elif role == "thought":
                 # Never part of the reply; its head joins the progress message
                 # when the thought ends.
-                if session_id in self._turn_thread:
+                if session_id in self._turn_dest:
                     self._thought_parts.setdefault(session_id, []).append(
                         event.get("text", ""))
                 await self._set_activity(session_id, "thinking")
@@ -1036,7 +1056,7 @@ class FalconFoxTelegramBot:
             # compact line there -- never a message of its own, which is the
             # part of "tool calls stay suppressed" that still stands.
             status = event.get("status")
-            if session_id in self._turn_thread:
+            if session_id in self._turn_dest:
                 tool_id = event.get("tool_call_id")
                 seen = self._seen_tools.setdefault(session_id, set())
                 if tool_id is None or tool_id not in seen:
@@ -1078,13 +1098,14 @@ class FalconFoxTelegramBot:
             # and a closed topic still accepts bot writes, so this lands even
             # when it follows the close.
             thread = self._topics.get(session_id)
-            if thread is not None:
-                await self._say(thread, f"⏸ {event.get('message', '')}")
+            if thread is not None and self.forum_chat_id is not None:
+                await self._say(Dest(self.forum_chat_id, thread),
+                                f"⏸ {event.get('message', '')}")
             return
         if event_type == "notice" and event.get("level") == "error":
-            if session_id in self._turn_thread:
+            if session_id in self._turn_dest:
                 await self._say(
-                    self._turn_thread[session_id],
+                    self._turn_dest[session_id],
                     f"FalconFox error: {event.get('message', '')}",
                     reply_to=self._prompt_msg.get(session_id))
             return
@@ -1092,7 +1113,7 @@ class FalconFoxTelegramBot:
             # The daemon's own name for the turn this chat is waiting on. Turns
             # driven by other clients (the focus agent's CLI sends, the web UI)
             # have no chat here and are none of our business.
-            if session_id in self._turn_thread:
+            if session_id in self._turn_dest:
                 self._turn_id[session_id] = event.get("turn_id") or ""
                 self._persist_turns()
                 log.info("turn started: session=%s turn=%s", session_id, event.get("turn_id"))
@@ -1114,7 +1135,7 @@ class FalconFoxTelegramBot:
             return
         if state != "idle":
             return
-        if (session_id in self._turn_thread and session_id not in self._turn_working
+        if (session_id in self._turn_dest and session_id not in self._turn_working
                 and not self._reply_parts.get(session_id)):
             # Resuming a stored session emits `idle` *before* the turn starts
             # (engine/session.py sets it once the ACP subprocess is up). Treating
@@ -1177,8 +1198,8 @@ class FalconFoxTelegramBot:
         if activity:
             activity.cancel()
         self._activity_state.pop(session_id, None)
-        had_turn = session_id in self._turn_thread
-        thread = self._turn_thread.pop(session_id, None)
+        had_turn = session_id in self._turn_dest
+        dest = self._turn_dest.pop(session_id, None)
         turn_id = self._turn_id.pop(session_id, None) or (event or {}).get("turn_id")
         started = self._turn_started_at.pop(session_id, None)
         outcome = (event or {}).get("outcome")
@@ -1218,8 +1239,8 @@ class FalconFoxTelegramBot:
             elif usage.get("used") and usage.get("size"):
                 note += (f" · ctx {_format_count(usage['used'])}"
                          f"/{_format_count(usage['size'])}")
-            await self._update_progress(session_id, thread, final_note=note)
-            await self._send_reply(session_id, thread)
+            await self._update_progress(session_id, dest, final_note=note)
+            await self._send_reply(session_id, dest)
         delivered = self._delivered.pop(session_id, 0)
         self._consumed.pop(session_id, None)
         self._adopted.discard(session_id)
@@ -1250,20 +1271,20 @@ class FalconFoxTelegramBot:
                     detail = f"the agent produced no output; stop reason: {stop or 'unknown'}"
                 log.warning("turn delivered nothing: session=%s turn=%s %s",
                             session_id, turn_id, detail)
-                await self._say(thread, SILENT_TURN.format(detail=detail),
+                await self._say(dest, SILENT_TURN.format(detail=detail),
                                             reply_to=prompt_msg)
 
-    async def _activity_loop(self, session_id: str, thread: int | None) -> None:
+    async def _activity_loop(self, session_id: str, dest: Dest) -> None:
         try:
             while True:
-                await self._send_action(session_id, thread)
-                await self._update_progress(session_id, thread)
-                await self._check_quiet(session_id, thread)
+                await self._send_action(session_id, dest)
+                await self._update_progress(session_id, dest)
+                await self._check_quiet(session_id, dest)
                 await asyncio.sleep(ACTION_REFRESH_SECONDS)
         except asyncio.CancelledError:
             raise
 
-    async def _check_quiet(self, session_id: str, thread: int | None) -> None:
+    async def _check_quiet(self, session_id: str, dest: Dest) -> None:
         """Say -- once per spell -- that a turn has gone quiet for a long time."""
         if session_id in self._quiet_notified:
             return
@@ -1277,9 +1298,9 @@ class FalconFoxTelegramBot:
         state = self._activity_state.get(session_id) or "working"
         log.info("quiet turn: session=%s quiet=%.0fs state=%s", session_id, quiet, state)
         try:
-            await self._say(thread, QUIET_TURN.format(
+            await self._say(dest, QUIET_TURN.format(
                 minutes=int(quiet // 60), state=state),
                 reply_to=self._prompt_msg.get(session_id))
         except Exception:
             # The notice is decoration; the loop it rides on is not.
-            log.warning("could not report the quiet turn to thread %s", thread)
+            log.warning("could not report the quiet turn to %s", dest)
