@@ -314,8 +314,19 @@ class FakeTelegram:
     async def edit_message(self, chat_id, message_id, text):
         self.edits.append((chat_id, message_id, text))
 
+    chat_info = {"is_forum": True, "title": "forum"}
+    member_info = {"status": "administrator", "can_manage_topics": True}
+
     async def call(self, method, body=None):
-        return {"username": "test_bot"} if method == "getMe" else {}
+        if method == "getMe":
+            return {"username": "test_bot", "id": 500}
+        return {}
+
+    async def get_chat(self, chat_id):
+        return dict(self.chat_info)
+
+    async def get_member(self, chat_id, user_id):
+        return dict(self.member_info)
 
     async def create_topic(self, chat_id, name):
         self.topics = getattr(self, "topics", [])
@@ -1233,6 +1244,72 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
                     await bot._poll_telegram()
             # The second update was still handled: the loop survived the first.
             self.assertEqual(len(seen), 2)
+
+    def _unpinned(self, directory):
+        bot = FalconFoxTelegramBot(BotConfig("token", 7, state_dir=Path(directory)))
+        bot.telegram = FakeTelegram()
+        return bot
+
+    async def test_being_added_to_a_usable_forum_adopts_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._unpinned(directory)
+
+            class _Daemon:
+                async def sessions(self):
+                    return []
+            bot.daemon = _Daemon()
+            await bot._handle_update({"my_chat_member": {
+                "chat": {"id": -2002}, "from": {"id": 7},
+                "new_chat_member": {"status": "administrator"}}})
+            self.assertEqual(bot.forum_chat_id, -2002)
+            self.assertIn("Forum set", bot.telegram.messages[0][1])
+
+    async def test_a_group_that_is_not_a_forum_says_which_condition_failed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._unpinned(directory)
+            bot.telegram.chat_info = {"is_forum": False, "title": "plain"}
+            await bot._handle_update({"my_chat_member": {
+                "chat": {"id": -2002}, "from": {"id": 7},
+                "new_chat_member": {"status": "administrator"}}})
+            self.assertIsNone(bot.forum_chat_id)
+            self.assertIn("Topics are not enabled", bot.telegram.messages[0][1])
+
+    async def test_a_forum_without_manage_topics_is_not_adopted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._unpinned(directory)
+            bot.telegram.member_info = {"status": "administrator",
+                                        "can_manage_topics": False}
+            await bot._handle_update({"my_chat_member": {
+                "chat": {"id": -2002}, "from": {"id": 7},
+                "new_chat_member": {"status": "administrator"}}})
+            self.assertIsNone(bot.forum_chat_id)
+            self.assertIn("Manage Topics", bot.telegram.messages[0][1])
+
+    async def test_a_pinned_forum_is_never_replaced_by_adoption(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)          # pinned to -1001
+            await bot._handle_update({"my_chat_member": {
+                "chat": {"id": -2002}, "from": {"id": 7},
+                "new_chat_member": {"status": "administrator"}}})
+            self.assertEqual(bot.forum_chat_id, -1001)
+
+    async def test_a_migration_is_followed_when_the_forum_is_learned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._unpinned(directory)
+            bot._learn_forum(-5000)
+            await bot._handle_update({"message": {
+                "chat": {"id": -5000}, "from": {"id": 7}, "message_id": 1,
+                "migrate_to_chat_id": -1006000}})
+            self.assertEqual(bot.forum_chat_id, -1006000)
+
+    async def test_being_removed_from_the_forum_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._unpinned(directory)
+            bot._learn_forum(-2002)
+            await bot._handle_update({"my_chat_member": {
+                "chat": {"id": -2002}, "from": {"id": 7},
+                "new_chat_member": {"status": "left"}}})
+            self.assertIn("no longer in the forum", bot.telegram.messages[0][1])
 
     async def test_the_private_chat_reaches_a_session_of_its_own(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -723,7 +723,80 @@ class FalconFoxTelegramBot:
                 log.exception("dropping an update that could not be handled")
                 await asyncio.sleep(1)
 
+    async def check_forum(self, chat_id: int) -> tuple[bool, str]:
+        """Is this chat usable as the forum? Names the failing condition.
+
+        Three conditions, and saying *which* one failed is the whole value:
+        "the bot is not an admin there" is actionable, "setup failed" is not.
+        """
+        try:
+            chat = await self.telegram.get_chat(chat_id)
+        except ApiError as error:
+            return False, f"the chat cannot be read ({error})"
+        if not chat.get("is_forum"):
+            return False, ("Topics are not enabled there — a bot cannot enable "
+                           "them, so this one is yours to turn on")
+        try:
+            me = await self.telegram.call("getMe") or {}
+            member = await self.telegram.get_member(chat_id, me.get("id"))
+        except ApiError as error:
+            return False, f"the bot's membership cannot be read ({error})"
+        if member.get("status") != "administrator":
+            return False, "the bot is not an administrator there"
+        if not member.get("can_manage_topics"):
+            return False, "the bot lacks the Manage Topics right there"
+        return True, f"{chat.get('title') or chat_id} is a usable forum"
+
+    async def _maybe_adopt_forum(self, chat_id: int) -> None:
+        """Take a group as the forum when there is no working one."""
+        if self.config.forum_chat_id is not None:
+            return  # pinned by the environment; an explicit choice wins
+        if self.forum_chat_id == chat_id:
+            return
+        if self.forum_chat_id is not None:
+            usable, _ = await self.check_forum(self.forum_chat_id)
+            if usable:
+                return  # already have a working forum; do not steal focus
+        usable, detail = await self.check_forum(chat_id)
+        if not usable:
+            await self._tell_owner(f"I was added to a group, but {detail}.")
+            return
+        self._learn_forum(chat_id)
+        await self._tell_owner(f"Forum set: {detail}. Sessions will get their "
+                               f"own topics there from now on.")
+        try:
+            await self._reconcile_topics()
+        except Exception:
+            log.warning("topic reconciliation after adoption failed", exc_info=True)
+
+    async def _tell_owner(self, text: str) -> None:
+        """Say something in the private chat. Never fatal."""
+        try:
+            await self._say(Dest(self.config.owner_id, None), text)
+        except Exception:
+            log.warning("could not reach the private chat: %s", text)
+
+    async def _handle_membership(self, event: dict) -> None:
+        chat = event.get("chat") or {}
+        chat_id = chat.get("id")
+        status = (event.get("new_chat_member") or {}).get("status")
+        if chat_id is None or status is None:
+            return
+        log.info("membership change: chat=%s status=%s", chat_id, status)
+        if status in ("administrator", "member"):
+            await self._maybe_adopt_forum(chat_id)
+        elif chat_id == self.forum_chat_id:
+            await self._tell_owner(
+                "I am no longer in the forum group. Message me here and I can "
+                "help you set up a new one.")
+
     async def _handle_update(self, update: dict) -> None:
+        membership = update.get("my_chat_member")
+        if membership:
+            if ((membership.get("from") or {}).get("id") == self.config.owner_id
+                    or not membership.get("from")):
+                await self._handle_membership(membership)
+            return
         message = update.get("message") or {}
         sender = (message.get("from") or {}).get("id")
         if sender is not None and sender != self.config.owner_id:
@@ -748,9 +821,18 @@ class FalconFoxTelegramBot:
             # notice from the OLD chat, whose target is the id we are already
             # configured with. Without them this fires on every restart and
             # reports a migration that has already been followed.
-            log.error("forum migrated to chat id %s -- set "
-                      "FALCONFOX_TELEGRAM_FORUM_CHAT_ID to it and restart",
-                      moved_to)
+            if self.config.forum_chat_id is None:
+                # Learnable config makes this followable rather than merely
+                # reportable: enabling Topics moves a group and issues a new
+                # id, and the bot now simply moves with it.
+                log.info("forum migrated to chat id %s -- following", moved_to)
+                self._learn_forum(moved_to)
+                await self._tell_owner(
+                    "The forum group was upgraded and changed id; I followed it.")
+            else:
+                log.error("forum migrated to chat id %s -- it is pinned by "
+                          "FALCONFOX_TELEGRAM_FORUM_CHAT_ID, so update that "
+                          "and restart", moved_to)
             return
         dest = Dest(chat_id, message.get("message_thread_id"))
         text = message.get("text")

@@ -97,7 +97,11 @@ class TelegramApi:
         return payload.get("result")
 
     async def updates(self, offset: int | None) -> list[dict]:
-        body = {"timeout": 30, "allowed_updates": ["message"]}
+        # my_chat_member reports being added to a group and promoted in it,
+        # which is how the forum is discovered without the operator reading a
+        # log. A plain `message` subscription never delivers it.
+        body = {"timeout": 30,
+                "allowed_updates": ["message", "my_chat_member"]}
         if offset is not None:
             body["offset"] = offset
         return await self.call("getUpdates", body)
@@ -176,6 +180,13 @@ class TelegramApi:
     # supports the whole lifecycle, a private-chat forum refuses close/reopen
     # on chat type. `editMessageText` needs no thread id -- chat plus message
     # id is enough -- which is why there is no threaded variant of it.
+
+    async def get_chat(self, chat_id: int) -> dict:
+        return await self.call("getChat", {"chat_id": chat_id}) or {}
+
+    async def get_member(self, chat_id: int, user_id: int) -> dict:
+        return await self.call("getChatMember",
+                               {"chat_id": chat_id, "user_id": user_id}) or {}
 
     async def create_topic(self, chat_id: int, name: str) -> int:
         result = await self.call("createForumTopic",
