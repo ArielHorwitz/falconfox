@@ -69,9 +69,17 @@ _JOIN_EVENTS = {"new_chat_members", "left_chat_member", "group_chat_created",
 @dataclass(frozen=True)
 class BotConfig:
     token: str
-    # One forum supergroup holds every session as a topic. The manager lives
-    # in General, which cannot be deleted and always sorts first.
-    forum_chat_id: int
+    # The only user the bot obeys. This is deploy-time config in the same
+    # shape as the token, not authentication: nothing is exchanged or
+    # verified. It exists because the private chat is a functional channel,
+    # so "which chat" no longer answers "who".
+    owner_id: int
+    # One forum supergroup holds every session as a topic; the manager lives
+    # in General, which cannot be deleted and always sorts first. Optional:
+    # unset means "not configured yet, or learn it", which is the state a
+    # fresh deployment starts in. When set it PINS the forum, overriding
+    # anything learned.
+    forum_chat_id: int | None = None
     daemon_url: str = "http://127.0.0.1:9721"
     state_dir: Path = Path.home().joinpath(".local/state/falconfox/telegram")
     manager_backend: str | None = None
@@ -81,14 +89,16 @@ class BotConfig:
     def from_env(cls) -> "BotConfig":
         try:
             token = os.environ["FALCONFOX_TELEGRAM_TOKEN"]
-            forum_chat = int(os.environ["FALCONFOX_TELEGRAM_FORUM_CHAT_ID"])
+            owner = int(os.environ["FALCONFOX_TELEGRAM_OWNER_ID"])
         except (KeyError, ValueError) as error:
             raise ValueError(
-                "set FALCONFOX_TELEGRAM_TOKEN and FALCONFOX_TELEGRAM_FORUM_CHAT_ID"
+                "set FALCONFOX_TELEGRAM_TOKEN and FALCONFOX_TELEGRAM_OWNER_ID"
             ) from error
+        pinned = os.environ.get("FALCONFOX_TELEGRAM_FORUM_CHAT_ID")
         return cls(
             token=token,
-            forum_chat_id=forum_chat,
+            owner_id=owner,
+            forum_chat_id=int(pinned) if pinned else None,
             daemon_url=os.environ.get("FALCONFOX_URL", "http://127.0.0.1:9721"),
             state_dir=Path(os.environ.get(
                 "FALCONFOX_TELEGRAM_STATE_DIR",
@@ -223,10 +233,17 @@ class FalconFoxTelegramBot:
         # session -> topic, persisted for the same reason as the turn map: a
         # restart that forgot it would create a second topic per session.
         self._topics_file = self.state_dir.joinpath("topics.json")
+        # The forum the bot has learned, when none is pinned in the
+        # environment. Kept beside the topic map because it is the same kind
+        # of fact: something discovered at runtime that a restart must not
+        # forget, or it would ask the user to set up a forum that exists.
+        self._forum_file = self.state_dir.joinpath("forum.json")
+        self._learned_forum: int | None = None
 
     async def run(self) -> None:
         StallWatchdog(logging.getLogger("falconfox.telegram.watchdog")).start()
         self._prepare_manager_workspace()
+        self._load_forum()
         self._load_topics()
         ws_url = self.config.daemon_url.replace("http://", "ws://", 1).replace(
             "https://", "wss://", 1
@@ -291,7 +308,7 @@ class FalconFoxTelegramBot:
         """Send into a topic. The chat is always the forum, so a destination
         is just a thread id; None is General, the manager's topic."""
         return await self.telegram.message(
-            self.config.forum_chat_id, text,
+            self.forum_chat_id, text,
             reply_to=reply_to, silent=silent, thread=thread)
 
     async def _announce(self, text: str) -> None:
@@ -439,7 +456,7 @@ class FalconFoxTelegramBot:
             await self._say(thread, RECOVERED_TURN)
             for index, rendered in enumerate(render_messages(remainder)):
                 await self.telegram.html_message(
-                    self.config.forum_chat_id, rendered.html, rendered.plain,
+                    self.forum_chat_id, rendered.html, rendered.plain,
                     reply_to=prompt_msg if index == 0 else None, thread=thread)
         elif not record.get("delivered"):
             await self._say(thread, SILENT_TURN.format(
@@ -530,6 +547,30 @@ class FalconFoxTelegramBot:
 
     # --- topics ----------------------------------------------------------
 
+    @property
+    def forum_chat_id(self) -> int | None:
+        """The forum in use: pinned by the environment, else learned, else none."""
+        return self.config.forum_chat_id or self._learned_forum
+
+    def _load_forum(self) -> None:
+        if self.config.forum_chat_id:
+            return  # pinned; nothing learned can override an explicit choice
+        try:
+            self._learned_forum = int(json.loads(self._forum_file.read_text())["chat_id"])
+        except (OSError, ValueError, KeyError, TypeError):
+            self._learned_forum = None
+
+    def _learn_forum(self, chat_id: int) -> None:
+        self._learned_forum = chat_id
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            temporary = self._forum_file.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"chat_id": chat_id}))
+            temporary.replace(self._forum_file)
+        except OSError:
+            log.warning("could not persist the learned forum", exc_info=True)
+        log.info("forum learned: %s", chat_id)
+
     def _load_topics(self) -> None:
         try:
             raw = json.loads(self._topics_file.read_text())
@@ -570,7 +611,7 @@ class FalconFoxTelegramBot:
             return existing
         title = session.get("name") or session_id
         try:
-            thread = await self.telegram.create_topic(self.config.forum_chat_id, title)
+            thread = await self.telegram.create_topic(self.forum_chat_id, title)
         except ApiError:
             log.warning("could not create a topic for %s", session_id, exc_info=True)
             return None
@@ -619,14 +660,21 @@ class FalconFoxTelegramBot:
 
     async def _handle_update(self, update: dict) -> None:
         message = update.get("message") or {}
+        sender = (message.get("from") or {}).get("id")
+        if sender is not None and sender != self.config.owner_id:
+            # "Which chat" used to answer "who": every configured chat was the
+            # owner's. The private chat is functional now, and anyone can open
+            # one with a bot, so identity has to be checked directly.
+            log.info("ignoring message from non-owner %s", sender)
+            return
         chat_id = (message.get("chat") or {}).get("id")
         if chat_id is None:
             # Not a message update at all; nothing to route and nothing worth
             # logging -- otherwise every one of them reads as a stray chat.
             return
         moved_to = message.get("migrate_to_chat_id")
-        if moved_to is not None and chat_id == self.config.forum_chat_id \
-                and moved_to != self.config.forum_chat_id:
+        if moved_to is not None and chat_id == self.forum_chat_id \
+                and moved_to != self.forum_chat_id:
             # Enabling Topics upgrades a plain group to a supergroup and gives
             # it a NEW chat id (observed live). Loud, because every later
             # message would otherwise be silently ignored as "unconfigured".
@@ -639,9 +687,7 @@ class FalconFoxTelegramBot:
                       "FALCONFOX_TELEGRAM_FORUM_CHAT_ID to it and restart",
                       moved_to)
             return
-        if chat_id != self.config.forum_chat_id:
-            # Logged because this is how the forum gets onboarded: create the
-            # group, say anything in it, read its id here.
+        if chat_id != self.forum_chat_id:
             log.info("ignoring message from unconfigured chat %s", chat_id)
             return
         thread = message.get("message_thread_id")
@@ -719,7 +765,7 @@ class FalconFoxTelegramBot:
         sessions = await self.daemon.sessions()
         names = {item["session_id"]: item["name"] for item in sessions}
         lines = [f"FalconFox {version}"]
-        lines.append(f"Forum: {self.config.forum_chat_id} — "
+        lines.append(f"Forum: {self.forum_chat_id} — "
                      f"{len(self._topics)} topic(s) bound")
         for item in sessions:
             thread = self._topics.get(item["session_id"])
@@ -856,7 +902,7 @@ class FalconFoxTelegramBot:
                     self._progress_msg[session_id] = message_id
                     self._persist_turns()
             else:
-                await self.telegram.edit_message(self.config.forum_chat_id, message_id, text)
+                await self.telegram.edit_message(self.forum_chat_id, message_id, text)
         except ApiError as error:
             # Progress is decoration; a failed update waits for the next tick.
             self._progress_dirty.add(session_id)
@@ -883,7 +929,7 @@ class FalconFoxTelegramBot:
         prompt_msg = self._prompt_msg.get(session_id)
         for index, rendered in enumerate(render_messages(text)):
             await self.telegram.html_message(
-                self.config.forum_chat_id, rendered.html, rendered.plain,
+                self.forum_chat_id, rendered.html, rendered.plain,
                 reply_to=prompt_msg if index == 0 else None, thread=thread)
         self._delivered[session_id] = self._delivered.get(session_id, 0) + len(text)
         self._persist_turns()
@@ -892,7 +938,7 @@ class FalconFoxTelegramBot:
         action = TURN_ACTIONS.get(
             self._activity_state.get(session_id, ""), DEFAULT_ACTION)
         try:
-            await self.telegram.chat_action(self.config.forum_chat_id, action, thread=thread)
+            await self.telegram.chat_action(self.forum_chat_id, action, thread=thread)
         except ApiError as error:
             # Never fatal to the loop. A 429 from the rate limiter -- likeliest
             # on exactly the long turn that needs an indicator -- or one of the
@@ -1013,7 +1059,7 @@ class FalconFoxTelegramBot:
             thread = self._unbind(session_id)
             if thread is not None:
                 try:
-                    await self.telegram.delete_topic(self.config.forum_chat_id, thread)
+                    await self.telegram.delete_topic(self.forum_chat_id, thread)
                 except ApiError:
                     log.warning("could not delete topic %s for removed session %s",
                                 thread, session_id, exc_info=True)
@@ -1100,7 +1146,7 @@ class FalconFoxTelegramBot:
         name = session.get("name")
         if name and self._topic_names.get(session_id) != name:
             try:
-                await self.telegram.rename_topic(self.config.forum_chat_id, thread, name)
+                await self.telegram.rename_topic(self.forum_chat_id, thread, name)
                 self._topic_names[session_id] = name
             except ApiError:
                 log.warning("could not retitle topic %s", thread, exc_info=True)
@@ -1113,10 +1159,10 @@ class FalconFoxTelegramBot:
             return
         try:
             if stopped:
-                await self.telegram.close_topic(self.config.forum_chat_id, thread)
+                await self.telegram.close_topic(self.forum_chat_id, thread)
                 self._closed_topics.add(session_id)
             else:
-                await self.telegram.reopen_topic(self.config.forum_chat_id, thread)
+                await self.telegram.reopen_topic(self.forum_chat_id, thread)
                 self._closed_topics.discard(session_id)
         except ApiError:
             log.warning("could not %s topic %s",

@@ -345,7 +345,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
     async def test_turn_signals_each_state_and_sends_one_final_message(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", -1001, state_dir=Path(directory),
+                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             fake = FakeTelegram()
@@ -393,7 +393,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
     async def test_activity_starts_when_the_prompt_is_sent(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", -1001, state_dir=Path(directory),
+                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             fake = FakeTelegram()
@@ -430,7 +430,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
         # live, and the rest of the turn went silent with nothing logged.
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", -1001, state_dir=Path(directory),
+                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             fake = FakeTelegram()
@@ -462,7 +462,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
         # task for a running one.
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", -1001, state_dir=Path(directory),
+                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             bot.telegram = FakeTelegram()
@@ -483,7 +483,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
 
     def _bot_mid_turn(self, directory):
         bot = FalconFoxTelegramBot(BotConfig(
-            "token", -1001, state_dir=Path(directory),
+            "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
             default_path=Path(directory),
         ))
         bot.telegram = FakeTelegram()
@@ -579,7 +579,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
         # its final stamp.
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", -1001, state_dir=Path(directory),
+                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             bot.telegram = FakeTelegram()
@@ -634,7 +634,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
         # spam-tolerant while the answer still pings.
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", -1001, state_dir=Path(directory),
+                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             bot.telegram = FakeTelegram()
@@ -893,7 +893,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
         # persisted map survives, and the next connection settles it.
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", -1001, state_dir=Path(directory),
+                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             bot.telegram = FakeTelegram()
@@ -937,7 +937,7 @@ class TurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     def _bot(self, directory):
         bot = FalconFoxTelegramBot(BotConfig(
-            "token", -1001, state_dir=Path(directory),
+            "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
             default_path=Path(directory),
         ))
         bot.telegram = FakeTelegram()
@@ -1099,13 +1099,14 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
 
     def _bot(self, directory):
         bot = FalconFoxTelegramBot(BotConfig(
-            "token", -1001, state_dir=Path(directory),
+            "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
         ))
         bot.telegram = FakeTelegram()
         return bot
 
     def _update(self, thread, text, chat=-1001, message_id=1):
-        message = {"chat": {"id": chat}, "text": text, "message_id": message_id}
+        message = {"chat": {"id": chat}, "text": text, "message_id": message_id,
+                   "from": {"id": 7}}
         if thread is not None:
             message["message_thread_id"] = thread
         return {"message": message}
@@ -1229,6 +1230,38 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
                     await bot._poll_telegram()
             # The second update was still handled: the loop survived the first.
             self.assertEqual(len(seen), 2)
+
+    async def test_a_message_from_anyone_but_the_owner_is_ignored(self):
+        # "Which chat" used to answer "who". It no longer will, once the
+        # private chat is functional and anyone can open one with a bot.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._bind("alpha", 11)
+            forwarded = []
+
+            async def _forward(session, thread, text, prompt_msg=None):
+                forwarded.append(session)
+            bot._forward = _forward
+            await bot._handle_update({"message": {
+                "chat": {"id": -1001}, "message_thread_id": 11,
+                "message_id": 1, "text": "hello", "from": {"id": 999}}})
+            self.assertEqual(forwarded, [])
+
+    async def test_a_pinned_forum_beats_a_learned_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)          # pinned to -1001
+            bot._learn_forum(-2002)
+            self.assertEqual(bot.forum_chat_id, -1001)
+
+    async def test_a_learned_forum_survives_a_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = FalconFoxTelegramBot(BotConfig("token", 7, state_dir=Path(directory)))
+            bot.telegram = FakeTelegram()
+            self.assertIsNone(bot.forum_chat_id)  # a fresh deployment has none
+            bot._learn_forum(-2002)
+            again = FalconFoxTelegramBot(BotConfig("token", 7, state_dir=Path(directory)))
+            again._load_forum()
+            self.assertEqual(again.forum_chat_id, -2002)
 
     async def test_a_capacity_notice_lands_in_the_evicted_topic(self):
         # A topic that closes under the user must say why, or it reads as the
