@@ -575,6 +575,28 @@ class FalconFoxTelegramBot:
         self._prepare_workspace(self.concierge_workspace,
                                 self.SETUP_SKILL_NAME, orientation)
 
+    async def _ensure_manager(self) -> str | None:
+        """The manager session, spawned on demand.
+
+        A forum adopted *after* the connection came up has no manager yet --
+        the connect-time spawn already ran and found no forum. Spawning here
+        as well means General works from the moment a forum exists, however it
+        came to exist.
+        """
+        if self.manager_session_id:
+            return self.manager_session_id
+        if self.forum_chat_id is None:
+            return None
+        try:
+            # The workspace is normally built at startup; an adopted forum can
+            # reach here first, so make sure it exists before spawning into it.
+            self._prepare_manager_workspace()
+            await self._spawn_manager_session()
+        except ApiError:
+            log.warning("could not spawn the manager session", exc_info=True)
+            return None
+        return self.manager_session_id
+
     async def _spawn_manager_session(self) -> None:
         old = self.manager_session_id
         session = await self.daemon.spawn(
@@ -769,6 +791,9 @@ class FalconFoxTelegramBot:
             await self._tell_owner(f"I was added to a group, but {detail}.")
             return
         self._learn_forum(chat_id)
+        # The connect-time spawn already ran and found no forum, so General
+        # would have no manager until the next reconnect.
+        await self._ensure_manager()
         await self._tell_owner(f"Forum set: {detail}. Sessions will get their "
                                f"own topics there from now on.")
         try:
@@ -879,11 +904,16 @@ class FalconFoxTelegramBot:
         if text.startswith("/"):
             if await self._command(dest, text):
                 return
-        target = (self.manager_session_id if dest.thread is None
-                  else self._threads.get(dest.thread))
-        if not target:
-            await self._say(dest, "No FalconFox session owns this topic.")
-            return
+        if dest.thread is None:
+            target = await self._ensure_manager()
+            if not target:
+                await self._say(dest, "The session manager is not running yet.")
+                return
+        else:
+            target = self._threads.get(dest.thread)
+            if not target:
+                await self._say(dest, "No FalconFox session owns this topic.")
+                return
         await self._forward(target, dest, text, prompt_msg=message.get("message_id"))
 
     async def _command(self, dest: Dest, text: str) -> bool:

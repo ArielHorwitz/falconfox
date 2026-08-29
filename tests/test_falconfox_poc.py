@@ -1139,6 +1139,28 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(forwarded,
                              [("alpha", 11, "for alpha"), ("beta", 22, "for beta")])
 
+    async def test_general_spawns_a_manager_when_the_forum_came_later(self):
+        # A forum adopted after connect has no manager: the connect-time spawn
+        # already ran and found none. General must still work.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            self.assertIsNone(bot.manager_session_id)
+            spawned = []
+
+            class _Daemon:
+                async def spawn(self, path, name=None, backend=None, ephemeral=False):
+                    spawned.append(name)
+                    return {"session_id": "mgr", "name": name}
+            bot.daemon = _Daemon()
+            forwarded = []
+
+            async def _forward(session, dest, text, prompt_msg=None):
+                forwarded.append(session)
+            bot._forward = _forward
+            await bot._handle_update(self._update(None, "hello"))
+            self.assertEqual(spawned, ["telegram manager"])
+            self.assertEqual(forwarded, ["mgr"])
+
     async def test_general_routes_to_the_manager(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
@@ -1257,6 +1279,9 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
             class _Daemon:
                 async def sessions(self):
                     return []
+
+                async def spawn(self, path, name=None, backend=None, ephemeral=False):
+                    return {"session_id": "mgr", "name": name}
             bot.daemon = _Daemon()
             await bot._handle_update({"my_chat_member": {
                 "chat": {"id": -2002}, "from": {"id": 7},
