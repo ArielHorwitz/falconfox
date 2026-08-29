@@ -66,19 +66,31 @@ today is deliberately logged loudly rather than followed, precisely because
 nothing could act on it. With learned state, following it becomes possible,
 and the loud log becomes a fallback rather than the whole answer.
 
-### 2. Who is allowed to talk to it — a new requirement
+### 2. Who is allowed to talk to it — config, not authentication
 
 Today the two configured chat ids *are* the access control: anything else is
-ignored, and the bot is unreachable by strangers by construction. Opening the
-DM as a functional channel removes that property. Anyone who finds
-`@falconfox_bot` can message it, and the setup session's whole job is
-reconfiguring the deployment.
+ignored. Opening the DM removes that property — anyone who finds
+`@falconfox_bot` can message it — so the bot must check **who** is talking,
+not just where.
 
-This needs an explicit **owner allowlist** — a Telegram user id the bot obeys
-and ignores everything else. It is not a large piece of work, but it is a real
-new requirement created by this change, and it should land *with* the feature
-rather than after it. The daemon binds loopback and the project has
-deliberately never needed authentication; this is the first thing that does.
+That check is a configured **owner user id**, supplied at deploy time exactly
+like the bot token, and compared against `message.from.id`. It is a filter
+over a static config value, not an authentication mechanism: nothing is
+exchanged, verified or granted, and it is the same shape as the chat-id checks
+the client already does. The project's "no remote auth is planned" position is
+untouched.
+
+It should still land *with* the feature rather than after it, since the DM is
+functional the moment it exists.
+
+**This shrinks the deployment rather than growing it.** Today an operator must
+supply a token and two chat ids, and obtaining the chat ids is the step that
+cannot be done from a phone. The new shape is a token and a user id — two
+values, both available before anything is running — with the group, its
+topics and the bot's permissions all discovered or guided from the DM. That is
+the real prize here, and it is worth more than the repair story: a new user on
+a fresh VPS can deploy with what they already have and be talked through the
+rest.
 
 ## Shape, if built
 

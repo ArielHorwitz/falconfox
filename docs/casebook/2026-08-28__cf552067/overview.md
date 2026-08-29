@@ -169,10 +169,18 @@ the operator to read the forum's chat id out of `journalctl`, which is the one
 part of setup that cannot be done from a phone. The bot already receives that
 id; only the delivery is wrong.
 
-Design, the decisions it forces (configuration that can be *learned* rather
-than only read from the environment, and an owner allowlist, which is the
-first authentication this project has ever needed) in
+It also **shrinks the deployment**: a token and an owner user id, both
+available before anything runs, instead of a token and two chat ids whose
+values only exist after the group does. Design and the decisions it forces —
+configuration that can be *learned* rather than only read from the
+environment, and an owner-id check that is config rather than authentication —
+in
 [the-private-chat-as-a-setup-and-meta-session.md](the-private-chat-as-a-setup-and-meta-session.md).
+
+Anticipated, not yet scheduled: migrating the **production** instance onto a
+forum of its own and turning threaded mode back off on its private chat, so
+the DM is the single setup/meta conversation rather than a forum in its own
+right.
 
 ## Related wishlist entries
 
