@@ -610,15 +610,26 @@ class FalconFoxTelegramBot:
 
     async def _handle_update(self, update: dict) -> None:
         message = update.get("message") or {}
-        if message.get("migrate_to_chat_id"):
+        chat_id = (message.get("chat") or {}).get("id")
+        if chat_id is None:
+            # Not a message update at all; nothing to route and nothing worth
+            # logging -- otherwise every one of them reads as a stray chat.
+            return
+        moved_to = message.get("migrate_to_chat_id")
+        if moved_to is not None and chat_id == self.config.forum_chat_id \
+                and moved_to != self.config.forum_chat_id:
             # Enabling Topics upgrades a plain group to a supergroup and gives
             # it a NEW chat id (observed live). Loud, because every later
             # message would otherwise be silently ignored as "unconfigured".
+            #
+            # Both guards matter: Telegram replays the historical migration
+            # notice from the OLD chat, whose target is the id we are already
+            # configured with. Without them this fires on every restart and
+            # reports a migration that has already been followed.
             log.error("forum migrated to chat id %s -- set "
                       "FALCONFOX_TELEGRAM_FORUM_CHAT_ID to it and restart",
-                      message["migrate_to_chat_id"])
+                      moved_to)
             return
-        chat_id = (message.get("chat") or {}).get("id")
         if chat_id != self.config.forum_chat_id:
             # Logged because this is how the forum gets onboarded: create the
             # group, say anything in it, read its id here.

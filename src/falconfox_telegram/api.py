@@ -3,12 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import urllib.error
 import urllib.request
 
 log = logging.getLogger("falconfox.telegram.api")
+
+# These calls are network-bound, so the pool is sized for concurrent requests
+# rather than for CPUs. `asyncio.to_thread` uses the default executor, which is
+# min(32, cpu_count + 4) -- five threads on a 1-vCPU host, one of them held
+# permanently by the 30-second getUpdates long poll. That was survivable with a
+# single conversation; with a topic per session, every session's activity loop
+# competes for the remaining four and they queue behind each other. Measured
+# before this existed: a topic took 30-40s to appear after the daemon had
+# already announced the session.
+_REQUESTS = concurrent.futures.ThreadPoolExecutor(
+    max_workers=32, thread_name_prefix="falconfox-http")
 
 
 class ApiError(Exception):
@@ -43,7 +55,7 @@ async def _json_request(url: str, method: str = "GET", body: dict | None = None)
             # on the daemon, which was healthy throughout.
             raise ApiError(f"{type(error).__name__}: {error}") from error
 
-    return await asyncio.to_thread(perform)
+    return await asyncio.get_running_loop().run_in_executor(_REQUESTS, perform)
 
 
 class DaemonApi:

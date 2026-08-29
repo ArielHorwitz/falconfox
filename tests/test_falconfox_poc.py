@@ -1057,6 +1057,37 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
                 "forum_topic_created": {"name": "session-one"}}})
             self.assertEqual(bot.telegram.messages, [])
 
+    async def test_a_replayed_migration_notice_is_not_an_alarm(self):
+        # Telegram replays the migration service message from the OLD chat,
+        # and its target is the id we are already configured with. Treating
+        # that as "the forum moved" fired on every restart -- observed live
+        # the first time the dev bot started.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            records = []
+            with self.assertLogs("falconfox.telegram", level="ERROR") as caught:
+                logging.getLogger("falconfox.telegram").error("sentinel")
+                await bot._handle_update({"message": {
+                    "chat": {"id": -5481438232}, "message_id": 3,
+                    "migrate_to_chat_id": -1001}})
+                records = caught.output
+            self.assertEqual(records, ["ERROR:falconfox.telegram:sentinel"])
+
+    async def test_a_real_migration_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            with self.assertLogs("falconfox.telegram", level="ERROR") as caught:
+                await bot._handle_update({"message": {
+                    "chat": {"id": -1001}, "message_id": 3,
+                    "migrate_to_chat_id": -1002}})
+            self.assertIn("migrated to chat id -1002", caught.output[0])
+
+    async def test_a_non_message_update_is_ignored_quietly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            with self.assertNoLogs("falconfox.telegram", level="INFO"):
+                await bot._handle_update({"my_chat_member": {"chat": {"id": -1001}}})
+
     async def test_a_new_session_gets_a_topic_and_it_survives_a_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
