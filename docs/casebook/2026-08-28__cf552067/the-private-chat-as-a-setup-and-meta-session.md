@@ -92,6 +92,55 @@ the real prize here, and it is worth more than the repair story: a new user on
 a fresh VPS can deploy with what they already have and be talked through the
 rest.
 
+## How far setup can actually be automated (measured 2026-08-29)
+
+**A bot cannot create a group.** There is no `createChat` / `createGroup` /
+`createChannel` in the Bot API; chats are created by users. **Nor can a bot
+enable Topics** — that is `channels.toggleForum` in MTProto, which requires
+owner rights and is not exposed to bots at all.
+
+So two steps are irreducibly the user's: *create the supergroup* and *enable
+Topics*. Everything after that can be one tap, via a deep link that requests
+admin rights at the moment the bot is added:
+
+```
+https://t.me/<bot>?startgroup&admin=manage_topics
+```
+
+`manage_topics` is among the permitted `admin=` keywords, alongside
+`change_info`, `invite_users`, `pin_messages`, `manage_chat` and others,
+combined with `+`. Following the link prompts the user to pick a group and
+adds the bot **already promoted with exactly those rights** — collapsing "add
+the bot", "promote it" and "grant Manage Topics" into a single action, with no
+permission screens to navigate and nothing for the user to get wrong.
+
+### Order matters, and it follows from the migration finding
+
+Enabling Topics upgrades a plain group to a supergroup and **changes its chat
+id**. So the flow must be:
+
+1. user creates a group and enables Topics (the two irreducible steps);
+2. bot sends the `startgroup&admin=manage_topics` link;
+3. user taps it, bot is added as admin and learns the id from the join event;
+4. bot verifies with `getChat` (`is_forum`) and `getChatMember`
+   (`status`, `can_manage_topics`) and reports what it found.
+
+Adding the bot *before* Topics is enabled would have it learn an id that goes
+stale moments later. That is not hypothetical — it is exactly what happened
+while testing on 2026-08-29, and it is why the client has migration handling
+at all. Sequencing it this way avoids the problem rather than recovering from
+it, and the migration handling stays as the safety net for a group that is
+converted later.
+
+### The residue
+
+What cannot be removed: two user actions (create group, enable Topics) and one
+tap. What the bot can then do unaided: discover the id, confirm it is a forum,
+confirm its own rights, create every topic, and diagnose each of those if
+wrong. The verification step is worth building even though it sounds
+redundant — `getChat` and `getChatMember` turn "it silently does nothing" into
+a specific sentence about which of the three conditions failed.
+
 ## Shape, if built
 
 An ephemeral session like the manager, in the DM, with a setup/repair skill
