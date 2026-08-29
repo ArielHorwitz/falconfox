@@ -156,6 +156,22 @@ more than one conversation.
    sessions had no per-topic identity to hang it on. This case should own the
    question.
 
+## The ceiling this hit: host memory, not routing
+
+The dev daemon was **OOM-killed carrying ten sessions** on a 951 MB host
+(2026-08-29). Every session holds its own `claude-agent-acp` subprocess, so
+sessions are the unit of memory cost, and the client's cost model and the
+host's are different in a way this case *widened*: making a session used to
+mean deciding to move the focus pointer; now it means adding a topic to a
+list. The interface invites exactly what the machine cannot afford.
+
+The mitigation falls out of something already measured here — a closed topic
+still accepts bot writes — so an idle session can be stopped, its topic
+closed, and the whole thing resumed on the next message with the record
+intact. *Live* is the resource; *stored* is free; the forum already draws that
+line on screen. Detail in
+[parallel-sessions-are-bounded-by-host-memory.md](parallel-sessions-are-bounded-by-host-memory.md).
+
 ## Next: the private chat as a setup and meta session
 
 *Proposed by the user, 2026-08-29.* The forum needs configuration before it
