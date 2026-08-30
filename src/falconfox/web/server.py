@@ -61,8 +61,8 @@ def create_app(
 
     async def sessions_endpoint(request: Request) -> JSONResponse:
         if request.method == "GET":
-            include = request.query_params.get("include_ephemeral") in ("1", "true")
-            return JSONResponse(coordinator.list_sessions(include_ephemeral=include))
+            include = request.query_params.get("include_hidden") in ("1", "true")
+            return JSONResponse(coordinator.list_sessions(include_hidden=include))
         try:
             body = await request.json()
             # Mirrors the ws path's action= lines: the CLI drives the daemon

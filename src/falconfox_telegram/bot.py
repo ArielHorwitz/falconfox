@@ -256,6 +256,11 @@ class FalconFoxTelegramBot:
         # of fact: something discovered at runtime that a restart must not
         # forget, or it would ask the user to set up a forum that exists.
         self._forum_file = self.state_dir.joinpath("forum.json")
+        # Which sessions are this client's manager and private chat. They are
+        # hidden but persistent now, so they can sleep to free memory and wake
+        # with their conversation intact -- which means a restart has to find
+        # them again, or it would make a second pair, then a third.
+        self._infra_file = self.state_dir.joinpath("infra.json")
         self._learned_forum: int | None = None
         self._bot_username: str | None = None
 
@@ -263,6 +268,7 @@ class FalconFoxTelegramBot:
         StallWatchdog(logging.getLogger("falconfox.telegram.watchdog")).start()
         self._prepare_manager_workspace()
         self._load_forum()
+        self._load_infra()
         self._load_topics()
         ws_url = self.config.daemon_url.replace("http://", "ws://", 1).replace(
             "https://", "wss://", 1
@@ -296,7 +302,7 @@ class FalconFoxTelegramBot:
         except Exception:
             log.warning("turn reconciliation failed", exc_info=True)
         if self.forum_chat_id is not None:
-            await self._spawn_manager_session()
+            await self._ensure_manager()
         try:
             await self._reconcile_topics()
         except Exception:
@@ -583,7 +589,7 @@ class FalconFoxTelegramBot:
         as well means General works from the moment a forum exists, however it
         came to exist.
         """
-        if self.manager_session_id:
+        if await self._still_exists(self.manager_session_id):
             return self.manager_session_id
         if self.forum_chat_id is None:
             return None
@@ -598,21 +604,24 @@ class FalconFoxTelegramBot:
         return self.manager_session_id
 
     async def _spawn_manager_session(self) -> None:
-        old = self.manager_session_id
+        # No longer rotated on every connect: the manager persists and sleeps
+        # instead, keeping its conversation across restarts. Rotating now
+        # would leak a session rather than replace one.
         session = await self.daemon.spawn(
             path=str(self.manager_workspace), name="telegram manager",
-            backend=self.config.manager_backend, ephemeral=True,
+            backend=self.config.manager_backend, hidden=True,
         )
         self.manager_session_id = session["session_id"]
-        if old:
-            try:
-                await self.daemon.delete(old)
-            except ApiError:
-                log.warning("could not delete old manager session %s", old, exc_info=True)
+        self._persist_infra()
 
     async def _ensure_concierge(self) -> str | None:
-        """The private chat's session, spawned on first use."""
-        if self.concierge_session_id:
+        """The private chat's session: remembered, resumed, or made.
+
+        Sending to a stored session resumes it in the daemon, so a sleeping
+        private chat wakes on the next message with its history intact, and
+        costs a resume rather than a permanent slot.
+        """
+        if await self._still_exists(self.concierge_session_id):
             return self.concierge_session_id
         if self._bot_username is None:
             try:
@@ -623,12 +632,13 @@ class FalconFoxTelegramBot:
         try:
             session = await self.daemon.spawn(
                 path=str(self.concierge_workspace), name="telegram private chat",
-                backend=self.config.manager_backend, ephemeral=True,
+                backend=self.config.manager_backend, hidden=True,
             )
         except ApiError:
             log.warning("could not spawn the private-chat session", exc_info=True)
             return None
         self.concierge_session_id = session["session_id"]
+        self._persist_infra()
         log.info("private-chat session spawned: %s", self.concierge_session_id)
         return self.concierge_session_id
 
@@ -638,6 +648,35 @@ class FalconFoxTelegramBot:
     def forum_chat_id(self) -> int | None:
         """The forum in use: pinned by the environment, else learned, else none."""
         return self.config.forum_chat_id or self._learned_forum
+
+    def _load_infra(self) -> None:
+        try:
+            saved = json.loads(self._infra_file.read_text())
+        except (OSError, ValueError):
+            return
+        self.manager_session_id = saved.get("manager")
+        self.concierge_session_id = saved.get("concierge")
+
+    def _persist_infra(self) -> None:
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            temporary = self._infra_file.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"manager": self.manager_session_id,
+                                             "concierge": self.concierge_session_id}))
+            temporary.replace(self._infra_file)
+        except OSError:
+            log.warning("could not persist the infrastructure ids", exc_info=True)
+
+    async def _still_exists(self, session_id: str | None) -> bool:
+        """Is a remembered session still in the daemon? A deleted one is gone
+        for good, so a fresh one has to be made rather than resumed."""
+        if not session_id:
+            return False
+        try:
+            await self.daemon.session(session_id)
+            return True
+        except ApiError:
+            return False
 
     def _load_forum(self) -> None:
         if self.config.forum_chat_id:

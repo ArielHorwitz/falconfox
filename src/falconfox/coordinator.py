@@ -79,6 +79,8 @@ class SessionCoordinator:
                 "backend": meta.get("backend", ""),
                 "always_allow": True,
                 "ephemeral": False,
+            "hidden": False,
+                "hidden": False,
                 "state": "stored",
                 "live": False,
                 "created": meta.get("created"),
@@ -211,10 +213,18 @@ class SessionCoordinator:
 
     # --- metadata/config views -----------------------------------------
 
-    def list_sessions(self, include_ephemeral: bool = False) -> list[dict]:
+    def list_sessions(self, include_hidden: bool = False) -> list[dict]:
+        """Sessions, minus a client's own plumbing unless asked for.
+
+        `hidden` is deliberately separate from `ephemeral`. Hiding is about
+        the listing; ephemeral is about being a throwaway, which also makes
+        `stop` a `delete`. Infrastructure wants the first without the second,
+        so it can be stopped to reclaim memory and resumed with its
+        conversation intact.
+        """
         sessions = [
             dict(meta) for meta in self._metadata.values()
-            if include_ephemeral or not meta.get("ephemeral")
+            if include_hidden or not meta.get("hidden")
         ]
         return sorted(sessions, key=lambda item: item.get("created") or "")
 
@@ -258,6 +268,7 @@ class SessionCoordinator:
         name: Optional[str] = None,
         backend_name: Optional[str] = None,
         ephemeral: bool = False,
+        hidden: Optional[bool] = None,
     ) -> str:
         working_path = Path(path or Path.home()).expanduser().resolve()
         if not working_path.is_dir():
@@ -273,7 +284,10 @@ class SessionCoordinator:
         # is created *stored*, so it has an id, metadata, a transcript and --
         # for the Telegram client -- a topic, and simply is not running yet.
         # Refusing instead would deny the user something the interface invites.
-        has_slot = await self._ensure_slot(ephemeral=ephemeral)
+        # A throwaway is hidden by default; infrastructure asks for hidden
+        # without asking to be thrown away.
+        hidden = bool(ephemeral) if hidden is None else bool(hidden)
+        has_slot = await self._ensure_slot(infrastructure=hidden)
         now = _now_iso()
         if not has_slot:
             self._acp_ids[session_id] = None
@@ -282,6 +296,7 @@ class SessionCoordinator:
                 "session_id": session_id, "name": display_name,
                 "path": str(working_path), "backend": backend.name,
                 "always_allow": True, "ephemeral": bool(ephemeral),
+                "hidden": hidden,
                 "state": "stored", "live": False, "created": now, "last_active": now,
             }
             self._persist_meta(session_id)
@@ -306,6 +321,7 @@ class SessionCoordinator:
             "backend": backend.name,
             "always_allow": True,
             "ephemeral": bool(ephemeral),
+            "hidden": hidden,
             "state": "starting",
             "live": True,
             "created": now,
@@ -344,7 +360,7 @@ class SessionCoordinator:
         """
         return [sid for sid, meta in self._metadata.items() if meta.get("live")]
 
-    async def _ensure_slot(self, *, ephemeral: bool = False) -> bool:
+    async def _ensure_slot(self, *, infrastructure: bool = False) -> bool:
         """Make room for one more live session. True if there is room now.
 
         Sessions are the unit of memory cost -- each holds its own ACP backend
@@ -362,10 +378,9 @@ class SessionCoordinator:
         live = self.live_session_ids()
         if len(live) < limit:
             return True
-        if ephemeral:
-            # Client infrastructure: it does not consume the user's budget and
-            # never waits for it. If the manager cannot start, the user has no
-            # way to stop anything else.
+        if infrastructure:
+            # It counts toward the limit, but never waits for one: if the
+            # manager cannot start, the user has no way to stop anything else.
             return True
         # Infrastructure sorts last regardless of activity: it is the control
         # surface, and losing it leaves the user unable to fix anything. Last,
@@ -373,7 +388,7 @@ class SessionCoordinator:
         candidates = sorted(
             (sid for sid in live
              if self._metadata[sid].get("state") == "idle"),
-            key=lambda sid: (bool(self._metadata[sid].get("ephemeral")),
+            key=lambda sid: (bool(self._metadata[sid].get("hidden")),
                              self._metadata[sid].get("last_active") or ""),
         )
         if not candidates:
@@ -441,7 +456,7 @@ class SessionCoordinator:
         meta = self._require(session_id)
         if meta.get("live"):
             return
-        if not await self._ensure_slot(ephemeral=bool(meta.get("ephemeral"))):
+        if not await self._ensure_slot(infrastructure=bool(meta.get("hidden"))):
             self._enqueue(session_id, None)
             return
         path = Path(meta["path"])

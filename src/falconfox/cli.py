@@ -122,7 +122,7 @@ def cmd_spawn(args) -> None:
 
 
 def cmd_list(args) -> None:
-    suffix = "?include_ephemeral=true" if args.all else ""
+    suffix = "?include_hidden=true" if args.all else ""
     sessions = _request("GET", f"/api/sessions{suffix}")
     if args.json:
         print(json.dumps(sessions, indent=2))

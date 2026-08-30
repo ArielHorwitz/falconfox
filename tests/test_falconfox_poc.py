@@ -60,6 +60,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator._metadata["focus"] = {
             "session_id": "focus", "name": "focus", "path": "/tmp",
             "backend": "echo", "always_allow": True, "ephemeral": True,
+            "hidden": True,
             "state": "idle", "live": True, "created": "1", "last_active": "1",
         }
         self.coordinator._auto_named["focus"] = False
@@ -68,7 +69,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.coordinator._persist_meta("focus")
         self.assertEqual(self.coordinator.list_sessions(), [])
-        self.assertEqual(self.coordinator.list_sessions(include_ephemeral=True)[0]["session_id"],
+        self.assertEqual(self.coordinator.list_sessions(include_hidden=True)[0]["session_id"],
                          "focus")
         self.assertFalse(Path(self.temporary.name, "focus").exists())
 
@@ -129,10 +130,11 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
             meta.update(state="stored", live=False)
         self.coordinator.stop_session = _stop
 
-    def _live(self, session_id, *, last_active, state="idle", ephemeral=False):
+    def _live(self, session_id, *, last_active, state="idle", infrastructure=False):
         self.coordinator._metadata[session_id] = {
             "session_id": session_id, "name": session_id, "path": "/tmp",
-            "backend": "echo", "always_allow": True, "ephemeral": ephemeral,
+            "backend": "echo", "always_allow": True, "ephemeral": False,
+            "hidden": infrastructure,
             "state": state, "live": True, "created": "1", "last_active": last_active,
         }
 
@@ -169,8 +171,8 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
         # A limit that omits real processes is a lie, so infrastructure
         # counts. The floor is what stops it eating the whole budget.
         self._limit(1)
-        self._live("manager", last_active="1", ephemeral=True)
-        self._live("private chat", last_active="2", ephemeral=True)
+        self._live("manager", last_active="1", infrastructure=True)
+        self._live("private chat", last_active="2", infrastructure=True)
         self.assertTrue(await self.coordinator._ensure_slot())
         self.assertEqual(self.stopped, [], "the floor left room without evicting")
 
@@ -178,7 +180,7 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
         # Last, so a full host degrades instead of deadlocking -- but only
         # after every one of the user's idle sessions has gone.
         self._limit(3)
-        self._live("infra", last_active="1", ephemeral=True)
+        self._live("infra", last_active="1", infrastructure=True)
         self._live("mine", last_active="9")
         self._live("also mine", last_active="8")
         self.assertTrue(await self.coordinator._ensure_slot())
@@ -192,7 +194,7 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
         self._limit(3)
         for name in ("a", "b", "c"):
             self._live(name, last_active="1", state="working")
-        self.assertTrue(await self.coordinator._ensure_slot(ephemeral=True))
+        self.assertTrue(await self.coordinator._ensure_slot(infrastructure=True))
         self.assertFalse(await self.coordinator._ensure_slot())
         self.assertEqual(self.stopped, [])
 
@@ -1174,7 +1176,8 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
             spawned = []
 
             class _Daemon:
-                async def spawn(self, path, name=None, backend=None, ephemeral=False):
+                async def spawn(self, path, name=None, backend=None, ephemeral=False,
+                                hidden=None):
                     spawned.append(name)
                     return {"session_id": "mgr", "name": name}
             bot.daemon = _Daemon()
@@ -1191,6 +1194,11 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             bot.manager_session_id = "manager"
+
+            class _Mgr:
+                async def session(self, session_id):
+                    return {"session_id": session_id}
+            bot.daemon = _Mgr()
             forwarded = []
             async def _forward(session, dest, text, prompt_msg=None):
                 forwarded.append((session, dest.thread))
@@ -1256,7 +1264,8 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
             spawned = []
 
             class _Daemon:
-                async def spawn(self, path, name=None, backend=None, ephemeral=False):
+                async def spawn(self, path, name=None, backend=None, ephemeral=False,
+                                hidden=None):
                     spawned.append((path, name))
                     return {"session_id": "new1", "name": name}
             bot.daemon = _Daemon()
@@ -1306,7 +1315,8 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
                 async def sessions(self):
                     return []
 
-                async def spawn(self, path, name=None, backend=None, ephemeral=False):
+                async def spawn(self, path, name=None, backend=None, ephemeral=False,
+                                hidden=None):
                     return {"session_id": "mgr", "name": name}
             bot.daemon = _Daemon()
             await bot._handle_update({"my_chat_member": {
@@ -1369,7 +1379,8 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
             spawned = []
 
             class _Daemon:
-                async def spawn(self, path, name=None, backend=None, ephemeral=False):
+                async def spawn(self, path, name=None, backend=None, ephemeral=False,
+                                hidden=None):
                     spawned.append(name)
                     return {"session_id": "concierge", "name": name}
             bot.daemon = _Daemon()
@@ -1384,13 +1395,66 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(forwarded, [("concierge", Dest(7, None))])
             self.assertEqual(spawned, ["telegram private chat"])
 
+    async def test_a_remembered_infrastructure_session_is_reused(self):
+        # They persist and sleep now, so a restart must find them again --
+        # otherwise every restart would make another manager, then another.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot.manager_session_id, bot.concierge_session_id = "mgr", "conc"
+            bot._persist_infra()
+            again = self._bot(directory)
+            again._load_infra()
+            self.assertEqual((again.manager_session_id, again.concierge_session_id),
+                             ("mgr", "conc"))
+
+    async def test_a_remembered_session_that_is_gone_is_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot.concierge_session_id = "deleted"
+            spawns = []
+
+            class _Daemon:
+                async def session(self, session_id):
+                    raise ApiError("no such session")
+
+                async def spawn(self, path, name=None, backend=None,
+                                ephemeral=False, hidden=None):
+                    spawns.append(name)
+                    return {"session_id": "fresh", "name": name}
+            bot.daemon = _Daemon()
+            self.assertEqual(await bot._ensure_concierge(), "fresh")
+            self.assertEqual(len(spawns), 1)
+
+    async def test_infrastructure_is_hidden_but_not_ephemeral(self):
+        # Hidden keeps it out of the listing; NOT ephemeral is what lets it be
+        # stopped and resumed instead of destroyed.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            kwargs = {}
+
+            class _Daemon:
+                async def session(self, session_id):
+                    raise ApiError("none")
+
+                async def spawn(self, path, name=None, backend=None,
+                                ephemeral=False, hidden=None):
+                    kwargs.update(ephemeral=ephemeral, hidden=hidden)
+                    return {"session_id": "x", "name": name}
+            bot.daemon = _Daemon()
+            await bot._ensure_concierge()
+            self.assertEqual(kwargs, {"ephemeral": False, "hidden": True})
+
     async def test_the_private_chat_session_is_spawned_only_once(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             spawns = []
 
             class _Daemon:
-                async def spawn(self, path, name=None, backend=None, ephemeral=False):
+                async def session(self, session_id):
+                    return {"session_id": session_id}
+
+                async def spawn(self, path, name=None, backend=None, ephemeral=False,
+                                hidden=None):
                     spawns.append(name)
                     return {"session_id": "concierge", "name": name}
             bot.daemon = _Daemon()
@@ -1412,7 +1476,8 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(bot.forum_chat_id)
 
             class _Daemon:
-                async def spawn(self, path, name=None, backend=None, ephemeral=False):
+                async def spawn(self, path, name=None, backend=None, ephemeral=False,
+                                hidden=None):
                     return {"session_id": "concierge", "name": name}
             bot.daemon = _Daemon()
             forwarded = []
