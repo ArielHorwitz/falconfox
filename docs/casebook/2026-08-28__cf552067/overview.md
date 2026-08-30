@@ -198,6 +198,23 @@ forum of its own and turning threaded mode back off on its private chat, so
 the DM is the single setup/meta conversation rather than a forum in its own
 right.
 
+## What the user's own hands do to a topic
+
+Mirroring runs one way — sessions onto topics — and nothing mirrors back. A
+hand-renamed topic sticks but silently diverges and is later overwritten; a
+hand-deleted topic strands its session with no notification and no way to
+detect it; a hand-closed topic looks stopped while the session keeps running.
+
+Underneath all three: **the Bot API cannot enumerate topics** (`getForumTopics`
+and `getForumTopic` do not exist), so reconciliation can never be proactive
+and any healing must be failure-driven.
+
+It also raises whether closing an evicted session's topic is worth doing at
+all, since `send` auto-resumes and closing therefore discourages the very
+action that recovers. Detail, plus renaming General to "Manager" and what
+makes General special, in
+[what-happens-when-the-user-edits-a-topic-by-hand.md](what-happens-when-the-user-edits-a-topic-by-hand.md).
+
 ## Related wishlist entries
 
 Two entries in [wishlist.md](../../wishlist.md) are touched, one of them
