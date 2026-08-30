@@ -123,6 +123,43 @@ it settled the two-message turn against the constraints of whole messages,
 and it records why each of those choices was made — which is what tells you
 whether streaming actually improves on them or just moves them.
 
+## Let the private-chat session actually diagnose, not just advise
+
+*From the forum rework, 2026-08-30.*
+
+The private chat has a session and a skill, and the skill deliberately carries
+only the situation plus the three platform invariants it cannot discover. What
+it has no way to do is **look**. There is no Telegram surface anywhere it can
+reach: the `falconfox` CLI reports sessions and nothing about chats, so the
+session cannot answer "is my forum working?" — the single most likely question
+in the channel that exists for when the forum is not.
+
+Observed doing real damage: asked exactly that, it invented a probe (spawning
+a session and telling the user to look for its topic), got a false negative
+from an `--ephemeral` session that was never going to produce one, and sent
+the user hunting through a group that was fine. The bot itself already has
+`check_forum`, which reports which of the three conditions failed; the session
+simply cannot call it.
+
+Two shapes, not exclusive:
+
+- **A surface it can call** — a `/check` command, or `falconfox` growing a
+  Telegram-side report. Small, and it is the part that removes the guessing.
+- **A richer skill** covering what it may run into: common failure modes, what
+  each looks like, what to do about them.
+
+**Deferred on purpose, and the reason is the second one.** A troubleshooting
+skill is mostly *descriptions of current state*, which is the category that
+goes stale fastest — and a stale skill is not merely useless but actively
+harmful, since the agent finds it and follows it. This rework has already
+rewritten its own ground several times over: the pointer disappeared, the
+forum became learnable, the session cap changed what it counts. Writing the
+playbook now means maintaining a second description of a moving target.
+
+Pick it up when the shape has settled. The surface half could land earlier and
+independently — it adds a capability rather than a description, so it does not
+rot.
+
 ## Deliberately not planned
 
 **Off-loopback remote access + bearer token.** Listed in the pivot case as the
