@@ -1,0 +1,7 @@
+title = "Session resource management: bound live sessions by inactivity, count and memory footprint so the daemon stops being OOM-killed"
+status = "open"
+created = "2026-08-30T14:51:55.560265"
+keywords = ["oom", "memory", "resource-management", "session-lifecycle", "eviction",
+            "lru", "cgroup", "psi", "pressure-stall-information", "memory.current",
+            "memory.pressure", "MemoryHigh", "watermark", "hysteresis", "idle-timeout",
+            "max-active-sessions", "capacity", "daemon", "systemd", "falconfox"]
