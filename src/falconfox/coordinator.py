@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import config, logsetup, storage
+from .config import MIN_ACTIVE_SESSIONS
 from .engine import oneshot
 from .engine.client import resolve_config_value
 from .engine.events import EventBus
@@ -333,17 +334,15 @@ class SessionCoordinator:
     # --- the live-session cap ------------------------------------------
 
     def live_session_ids(self) -> list[str]:
-        """Live sessions the cap governs: the user's, not the plumbing.
+        """Every session holding a live agent subprocess.
 
-        Ephemeral sessions are a client's own infrastructure -- the Telegram
-        manager and its private chat -- always on, never listed, and invisible
-        to the person counting. Charging them to the user's budget meant a cap
-        of 3 bought exactly one work session, and evicted it to make room for
-        the next. They are still real memory, so the practical ceiling is this
-        limit plus that overhead; the limit is what the user reasons about.
+        Client infrastructure -- the Telegram manager and its private chat --
+        counts, because it is real memory and a limit that omits real
+        processes is a lie. What stops it eating the budget is the floor, not
+        an exemption: MIN_ACTIVE_SESSIONS guarantees the user room, and
+        infrastructure is evicted last rather than never.
         """
-        return [sid for sid, meta in self._metadata.items()
-                if meta.get("live") and not meta.get("ephemeral")]
+        return [sid for sid, meta in self._metadata.items() if meta.get("live")]
 
     async def _ensure_slot(self, *, ephemeral: bool = False) -> bool:
         """Make room for one more live session. True if there is room now.
@@ -357,6 +356,9 @@ class SessionCoordinator:
         limit = self.config.max_active_sessions
         if limit <= 0:
             return True
+        # A limit small enough to be consumed by infrastructure alone would
+        # leave the user no room at all; raise it rather than stop counting.
+        limit = max(limit, MIN_ACTIVE_SESSIONS)
         live = self.live_session_ids()
         if len(live) < limit:
             return True
@@ -365,10 +367,14 @@ class SessionCoordinator:
             # never waits for it. If the manager cannot start, the user has no
             # way to stop anything else.
             return True
+        # Infrastructure sorts last regardless of activity: it is the control
+        # surface, and losing it leaves the user unable to fix anything. Last,
+        # not never -- so a full host degrades instead of deadlocking.
         candidates = sorted(
             (sid for sid in live
              if self._metadata[sid].get("state") == "idle"),
-            key=lambda sid: self._metadata[sid].get("last_active") or "",
+            key=lambda sid: (bool(self._metadata[sid].get("ephemeral")),
+                             self._metadata[sid].get("last_active") or ""),
         )
         if not candidates:
             return False

@@ -39,11 +39,12 @@ command = ["codex-acp"]
 reasoning_effort = "high"
 ```
 
-At most `max_active_sessions` of *your* sessions (default 5) hold a live agent
+At most `max_active_sessions` sessions (default 5) hold a live agent
 subprocess at once — each one runs its own ACP backend process, so the limit
 is about host memory rather than about your work. The Telegram client's own
-manager and private-chat sessions do not count against it, being always on
-and hidden from the session list; the real ceiling is the limit plus two. A session over the limit is
+manager and private-chat sessions count too, so budget about two for plumbing;
+they are evicted last rather than never, and a floor of 3 keeps the limit from
+being consumed by them alone. A session over the limit is
 created *stored* and activates when a slot frees; making room stops the
 least-recently-used **idle** session, never a working one, and its transcript
 and topic survive. Set `max_active_sessions = 0` to disable the cap.

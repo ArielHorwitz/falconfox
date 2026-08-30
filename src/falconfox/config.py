@@ -45,9 +45,16 @@ DEFAULT_LOG_LEVEL = "INFO"
 # stored rather than refused, and activates when a slot frees. 0 disables it.
 #
 # A client's own infrastructure (the Telegram manager and its private chat)
-# does not count, because it is always on and invisible to whoever is
-# counting. Budget for it separately: the real ceiling is this plus two. Override with a top-level `max_active_sessions = N` in config.toml.
+# counts too: it is real memory, and a limit that omits real processes is a
+# lie. Budget for it -- a Telegram deployment spends about two on plumbing --
+# and note the floor below, which stops it consuming everything. Override with a top-level `max_active_sessions = N` in config.toml.
 DEFAULT_MAX_ACTIVE_SESSIONS = 5
+
+# A client's own infrastructure (the Telegram manager and its private chat)
+# counts toward the limit, because a limit that omits real processes is a lie.
+# This floor is what stops it consuming the whole budget: below this the user
+# would have no room left at all.
+MIN_ACTIVE_SESSIONS = 3
 
 # The instructions handed to the model when asked to name a session. Override it
 # in config.toml with a top-level `naming_prompt = "..."`.

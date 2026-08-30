@@ -157,24 +157,41 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.stopped, ["stale"])
 
     async def test_a_working_session_is_never_evicted(self):
-        self._limit(1)
-        self._live("busy", last_active="1", state="working")
+        # At the floor with everything busy: no candidate, and no turn in
+        # flight is destroyed to make one.
+        self._limit(3)
+        for name in ("busy", "also busy", "still busy"):
+            self._live(name, last_active="1", state="working")
         self.assertFalse(await self.coordinator._ensure_slot())
         self.assertEqual(self.stopped, [])
 
-    async def test_client_infrastructure_does_not_spend_the_users_budget(self):
-        # The Telegram manager and private chat are always on and hidden from
-        # the session list. Charging them to the cap meant a limit of 3 bought
-        # exactly one work session, then evicted it for the next one.
+    async def test_infrastructure_counts_but_the_floor_leaves_room(self):
+        # A limit that omits real processes is a lie, so infrastructure
+        # counts. The floor is what stops it eating the whole budget.
         self._limit(1)
         self._live("manager", last_active="1", ephemeral=True)
-        self._live("private chat", last_active="1", ephemeral=True)
+        self._live("private chat", last_active="2", ephemeral=True)
         self.assertTrue(await self.coordinator._ensure_slot())
-        self.assertEqual(self.stopped, [])
+        self.assertEqual(self.stopped, [], "the floor left room without evicting")
 
-    async def test_infrastructure_never_waits_and_is_never_evicted(self):
-        self._limit(1)
-        self._live("mine", last_active="1", state="working")
+    async def test_infrastructure_is_evicted_last_not_never(self):
+        # Last, so a full host degrades instead of deadlocking -- but only
+        # after every one of the user's idle sessions has gone.
+        self._limit(3)
+        self._live("infra", last_active="1", ephemeral=True)
+        self._live("mine", last_active="9")
+        self._live("also mine", last_active="8")
+        self.assertTrue(await self.coordinator._ensure_slot())
+        self.assertEqual(self.stopped, ["also mine"], "user sessions go first")
+        self.stopped.clear()
+        self._live("filler", last_active="9")
+        self.assertTrue(await self.coordinator._ensure_slot())
+        self.assertNotIn("infra", self.stopped)
+
+    async def test_infrastructure_never_waits_for_a_slot(self):
+        self._limit(3)
+        for name in ("a", "b", "c"):
+            self._live(name, last_active="1", state="working")
         self.assertTrue(await self.coordinator._ensure_slot(ephemeral=True))
         self.assertFalse(await self.coordinator._ensure_slot())
         self.assertEqual(self.stopped, [])
@@ -185,8 +202,9 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.coordinator._ensure_slot())
 
     async def test_a_queued_send_holds_the_text_instead_of_losing_it(self):
-        self._limit(1)
-        self._live("busy", last_active="1", state="working")
+        self._limit(3)
+        for name in ("busy", "also busy", "still busy"):
+            self._live(name, last_active="1", state="working")
         self.coordinator._metadata["waiting"] = {
             "session_id": "waiting", "name": "waiting", "path": "/tmp",
             "backend": "echo", "always_allow": True, "ephemeral": False,
