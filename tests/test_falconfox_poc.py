@@ -184,14 +184,14 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.coordinator._ensure_slot())
         self.assertEqual(self.stopped, [])
 
-    async def test_infrastructure_counts_but_the_floor_leaves_room(self):
-        # A limit that omits real processes is a lie, so infrastructure
-        # counts. The floor is what stops it eating the whole budget.
+    async def test_a_configured_limit_of_one_means_one(self):
+        # Infrastructure sleeps and is evicted last, so a small limit degrades
+        # rather than deadlocking -- it no longer needs a floor to protect it.
         self._limit(1)
         self._live("manager", last_active="1", infrastructure=True)
-        self._live("private chat", last_active="2", infrastructure=True)
         self.assertTrue(await self.coordinator._ensure_slot())
-        self.assertEqual(self.stopped, [], "the floor left room without evicting")
+        self.assertEqual(self.stopped, ["manager"],
+                         "with nothing else live, infrastructure yields")
 
     async def test_infrastructure_is_evicted_last_not_never(self):
         # Last, so a full host degrades instead of deadlocking -- but only

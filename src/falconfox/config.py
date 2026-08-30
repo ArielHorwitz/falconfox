@@ -50,11 +50,11 @@ DEFAULT_LOG_LEVEL = "INFO"
 # and note the floor below, which stops it consuming everything. Override with a top-level `max_active_sessions = N` in config.toml.
 DEFAULT_MAX_ACTIVE_SESSIONS = 5
 
-# A client's own infrastructure (the Telegram manager and its private chat)
-# counts toward the limit, because a limit that omits real processes is a lie.
-# This floor is what stops it consuming the whole budget: below this the user
-# would have no room left at all.
-MIN_ACTIVE_SESSIONS = 3
+# The smallest limit that is still honoured. It was 3 while infrastructure was
+# always resident and would otherwise have eaten the whole budget. Now that
+# infrastructure sleeps and is evicted last, a small limit degrades instead of
+# deadlocking -- so a configured 1 means 1, which is what a limit should mean.
+MIN_ACTIVE_SESSIONS = 1
 
 # The instructions handed to the model when asked to name a session. Override it
 # in config.toml with a top-level `naming_prompt = "..."`.
