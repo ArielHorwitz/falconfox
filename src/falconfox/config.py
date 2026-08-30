@@ -46,8 +46,8 @@ DEFAULT_LOG_LEVEL = "INFO"
 #
 # A client's own infrastructure (the Telegram manager and its private chat)
 # counts too: it is real memory, and a limit that omits real processes is a
-# lie. It is also resumable, so it is stopped and woken like anything else
-# rather than held resident -- which is why no floor is needed to protect it.
+# lie. It is also resumable, so it is evicted by recency like anything else
+# and woken on next use -- nothing about it is privileged or protected.
 # Override with a top-level `max_active_sessions = N` in config.toml.
 DEFAULT_MAX_ACTIVE_SESSIONS = 5
 

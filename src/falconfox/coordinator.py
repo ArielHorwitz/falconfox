@@ -356,9 +356,9 @@ class SessionCoordinator:
 
         Client infrastructure -- the Telegram manager and its private chat --
         counts, because it is real memory and a limit that omits real
-        processes is a lie. Nothing needs to protect it from the limit: it is
-        hidden but resumable, so it is evicted last and woken on next use,
-        which costs a resume rather than its conversation.
+        processes is a lie. Nothing privileges it either: it is hidden but
+        resumable, so it queues for eviction by recency like everything else
+        and wakes on next use, costing a resume rather than its conversation.
         """
         return [sid for sid, meta in self._metadata.items() if meta.get("live")]
 
@@ -381,14 +381,16 @@ class SessionCoordinator:
             # It counts toward the limit, but never waits for one: if the
             # manager cannot start, the user has no way to stop anything else.
             return True
-        # Infrastructure sorts last regardless of activity: it is the control
-        # surface, and losing it leaves the user unable to fix anything. Last,
-        # not never -- so a full host degrades instead of deadlocking.
+        # Plain least-recently-used, with no class of session privileged.
+        # Infrastructure used to sort last, from when stopping it destroyed
+        # its conversation -- but it is resumable now, which makes it the
+        # *cheapest* thing to evict: it wakes on the next message with its
+        # history. Sorting it last meant it held a slot forever, so a limit of
+        # 2 bought exactly one work session.
         candidates = sorted(
             (sid for sid in live
              if self._metadata[sid].get("state") == "idle"),
-            key=lambda sid: (bool(self._metadata[sid].get("hidden")),
-                             self._metadata[sid].get("last_active") or ""),
+            key=lambda sid: self._metadata[sid].get("last_active") or "",
         )
         if not candidates:
             return False

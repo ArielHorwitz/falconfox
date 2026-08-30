@@ -194,19 +194,16 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.stopped, ["manager"],
                          "with nothing else live, infrastructure yields")
 
-    async def test_infrastructure_is_evicted_last_not_never(self):
-        # Last, so a full host degrades instead of deadlocking -- but only
-        # after every one of the user's idle sessions has gone.
+    async def test_infrastructure_takes_its_turn_like_any_other_session(self):
+        # It used to sort last, from when stopping it destroyed its
+        # conversation. Resumable infrastructure is the cheapest thing to
+        # evict, and privileging it meant a limit of 2 bought one work session.
         self._limit(3)
         self._live("infra", last_active="1", infrastructure=True)
         self._live("mine", last_active="9")
         self._live("also mine", last_active="8")
         self.assertTrue(await self.coordinator._ensure_slot())
-        self.assertEqual(self.stopped, ["also mine"], "user sessions go first")
-        self.stopped.clear()
-        self._live("filler", last_active="9")
-        self.assertTrue(await self.coordinator._ensure_slot())
-        self.assertNotIn("infra", self.stopped)
+        self.assertEqual(self.stopped, ["infra"], "oldest goes, whatever it is")
 
     async def test_infrastructure_never_waits_for_a_slot(self):
         self._limit(3)
