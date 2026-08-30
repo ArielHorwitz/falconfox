@@ -39,22 +39,18 @@ ECHO_BACKEND_NAME = "echo"
 # the global config, or the FALCONFOX_LOG_LEVEL environment variable.
 DEFAULT_LOG_LEVEL = "INFO"
 
-# How many of the USER's sessions may hold a live agent subprocess at once.
-# Sessions are the unit of memory cost -- each runs its own ACP backend
-# process -- so this is a ceiling on the host: a session over the limit is
-# stored rather than refused, and activates when a slot frees. 0 disables it.
+# How many sessions may hold a live agent subprocess at once. Sessions are the
+# unit of memory cost -- each runs its own ACP backend process -- so this is a
+# ceiling on the host: a session over the limit is stored rather than refused,
+# and activates when a slot frees. 0 disables it.
 #
 # A client's own infrastructure (the Telegram manager and its private chat)
 # counts too: it is real memory, and a limit that omits real processes is a
-# lie. Budget for it -- a Telegram deployment spends about two on plumbing --
-# and note the floor below, which stops it consuming everything. Override with a top-level `max_active_sessions = N` in config.toml.
+# lie. It is also resumable, so it is stopped and woken like anything else
+# rather than held resident -- which is why no floor is needed to protect it.
+# Override with a top-level `max_active_sessions = N` in config.toml.
 DEFAULT_MAX_ACTIVE_SESSIONS = 5
 
-# The smallest limit that is still honoured. It was 3 while infrastructure was
-# always resident and would otherwise have eaten the whole budget. Now that
-# infrastructure sleeps and is evicted last, a small limit degrades instead of
-# deadlocking -- so a configured 1 means 1, which is what a limit should mean.
-MIN_ACTIVE_SESSIONS = 1
 
 # The instructions handed to the model when asked to name a session. Override it
 # in config.toml with a top-level `naming_prompt = "..."`.

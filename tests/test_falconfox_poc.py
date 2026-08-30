@@ -185,8 +185,9 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.stopped, [])
 
     async def test_a_configured_limit_of_one_means_one(self):
-        # Infrastructure sleeps and is evicted last, so a small limit degrades
-        # rather than deadlocking -- it no longer needs a floor to protect it.
+        # No floor: infrastructure is resumable and evicted last, so a small
+        # limit degrades rather than deadlocking, and the number is honoured
+        # exactly as written.
         self._limit(1)
         self._live("manager", last_active="1", infrastructure=True)
         self.assertTrue(await self.coordinator._ensure_slot())

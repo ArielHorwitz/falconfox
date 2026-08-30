@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Optional
 
 from . import config, logsetup, storage
-from .config import MIN_ACTIVE_SESSIONS
 from .engine import oneshot
 from .engine.client import resolve_config_value
 from .engine.events import EventBus
@@ -357,9 +356,9 @@ class SessionCoordinator:
 
         Client infrastructure -- the Telegram manager and its private chat --
         counts, because it is real memory and a limit that omits real
-        processes is a lie. What stops it eating the budget is the floor, not
-        an exemption: MIN_ACTIVE_SESSIONS guarantees the user room, and
-        infrastructure is evicted last rather than never.
+        processes is a lie. Nothing needs to protect it from the limit: it is
+        hidden but resumable, so it is evicted last and woken on next use,
+        which costs a resume rather than its conversation.
         """
         return [sid for sid, meta in self._metadata.items() if meta.get("live")]
 
@@ -375,9 +374,6 @@ class SessionCoordinator:
         limit = self.config.max_active_sessions
         if limit <= 0:
             return True
-        # A limit small enough to be consumed by infrastructure alone would
-        # leave the user no room at all; raise it rather than stop counting.
-        limit = max(limit, MIN_ACTIVE_SESSIONS)
         live = self.live_session_ids()
         if len(live) < limit:
             return True
