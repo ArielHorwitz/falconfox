@@ -79,8 +79,10 @@ class SessionCoordinator:
                 "backend": meta.get("backend", ""),
                 "always_allow": True,
                 "ephemeral": False,
-            "hidden": False,
-                "hidden": False,
+                # Restored from disk: a client's plumbing must still be
+                # plumbing after a daemon restart, or it reappears in every
+                # listing and starts competing as if it were the user's.
+                "hidden": bool(meta.get("hidden")),
                 "state": "stored",
                 "live": False,
                 "created": meta.get("created"),
@@ -207,6 +209,7 @@ class SessionCoordinator:
             "always_allow": True,
             "named": not self._auto_named.get(session_id, True),
             "acp_session_id": self._acp_ids.get(session_id),
+            "hidden": bool(meta.get("hidden")),
             "created": meta.get("created"),
             "last_active": meta.get("last_active") or _now_iso(),
         })

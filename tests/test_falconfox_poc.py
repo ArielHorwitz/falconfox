@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import tempfile
+import tomllib
 import time
 import unittest
 from pathlib import Path
@@ -48,6 +49,22 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.coordinator = SessionCoordinator(Path(self.temporary.name))
+
+    async def test_hidden_survives_a_daemon_restart(self):
+        # Without this the plumbing reappears in every listing after a restart
+        # and starts competing for slots as if it were the user's work.
+        self.coordinator._metadata["infra"] = {
+            "session_id": "infra", "name": "telegram manager", "path": "/tmp",
+            "backend": "echo", "always_allow": True, "ephemeral": False,
+            "hidden": True, "state": "idle", "live": True,
+            "created": "1", "last_active": "1",
+        }
+        self.coordinator._auto_named["infra"] = False
+        self.coordinator._persist_meta("infra")
+        stored = tomllib.loads(
+            Path(self.temporary.name, "infra", "meta.toml").read_text())
+        self.assertIs(stored.get("hidden"), True,
+                      "the flag must round-trip, or plumbing reappears as work")
 
     async def test_empty_permission_options_are_denied_immediately(self):
         result = await asyncio.wait_for(

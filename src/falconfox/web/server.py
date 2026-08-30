@@ -75,6 +75,7 @@ def create_app(
                 name=body.get("name"),
                 backend_name=body.get("backend"),
                 ephemeral=bool(body.get("ephemeral", False)),
+                hidden=body.get("hidden"),
             )
             return JSONResponse(coordinator.get_session(session_id), status_code=201)
         except (FalconFoxError, KeyError, OSError) as error:
