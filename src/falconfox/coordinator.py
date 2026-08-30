@@ -333,7 +333,17 @@ class SessionCoordinator:
     # --- the live-session cap ------------------------------------------
 
     def live_session_ids(self) -> list[str]:
-        return [sid for sid, meta in self._metadata.items() if meta.get("live")]
+        """Live sessions the cap governs: the user's, not the plumbing.
+
+        Ephemeral sessions are a client's own infrastructure -- the Telegram
+        manager and its private chat -- always on, never listed, and invisible
+        to the person counting. Charging them to the user's budget meant a cap
+        of 3 bought exactly one work session, and evicted it to make room for
+        the next. They are still real memory, so the practical ceiling is this
+        limit plus that overhead; the limit is what the user reasons about.
+        """
+        return [sid for sid, meta in self._metadata.items()
+                if meta.get("live") and not meta.get("ephemeral")]
 
     async def _ensure_slot(self, *, ephemeral: bool = False) -> bool:
         """Make room for one more live session. True if there is room now.
@@ -351,15 +361,13 @@ class SessionCoordinator:
         if len(live) < limit:
             return True
         if ephemeral:
-            # The manager session is the control channel: if it cannot start,
-            # the user has no way to stop anything else. It counts toward the
-            # limit but is never made to wait for it.
-            self.log.warning("over the %d-session limit for an ephemeral session", limit)
+            # Client infrastructure: it does not consume the user's budget and
+            # never waits for it. If the manager cannot start, the user has no
+            # way to stop anything else.
             return True
         candidates = sorted(
             (sid for sid in live
-             if not self._metadata[sid].get("ephemeral")
-             and self._metadata[sid].get("state") == "idle"),
+             if self._metadata[sid].get("state") == "idle"),
             key=lambda sid: self._metadata[sid].get("last_active") or "",
         )
         if not candidates:
@@ -374,9 +382,10 @@ class SessionCoordinator:
         self._emit({
             "type": "notice", "session_id": victim, "level": "info",
             "kind": "capacity",
-            "message": f"Stopped to free a session slot — {limit} of {limit} were "
-                       f"active and this one was idle longest. Nothing is lost: "
-                       f"send a message here to pick it up again.",
+            "message": f"Stopped to free a session slot — {limit} of {limit} of "
+                       f"your sessions were active and this one was idle "
+                       f"longest. Nothing is lost: send a message here to pick "
+                       f"it up again.",
         })
         await self.stop_session(victim)
         return True
@@ -389,8 +398,9 @@ class SessionCoordinator:
         self._emit({"type": "notice", "session_id": session_id, "level": "info",
                     "kind": "capacity",
                     "message": f"Waiting for a free session slot — {live} of "
-                               f"{self.config.max_active_sessions} are active and "
-                               f"busy. This starts as soon as one goes idle."})
+                               f"{self.config.max_active_sessions} of your "
+                               f"sessions are active and busy. This starts as "
+                               f"soon as one goes idle."})
 
     def _schedule_drain(self) -> None:
         if self._draining:

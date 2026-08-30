@@ -162,13 +162,21 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.coordinator._ensure_slot())
         self.assertEqual(self.stopped, [])
 
-    async def test_the_ephemeral_manager_is_exempt_but_still_counts(self):
-        # It is the control channel: if it cannot start, the user has no way
-        # to stop anything else. Stopping an ephemeral session deletes it.
+    async def test_client_infrastructure_does_not_spend_the_users_budget(self):
+        # The Telegram manager and private chat are always on and hidden from
+        # the session list. Charging them to the cap meant a limit of 3 bought
+        # exactly one work session, then evicted it for the next one.
         self._limit(1)
         self._live("manager", last_active="1", ephemeral=True)
-        self.assertFalse(await self.coordinator._ensure_slot())
+        self._live("private chat", last_active="1", ephemeral=True)
+        self.assertTrue(await self.coordinator._ensure_slot())
+        self.assertEqual(self.stopped, [])
+
+    async def test_infrastructure_never_waits_and_is_never_evicted(self):
+        self._limit(1)
+        self._live("mine", last_active="1", state="working")
         self.assertTrue(await self.coordinator._ensure_slot(ephemeral=True))
+        self.assertFalse(await self.coordinator._ensure_slot())
         self.assertEqual(self.stopped, [])
 
     async def test_zero_disables_the_cap(self):
