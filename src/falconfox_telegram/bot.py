@@ -205,10 +205,9 @@ class FalconFoxTelegramBot:
         # General, which is the manager's topic.
         self._topics: dict[str, int] = {}
         self._threads: dict[int, str] = {}
-        # Last title and closed-state mirrored onto each topic, so the steady
-        # stream of session_updated events only acts on real transitions.
+        # Last title mirrored onto each topic, so the steady stream of
+        # session_updated events only acts on a real change.
         self._topic_names: dict[str, str] = {}
-        self._closed_topics: set[str] = set()
         self._turn_dest: dict[str, Dest] = {}
         self._activity_tasks: dict[str, asyncio.Task] = {}
         self._activity_state: dict[str, str] = {}
@@ -1398,9 +1397,16 @@ class FalconFoxTelegramBot:
         await self._finish_turn(session_id, None)
 
     async def _mirror_session(self, session: dict) -> None:
-        """Keep a session's topic looking like the session. Only transitions
-        act, so the stream of `session_updated` events does not retitle or
-        re-close a topic on every state change."""
+        """Keep a session's topic titled like the session.
+
+        Only a real change acts, because `session_updated` arrives constantly.
+
+        Eviction deliberately does NOT close the topic: `send` auto-resumes a
+        stored session, so closing would discourage the very action that
+        recovers it, and the closed state needed bookkeeping that outlived a
+        bot restart badly (a reopen owed but forgotten left topics shut for
+        good). The capacity notice already says what happened.
+        """
         session_id = session.get("session_id")
         thread = self._topics.get(session_id)
         if thread is None:
@@ -1412,23 +1418,6 @@ class FalconFoxTelegramBot:
                 self._topic_names[session_id] = name
             except ApiError:
                 log.warning("could not retitle topic %s", thread, exc_info=True)
-        # A stopped session gets a closed topic: the record stays and the bot
-        # can still write, but the user cannot prompt something that is not
-        # running. Measured -- a closed topic still accepts bot writes.
-        stopped = session.get("state") == "stored"
-        was_stopped = session_id in self._closed_topics
-        if stopped == was_stopped:
-            return
-        try:
-            if stopped:
-                await self.telegram.close_topic(self.forum_chat_id, thread)
-                self._closed_topics.add(session_id)
-            else:
-                await self.telegram.reopen_topic(self.forum_chat_id, thread)
-                self._closed_topics.discard(session_id)
-        except ApiError:
-            log.warning("could not %s topic %s",
-                        "close" if stopped else "reopen", thread, exc_info=True)
 
     async def _finish_turn(self, session_id: str, event: dict | None) -> None:
         """Close out a turn: deliver the remainder, stop the indicator, account

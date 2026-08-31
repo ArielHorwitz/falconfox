@@ -24,6 +24,13 @@ from falconfox_telegram.bot import (BUSY_TURN, Dest, DAEMON_DOWN, QUIET_TURN_SEC
 from falconfox_telegram.rendering import TELEGRAM_MESSAGE_LIMIT, render_messages
 
 
+# Port 9 is the discard port: nothing listens, so a DaemonApi that is not
+# stubbed fails fast instead of quietly reaching a real daemon. Without this,
+# tests exercising _ensure_manager fell through to BotConfig's default of
+# 127.0.0.1:9721 -- production -- and spawned real sessions there.
+UNREACHABLE_DAEMON = "http://127.0.0.1:9"
+
+
 class StorageTests(unittest.TestCase):
     def test_flat_store_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -402,7 +409,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
     async def test_turn_signals_each_state_and_sends_one_final_message(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
+"token", 7, daemon_url=UNREACHABLE_DAEMON, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             fake = FakeTelegram()
@@ -450,7 +457,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
     async def test_activity_starts_when_the_prompt_is_sent(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
+"token", 7, daemon_url=UNREACHABLE_DAEMON, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             fake = FakeTelegram()
@@ -487,7 +494,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
         # live, and the rest of the turn went silent with nothing logged.
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
+"token", 7, daemon_url=UNREACHABLE_DAEMON, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             fake = FakeTelegram()
@@ -519,7 +526,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
         # task for a running one.
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
+"token", 7, daemon_url=UNREACHABLE_DAEMON, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             bot.telegram = FakeTelegram()
@@ -540,7 +547,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
 
     def _bot_mid_turn(self, directory):
         bot = FalconFoxTelegramBot(BotConfig(
-            "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
+"token", 7, daemon_url=UNREACHABLE_DAEMON, forum_chat_id=-1001, state_dir=Path(directory),
             default_path=Path(directory),
         ))
         bot.telegram = FakeTelegram()
@@ -636,7 +643,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
         # its final stamp.
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
+"token", 7, daemon_url=UNREACHABLE_DAEMON, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             bot.telegram = FakeTelegram()
@@ -691,7 +698,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
         # spam-tolerant while the answer still pings.
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
+"token", 7, daemon_url=UNREACHABLE_DAEMON, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             bot.telegram = FakeTelegram()
@@ -950,7 +957,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
         # persisted map survives, and the next connection settles it.
         with tempfile.TemporaryDirectory() as directory:
             bot = FalconFoxTelegramBot(BotConfig(
-                "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
+"token", 7, daemon_url=UNREACHABLE_DAEMON, forum_chat_id=-1001, state_dir=Path(directory),
                 default_path=Path(directory),
             ))
             bot.telegram = FakeTelegram()
@@ -993,7 +1000,7 @@ class TurnEndRacesTests(unittest.IsolatedAsyncioTestCase):
 
     def _bot(self, directory):
         bot = FalconFoxTelegramBot(BotConfig(
-            "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
+"token", 7, daemon_url=UNREACHABLE_DAEMON, forum_chat_id=-1001, state_dir=Path(directory),
         ))
         bot.telegram = FakeTelegram()
         return bot
@@ -1053,7 +1060,7 @@ class TurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     def _bot(self, directory):
         bot = FalconFoxTelegramBot(BotConfig(
-            "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
+"token", 7, daemon_url=UNREACHABLE_DAEMON, forum_chat_id=-1001, state_dir=Path(directory),
             default_path=Path(directory),
         ))
         bot.telegram = FakeTelegram()
@@ -1215,7 +1222,7 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
 
     def _bot(self, directory):
         bot = FalconFoxTelegramBot(BotConfig(
-            "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
+"token", 7, daemon_url=UNREACHABLE_DAEMON, forum_chat_id=-1001, state_dir=Path(directory),
         ))
         bot.telegram = FakeTelegram()
         return bot
@@ -1377,7 +1384,8 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(seen), 2)
 
     def _unpinned(self, directory):
-        bot = FalconFoxTelegramBot(BotConfig("token", 7, state_dir=Path(directory)))
+        bot = FalconFoxTelegramBot(BotConfig(
+"token", 7, daemon_url=UNREACHABLE_DAEMON, state_dir=Path(directory)))
         bot.telegram = FakeTelegram()
         return bot
 
@@ -1545,7 +1553,8 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_private_chat_works_with_no_forum_configured(self):
         # The whole point of the channel: reachable when nothing else is.
         with tempfile.TemporaryDirectory() as directory:
-            bot = FalconFoxTelegramBot(BotConfig("token", 7, state_dir=Path(directory)))
+            bot = FalconFoxTelegramBot(BotConfig(
+"token", 7, daemon_url=UNREACHABLE_DAEMON, state_dir=Path(directory)))
             bot.telegram = FakeTelegram()
             self.assertIsNone(bot.forum_chat_id)
 
@@ -1588,11 +1597,13 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_learned_forum_survives_a_restart(self):
         with tempfile.TemporaryDirectory() as directory:
-            bot = FalconFoxTelegramBot(BotConfig("token", 7, state_dir=Path(directory)))
+            bot = FalconFoxTelegramBot(BotConfig(
+"token", 7, daemon_url=UNREACHABLE_DAEMON, state_dir=Path(directory)))
             bot.telegram = FakeTelegram()
             self.assertIsNone(bot.forum_chat_id)  # a fresh deployment has none
             bot._learn_forum(-2002)
-            again = FalconFoxTelegramBot(BotConfig("token", 7, state_dir=Path(directory)))
+            again = FalconFoxTelegramBot(BotConfig(
+"token", 7, daemon_url=UNREACHABLE_DAEMON, state_dir=Path(directory)))
             again._load_forum()
             self.assertEqual(again.forum_chat_id, -2002)
 
@@ -1653,18 +1664,20 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(getattr(bot.telegram, "renamed", []),
                              [(bot._topics["alpha"], "new")])
 
-    async def test_stopping_closes_the_topic_and_resuming_reopens_it(self):
+    async def test_stopping_a_session_leaves_its_topic_open(self):
+        # Closing would discourage the action that recovers -- `send`
+        # auto-resumes -- and its bookkeeping did not survive a bot restart,
+        # leaving topics shut for good. The capacity notice says it instead.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             await bot._handle_event({
                 "type": "session_added", "session_id": "alpha", "name": "work"})
-            thread = bot._topics["alpha"]
-            for state in ("stored", "stored", "idle"):
+            for state in ("stored", "idle"):
                 await bot._handle_event({
                     "type": "session_updated", "session_id": "alpha",
                     "name": "work", "state": state})
-            self.assertEqual(getattr(bot.telegram, "closed", []), [thread])
-            self.assertEqual(getattr(bot.telegram, "reopened", []), [thread])
+            self.assertEqual(getattr(bot.telegram, "closed", []), [])
+            self.assertEqual(getattr(bot.telegram, "reopened", []), [])
 
     async def test_a_deleted_session_takes_its_topic_with_it(self):
         with tempfile.TemporaryDirectory() as directory:

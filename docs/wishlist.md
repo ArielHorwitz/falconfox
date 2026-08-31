@@ -39,6 +39,10 @@ effort rather than an unfinished corner of the pivot.
 
 *From the phone, 2026-08-25.*
 
+*Less pressing since the forum rework:* with a topic per session you can go
+work in another topic while one is busy, so a refusal no longer blocks you
+from doing anything at all. It still loses the words you typed.
+
 Today a message sent while a turn is running is refused with "send it again
 once the reply arrives" — itself a fix over the previous behaviour, which
 silently destroyed both the message and the in-flight reply. But refusal

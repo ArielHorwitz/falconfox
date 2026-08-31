@@ -8,49 +8,31 @@ Record what fails, under what conditions, and how bad it is — enough that
 whoever picks it up does not have to rediscover it. Delete the entry when the
 fix lands.
 
-## A resumed session's topic stays closed forever
+## Deleting a topic by hand strands its session
 
-*Found in use, 2026-08-30.*
+*Found by reasoning through the forum rework, 2026-08-30. Not yet hit in use.*
 
-Eviction closes the session's topic and records the id in `_closed_topics`;
-resuming reopens it and discards the id. Only transitions act, so the set is
-the sole record that a topic is owed a reopen — and it lives **in memory
-only**, unlike `topics.json`, `forum.json` and `infra.json` beside it.
+There is no `forum_topic_deleted` service message — the Message fields are
+created, edited, closed and reopened, plus General hidden/unhidden — so the
+client never learns that a topic is gone. `topics.json` keeps a binding to a
+dead thread, and the session goes on existing with nowhere to talk.
 
-So a bot restart between the close and the resume loses it. The session comes
-back, `_mirror_session` computes `stopped=False` against a `was_stopped` that
-is now also false, sees no transition, and never reopens. The topic stays
-closed permanently, while the session behind it is running.
+Sends to that thread then fail. Topic *creation* failures report to the
+private chat; reply and progress failures only log, so from the chat the
+session simply stops answering.
 
-Two candidate fixes, and the second may delete the bug rather than repair it:
-persist the set beside the other maps, or **stop closing topics on eviction
-at all** — the premise that closing prevents prompting a stopped session is
-false, since `send` auto-resumes. See
-[the topics case](casebook/2026-08-28__cf552067/what-happens-when-the-user-edits-a-topic-by-hand.md).
+`_reconcile_topics` cannot repair it: it creates topics for sessions that lack
+one and unbinds sessions that no longer exist, and a binding pointing at a
+deleted topic looks perfectly valid. Nor can it be made proactive — the Bot
+API has **no way to enumerate topics** (`getForumTopics` and `getForumTopic`
+do not exist, measured 2026-08-30), so there is nothing to reconcile against.
 
-## The test suite can reach a live daemon
+The only available fix is reactive: on a send failure to a bound thread,
+unbind and let `_ensure_topic` make a new one. Deliberately not done on the
+eve of a stability soak, since it adds a code path to the hot send path.
 
-*Found by finding six of its sessions in production, 2026-08-30.*
-
-Tests construct a `FalconFoxTelegramBot` to exercise `_ensure_manager` and
-`_ensure_concierge`. Where `bot.daemon` is not stubbed, it falls through to a
-real `DaemonApi`, whose default `FALCONFOX_URL` is `http://127.0.0.1:9721` —
-the production daemon.
-
-Every affected run therefore **spawned a real session in production**, with a
-`tempfile` directory as its working path. Six accumulated over one day of
-development, each holding an ACP subprocess, on a host with 951 MB where
-memory exhaustion was under active investigation. Some of that day's measured
-pressure was self-inflicted.
-
-The defect is not what the tests did on arrival; it is that a unit test can
-reach a live service at all. Fix by pointing `FALCONFOX_URL` at an unroutable
-address in test setup, so the fall-through fails fast instead of succeeding
-quietly.
-
-Worth pairing with a habit: `falconfox list` makes this obvious in one look —
-six sessions named `telegram manager` under `/tmp` are unmistakable — and it
-went unnoticed for hours because nobody listed production's sessions.
+Workaround until then: do not delete a session's topic by hand. Delete the
+*session* (`falconfox delete`), which removes its topic as a consequence.
 
 ## A rebuilt VPS loses the Python 3.12 shim
 
