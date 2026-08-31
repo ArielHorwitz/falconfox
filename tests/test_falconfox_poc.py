@@ -983,6 +983,65 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             await self._idle(bot)
 
 
+class TurnEndRacesTests(unittest.IsolatedAsyncioTestCase):
+    """Nothing may write for a turn that has already ended.
+
+    Observed in use: an extra "🛠 Working…" arriving after the final reply,
+    because cancelling the activity loop is not instantaneous and a tick
+    already inside an HTTP call still completes.
+    """
+
+    def _bot(self, directory):
+        bot = FalconFoxTelegramBot(BotConfig(
+            "token", 7, forum_chat_id=-1001, state_dir=Path(directory),
+        ))
+        bot.telegram = FakeTelegram()
+        return bot
+
+    async def test_a_stale_progress_tick_creates_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._progress_lines["session"] = ["⚙️ did a thing"]
+            bot._progress_dirty.add("session")
+            # No entry in _turn_dest: the turn is over.
+            await bot._update_progress("session", Dest(-1001, 20))
+            self.assertEqual(bot.telegram.messages, [],
+                             "no Working… may appear after the reply")
+
+    async def test_the_final_stamp_is_still_allowed(self):
+        # It runs *after* the destination is popped, so it must be exempt.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._progress_lines["session"] = ["⚙️ did a thing"]
+            await bot._update_progress("session", Dest(-1001, 20),
+                                       final_note="✅ done in 3s")
+            self.assertEqual(len(bot.telegram.messages), 1)
+            self.assertIn("✅ done in 3s", bot.telegram.messages[0][1])
+
+    async def test_a_stale_chat_action_is_not_sent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            await bot._send_action("session", Dest(-1001, 20))
+            self.assertEqual(bot.telegram.actions, [],
+                             "no typing… after the answer has arrived")
+
+    async def test_finish_turn_waits_for_the_activity_loop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._turn_dest["session"] = Dest(-1001, 20)
+            started = asyncio.Event()
+
+            async def _loop():
+                started.set()
+                await asyncio.sleep(3600)
+            task = asyncio.create_task(_loop())
+            bot._activity_tasks["session"] = task
+            await started.wait()
+            await bot._finish_turn("session", {"turn_id": "t1"})
+            self.assertTrue(task.done(),
+                            "the loop must be settled before the reply is sent")
+
+
 class TurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
     """The persisted turn map: a bot restart mid-turn must not orphan the reply.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -1128,6 +1129,13 @@ class FalconFoxTelegramBot:
         (and the turn's finalization), never the event pipeline: a hung
         Telegram call here must not stall queued daemon events. Edits do not
         notify, so a muted chat stays quiet through any amount of progress."""
+        if final_note is None and session_id not in self._turn_dest:
+            # The turn is over. Cancelling the activity loop is not
+            # instantaneous: a tick already inside an HTTP call finishes it,
+            # and would create a fresh "Working…" *after* the reply had
+            # landed. `final_note` is the finalization itself, which runs
+            # after the destination is popped, so it is exempt.
+            return
         if final_note is None and session_id not in self._progress_dirty:
             return
         lines = self._progress_lines.get(session_id) or []
@@ -1183,6 +1191,11 @@ class FalconFoxTelegramBot:
         self._persist_turns()
 
     async def _send_action(self, session_id: str, dest: Dest) -> None:
+        if session_id not in self._turn_dest:
+            # Same race as the progress message: these are fired as their own
+            # tasks and nothing cancels the ones already queued, so a stale
+            # one would show "typing…" after the answer had arrived.
+            return
         action = TURN_ACTIONS.get(
             self._activity_state.get(session_id, ""), DEFAULT_ACTION)
         try:
@@ -1423,11 +1436,17 @@ class FalconFoxTelegramBot:
         the `idle` that follows a `turn_ended` finds nothing left to do."""
         self._turn_working.discard(session_id)
         activity = self._activity_tasks.pop(session_id, None)
-        if activity:
-            activity.cancel()
-        self._activity_state.pop(session_id, None)
         had_turn = session_id in self._turn_dest
         dest = self._turn_dest.pop(session_id, None)
+        if activity:
+            # Awaited, not merely cancelled: cancellation lands at the task's
+            # next await, so an unawaited cancel leaves a tick still in flight
+            # while the reply is being sent. Popping the destination first
+            # means anything that does slip through finds the turn ended.
+            activity.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await activity
+        self._activity_state.pop(session_id, None)
         turn_id = self._turn_id.pop(session_id, None) or (event or {}).get("turn_id")
         started = self._turn_started_at.pop(session_id, None)
         outcome = (event or {}).get("outcome")
