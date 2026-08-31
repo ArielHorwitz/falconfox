@@ -18,7 +18,7 @@ or run the manual equivalent): git, curl, Node.js + npm (>=18),
 
 ```sh
 REPO=~/projects/falconfox   # the location is free; this host uses this one
-git clone -b falconfox git@github.com:ArielHorwitz/falconfox.git "$REPO"
+git clone -b master git@github.com:ArielHorwitz/falconfox.git "$REPO"
 mkdir -p ~/.config/falconfox
 cp "$REPO"/deploy/telegram.env.example ~/.config/falconfox/telegram.env
 cp "$REPO"/deploy/config.example.toml ~/.config/falconfox/config.toml
@@ -63,13 +63,30 @@ Notes:
   inherit the daemon's environment — can invoke `falconfox` by name. PATH
   cannot be set via `environment.d`; systemd ignores that one variable.
 - The clone location is free (units are rendered with the real path); `-b
-  falconfox` pins the deploy branch — switching the checkout's branch later
+  master` pins the deploy branch — switching the checkout's branch later
   changes what `update.sh` follows.
+
+## Branches
+
+- **`dev`** is the development branch. Everything lands here first, and it is
+  what the development instance runs.
+- **`master`** is the stable branch and what a deployment follows. It lags
+  behind `dev` at a commit that has been *proven in use*, and it moves **only
+  by fast-forward** — nothing is ever committed to it directly.
+
+So the release step is: run `dev` somewhere real until you trust a commit,
+then fast-forward `master` to it and update. Committing to `master` directly
+breaks the fast-forward guarantee that makes this cheap, and the breakage only
+shows up later as a merge conflict at deploy time.
+
+(A `falconfox` branch existed during the casebook-to-FalconFox pivot and is
+retired. Anything referring to it predates that.)
 
 ## Updating (the dogfooding loop)
 
 Development happens in `.worktrees/` inside the deploy checkout (or anywhere
-else), gets merged to the deploy branch, and pushed to origin. The deploy
+else), gets merged to `dev`, proven, then fast-forwarded into `master`. The
+deploy
 checkout itself must stay clean — `update.sh` refuses to run otherwise. Python
 loads code only at process start, so the running daemon is untouched until the
 restart.
