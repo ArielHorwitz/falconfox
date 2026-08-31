@@ -22,14 +22,28 @@ on the host — none of it is built.
 `parallel-sessions-are-bounded-by-host-memory.md` (the OOM itself) and
 `capping-live-sessions-design.md` (the count cap that shipped).
 
-**Where the existing code is.** The count cap lives on the **unmerged
-`topics` branch**, not on `falconfox`. `git log falconfox..topics` — look for
-`_ensure_slot`, `_drain_queue` and `live_session_ids` in
-`src/falconfox/coordinator.py`, and `max_active_sessions` in
-`src/falconfox/config.py`. This case builds on that work, so it needs that
-branch (or its merge) rather than the trunk.
+**Branches.** `dev` is the development branch: everything lands there.
+`master` is the stable branch, lagging at a commit proven in use, and it moves
+**only by fast-forward** from `dev` — nothing is committed to it directly.
+(The `falconfox` branch is retired; it existed for the casebook-to-FalconFox
+pivot.) So: work on `dev`, and do not commit to `master`.
 
-**One correction already agreed and not yet applied.** Ephemeral sessions
+**Where the existing code is.** The count cap is on `dev`: `_ensure_slot`,
+`_drain_queue` and `live_session_ids` in `src/falconfox/coordinator.py`, and
+`max_active_sessions` in `src/falconfox/config.py`. Also on `dev`, and
+directly relevant, is the sleepable-infrastructure work described below —
+already built, not merely designed.
+
+**Three rules were sized against always-resident infrastructure and have all
+since been undone**, each found by using it: a minimum session count, then
+infrastructure not counting toward the limit, then infrastructure sorting last
+for eviction. Resumable infrastructure is the *cheapest* session to evict — it
+wakes on the next message with its history — so nothing about it is
+privileged now: it counts, it queues by recency, and only its *starting* is
+exempt from waiting. If a fourth such rule turns up, it is the same premise
+change working its way out.
+
+**Superseded, kept for the reasoning.** Ephemeral sessions
 (the Telegram client's manager and private-chat sessions) were changed to
 *not* count toward the cap, because they were silently eating a user's budget
 — a cap of 3 bought one work session. The user's judgment, which supersedes
@@ -51,7 +65,10 @@ this work.
 They are independent triggers over one shared policy. Any of them may fire;
 what happens next is the same.
 
-## Do this first: infrastructure that can sleep
+## Already done: infrastructure that can sleep
+
+*Built on `dev` after this case was opened. Kept here because the reasoning
+explains the design, and because what it invalidated is worth knowing.*
 
 *User's insight, 2026-08-30.* Infrastructure sessions must stay alive only
 because stopping one **destroys it** — `ephemeral` makes `stop` a `delete`, so
