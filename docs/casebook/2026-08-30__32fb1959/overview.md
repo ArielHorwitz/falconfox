@@ -51,6 +51,50 @@ this work.
 They are independent triggers over one shared policy. Any of them may fire;
 what happens next is the same.
 
+## Do this first: infrastructure that can sleep
+
+*User's insight, 2026-08-30.* Infrastructure sessions must stay alive only
+because stopping one **destroys it** — `ephemeral` makes `stop` a `delete`, so
+sleeping the manager or the private chat would lose its conversation. Fix
+that, and there is no reason to keep them running at all: they sleep when
+unused and wake on the next message, costing a resume rather than a slot.
+
+This dissolves the arithmetic instead of budgeting around it. Measured on the
+host, one live agent is 66-218 MB and a Telegram deployment spends two of them
+on plumbing per instance; with two instances that is four always-on agents
+before any work happens. Sleepable infrastructure means a cap of 4 holds four
+*user* sessions most of the time.
+
+**`ephemeral` currently conflates four things**, and only the first is wanted
+for infrastructure:
+
+| Site | Behaviour |
+|---|---|
+| `list_sessions` | hidden from the default listing |
+| `_should_persist` | transcript never persisted |
+| `stop_session` | stopping **deletes** rather than stores |
+| `_ensure_slot` | never waits for a slot; sorts last for eviction |
+
+Split it: infrastructure becomes **`hidden=True, ephemeral=False`** —
+persistent, stoppable, resumable, and excluded from listings unless a flag
+asks for it. The daemon half is about six sites plus a CLI flag and the web
+endpoint.
+
+**The bot half is the real work.** Once these persist, the client must
+remember *which* session is the manager and which is the private chat across
+its own restarts and resume rather than spawn — otherwise every restart makes
+another one, forever. Same pattern as `topics.json` and `forum.json`, so
+known work rather than novel.
+
+Two consequences to decide with it:
+
+- The manager **rotates** today: `_spawn_manager_session` deletes the old one
+  on every connect so it starts clean. Persistence ends that and it
+  accumulates history instead — continuity you want for the private chat,
+  growth you will eventually have to prune.
+- `_should_persist` needs a real message before persisting, but infrastructure
+  gets explicit names so `_auto_named` is false and it persists anyway.
+
 ## The eviction policy is orthogonal to the trigger
 
 Whatever fires, the victim rule does not change: **least-recently-used among
