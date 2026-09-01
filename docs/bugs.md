@@ -8,6 +8,53 @@ Record what fails, under what conditions, and how bad it is — enough that
 whoever picks it up does not have to rediscover it. Delete the entry when the
 fix lands.
 
+## The manager and private-chat sessions get topics nobody owns
+
+*Reported from use, 2026-09-01. Confirmed by reading the code; not reproduced
+under test.*
+
+The bot creates a forum topic titled "telegram manager", and any message sent
+in it answers "No FalconFox session owns this topic." The manager keeps talking
+in General, so the topic is inert. The private-chat session ("telegram private
+chat") gets the same dead topic, for the same reason.
+
+Two halves disagree, but not the way it looks from the chat. Topic creation is
+driven by two different sources:
+
+* `_reconcile_topics` (`bot.py`), which lists sessions over
+  `GET /api/sessions`. That call omits hidden sessions, and both infrastructure
+  sessions are spawned `hidden=True`, so reconcile never sees them.
+* the `session_added` websocket event (`bot.py:1316`), which the coordinator
+  emits for *every* session including hidden ones (`coordinator.py:333`).
+
+So the event path creates a topic the list path does not know about. The
+private chat has no exclusion at all in `_ensure_topic`. The manager has one,
+`session_id == self.manager_session_id`, but it loses a race it almost always
+loses: `add_session` emits `session_added` before it awaits `session.start()`,
+while the bot only assigns `self.manager_session_id` after the spawn POST
+returns. The event arrives first, the guard compares against a stale id, and
+the topic is made.
+
+The binding is then destroyed by the next `_reconcile_topics`, which unbinds
+every session in `topics.json` that is missing from the live list. Hidden
+sessions are always missing from it, so the binding is dropped on the first
+connect after creation while the Telegram topic stays. That is the state the
+report describes: a real topic, no owner.
+
+Same root cause, second symptom: because the binding is already gone, deleting
+either session leaves its topic behind, since `session_removed` deletes only a
+topic that is still bound.
+
+The fix is to make one rule about hidden sessions and apply it in both places.
+The narrow version is to skip hidden sessions in `_ensure_topic` (the flag is
+on the `session_added` event already, so no id comparison and no race), which
+also stops reconcile from ever having a hidden binding to unbind. The topics
+already created have to be deleted by hand, or by deleting the sessions after
+the binding is restored.
+
+Workaround until then: ignore the two topics and talk to the manager in
+General, and to the private chat in the private chat.
+
 ## Deleting a topic by hand strands its session
 
 *Found by reasoning through the forum rework, 2026-08-30. Not yet hit in use.*
