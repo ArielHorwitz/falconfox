@@ -17,7 +17,7 @@ or run the manual equivalent): git, curl, Node.js + npm (>=18),
 ## Bootstrap (once, as the deploy user)
 
 ```sh
-REPO=~/projects/falconfox   # the location is free; this host uses this one
+REPO=~/projects/falconfox-prod   # the location is free; this host uses this one
 git clone -b master git@github.com:ArielHorwitz/falconfox.git "$REPO"
 mkdir -p ~/.config/falconfox
 cp "$REPO"/deploy/telegram.env.example ~/.config/falconfox/telegram.env
@@ -82,28 +82,72 @@ shows up later as a merge conflict at deploy time.
 (A `falconfox` branch existed during the casebook-to-FalconFox pivot and is
 retired. Anything referring to it predates that.)
 
+## Checkouts
+
+Two checkouts on this host, one per instance, each an independent clone:
+
+| path | branch | instance | units |
+| --- | --- | --- | --- |
+| `~/projects/falconfox` | `dev` | development | `falconfox-dev-daemon`, `falconfox-dev-telegram` |
+| `~/projects/falconfox-prod` | `master` | production | `falconfox-daemon`, `falconfox-telegram` |
+
+The **development** checkout is the one an agent lands in, which is why it
+holds `dev`: new work should branch from it without anyone having to first
+work out which of several trees is the right one. Agents develop in
+`.worktrees/` under it and merge back into `dev`, exactly as before.
+
+The **production** checkout exists only to be deployed. Nothing is developed
+there, and it is a separate clone rather than a worktree so that production
+does not share an object store, or a directory that gets moved, with the tree
+agents are editing.
+
+The two instances are separated by more than the branch: the dev units set
+`XDG_STATE_HOME`/`XDG_CONFIG_HOME` to `~/.local/state/falconfox-dev` and
+`~/.config/falconfox-dev`, so dev has its own config, its own state and its
+own bot token. Each daemon writes `server.json` into its own state dir and the
+CLI reads it from there, so the two never collide on a port and the variables
+alone decide which instance a command talks to. Only production owns the
+`falconfox` and `falconfox-telegram` shims in `~/.local/bin`, so a bare
+`falconfox` in a shell always means production:
+
+```sh
+XDG_STATE_HOME=~/.local/state/falconfox-dev \
+XDG_CONFIG_HOME=~/.config/falconfox-dev \
+    ~/projects/falconfox/.venv/bin/falconfox list
+```
+
+The dev unit files are hand-written and live only in
+`~/.config/systemd/user/`; `setup.sh` renders the production pair from
+`deploy/*.service` and does not know about them.
+
 ## Updating (the dogfooding loop)
 
-Development happens in `.worktrees/` inside the deploy checkout (or anywhere
-else), gets merged to `dev`, proven, then fast-forwarded into `master`. The
-deploy
-checkout itself must stay clean — `update.sh` refuses to run otherwise. Python
-loads code only at process start, so the running daemon is untouched until the
-restart.
+Development happens in `.worktrees/` under the development checkout (or
+anywhere else), gets merged to `dev`, proven by the dev instance, then
+fast-forwarded into `master` and deployed. Either checkout must be clean for
+`update.sh` to run in it, which is why development belongs in a worktree.
+Python loads code only at process start, so a running daemon is untouched
+until the restart.
+
+`update.sh` follows whatever branch its own checkout is on, so the same script
+serves both: run it in `~/projects/falconfox-prod` to deploy `master`, or in
+`~/projects/falconfox` to move the dev instance to the tip of `dev`.
 
 - **From a FalconFox agent session (Telegram):**
-  `~/projects/falconfox/deploy/update.sh --detach-restart` — pulls and syncs
-  inline, then restarts *detached* a few seconds later, because it kills the
-  daemon and with it the agent's own turn. The agent should announce the
+  `~/projects/falconfox-prod/deploy/update.sh --detach-restart` — pulls and
+  syncs inline, then restarts *detached* a few seconds later, because it kills
+  the daemon and with it the agent's own turn. The agent should announce the
   update and end its turn; the session itself survives and resumes on the next
-  message.
-- **From SSH:** `~/projects/falconfox/deploy/update.sh` — everything inline.
+  message. **Any** restart of the daemon an agent is running under cuts that
+  agent off mid-turn, `systemctl restart` included, so detach those too.
+- **From SSH:** `~/projects/falconfox-prod/deploy/update.sh` — everything
+  inline.
 
 After restarting, the script health-checks (daemon answers `falconfox list`,
 bot unit active). On failure it **rolls back** to the previous revision,
 re-syncs, restarts, and re-checks. Unit-file changes deploy too (units are
 re-rendered on every update). Everything is appended to
-`~/.local/state/falconfox/update.log` — the first thing to read after an
+`~/.local/state/falconfox/update.log` (`falconfox-dev` for dev) — the first thing to read after an
 update went quiet. Deeper forensics: `journalctl --user -u falconfox-daemon`
 / `-u falconfox-telegram`, and `~/.local/state/falconfox/falconfox.log`.
 
