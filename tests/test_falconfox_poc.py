@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from falconfox.cli import CliError, _guard_self_target
+from falconfox.cli import CliError, _guard_self_target, build_parser, cmd_daemon
 from falconfox.coordinator import SessionCoordinator
 from falconfox.engine.session import AgentSession
 from falconfox.storage import SessionStore
@@ -335,6 +335,32 @@ class CliSafetyTests(unittest.TestCase):
             with self.assertRaises(CliError):
                 _guard_self_target("deadbeef", "delete")
             _guard_self_target("another", "delete")
+
+
+class DaemonPortTests(unittest.TestCase):
+    """A pinned port must be bound as given, never searched past.
+
+    The reason it matters: two instances on one host both search up from 9721,
+    so whoever starts second silently lands on the other's neighbouring port
+    and a bot pinned to a literal URL then drives the wrong daemon.
+    """
+
+    def _serve_args(self, argv):
+        args = build_parser().parse_args(argv)
+        with patch("falconfox.web.server.serve") as serve, \
+                patch("falconfox.state.find_available_port", return_value=9999) as search:
+            cmd_daemon(args)
+        return serve.call_args.kwargs, search.called
+
+    def test_pinned_port_skips_the_search(self):
+        kwargs, searched = self._serve_args(["daemon", "--foreground", "--port", "9725"])
+        self.assertEqual(kwargs["port"], 9725)
+        self.assertFalse(searched)
+
+    def test_unpinned_port_still_searches(self):
+        kwargs, searched = self._serve_args(["daemon", "--foreground"])
+        self.assertEqual(kwargs["port"], 9999)
+        self.assertTrue(searched)
 
 
 class FakeTelegram:

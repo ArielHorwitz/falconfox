@@ -2,10 +2,13 @@
 # One-time VPS bootstrap for FalconFox: sync the venv, install the systemd user
 # units, enable lingering, and start everything. Idempotent — safe to re-run.
 #
-#   setup.sh                 full bootstrap
-#   setup.sh install-units   (re)install only the bits that live outside the
-#                            checkout — unit files and CLI shims (used by
-#                            update.sh)
+#   setup.sh                     full bootstrap
+#   setup.sh install-units       (re)install only the bits that live outside
+#                                the checkout — unit files and CLI shims (used
+#                                by update.sh)
+#   setup.sh install-dev-units   render the dev instance's units from this
+#                                checkout, without touching the deployment's
+#                                units or the ~/.local/bin shims
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,15 +16,28 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/falconfox"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 BIN_DIR="$HOME/.local/bin"
 UNITS=(falconfox-daemon.service falconfox-telegram.service)
+DEV_UNITS=(falconfox-dev-daemon.service falconfox-dev-telegram.service)
 
-install_units() {
+render_units() {
     mkdir -p "$UNIT_DIR"
     local unit
-    for unit in "${UNITS[@]}"; do
+    for unit in "$@"; do
         sed -e "s|@REPO@|$REPO|g" -e "s|@HOME@|$HOME|g" \
             "$REPO/deploy/$unit" > "$UNIT_DIR/$unit"
     done
     systemctl --user daemon-reload
+}
+
+install_units() {
+    render_units "${UNITS[@]}"
+}
+
+# The dev instance is a second copy of the stack pointed at its own state,
+# config and port. Its units are rendered from the same templates as the
+# deployment's so that tearing it down loses nothing that has to be rewritten
+# by hand -- which is exactly what happened the first time.
+install_dev_units() {
+    render_units "${DEV_UNITS[@]}"
 }
 
 # Put the CLI on PATH. ~/.local/bin is already picked up by the stock Ubuntu
@@ -38,6 +54,12 @@ install_shims() {
 if [[ "${1:-}" == "install-units" ]]; then
     install_units
     install_shims
+    exit 0
+fi
+
+# No shims: `falconfox` on PATH means the deployment, never the dev twin.
+if [[ "${1:-}" == "install-dev-units" ]]; then
+    install_dev_units
     exit 0
 fi
 

@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
+from typing import Optional
 
 from . import state
 
@@ -60,12 +61,13 @@ def _wait_for_server(timeout: float = 5.0) -> state.ServerInfo | None:
     return None
 
 
-def _start_daemon(host: str) -> state.ServerInfo:
+def _start_daemon(host: str, port: Optional[int] = None) -> state.ServerInfo:
     log_path = Path(os.environ.get("FALCONFOX_LOG_PATH") or state.log_path())
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = open(log_path, "a")  # held by the child
     subprocess.Popen(
-        [sys.executable, "-m", "falconfox", "daemon", "--foreground", "--host", host],
+        [sys.executable, "-m", "falconfox", "daemon", "--foreground", "--host", host]
+        + (["--port", str(port)] if port is not None else []),
         start_new_session=True,
         stdout=log_file,
         stderr=log_file,
@@ -98,12 +100,18 @@ def cmd_daemon(args) -> None:
         state.stop_server(wait=True)
     if args.foreground:
         from .web.server import serve
-        serve(host=args.host, port=state.find_available_port(host=args.host),
-              open_browser=args.browser)
+        # A pinned port is bound as given and never searched past: two
+        # instances on one host (a deployment and its development twin) are
+        # only reliably separable if each one's port is a fact rather than
+        # whatever was free when it happened to start. Failing to bind is
+        # then the honest outcome -- drifting onto the neighbour's port is
+        # how a bot ends up driving the wrong daemon's sessions.
+        port = args.port if args.port is not None else state.find_available_port(host=args.host)
+        serve(host=args.host, port=port, open_browser=args.browser)
         return
     info = state.find_running_server()
     if info is None:
-        info = _start_daemon(args.host)
+        info = _start_daemon(args.host, args.port)
         print(f"FalconFox daemon started on port {info.port} (pid {info.pid}).")
     else:
         print(f"FalconFox daemon already running on port {info.port} (pid {info.pid}).")
@@ -192,6 +200,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     daemon = sub.add_parser("daemon", help="start or manage the daemon")
     daemon.add_argument("--host", default="127.0.0.1")
+    daemon.add_argument("--port", type=int, default=None,
+                        help="bind this exact port instead of searching from 9721")
     daemon.add_argument("--foreground", action="store_true")
     daemon.add_argument("--browser", action="store_true")
     daemon.add_argument("--stop", action="store_true")

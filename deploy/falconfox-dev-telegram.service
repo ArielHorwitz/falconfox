@@ -1,0 +1,21 @@
+[Unit]
+Description=FalconFox DEV Telegram bot (dev branch, development checkout)
+After=falconfox-dev-daemon.service
+Wants=falconfox-dev-daemon.service
+
+[Service]
+# FALCONFOX_URL has to name the dev daemon's port: the bot has no discovery
+# and otherwise falls back to 9721, which is the deployment.
+EnvironmentFile=@HOME@/.config/falconfox-dev/falconfox/telegram.env
+Environment=XDG_STATE_HOME=@HOME@/.local/state/falconfox-dev
+Environment=XDG_CONFIG_HOME=@HOME@/.config/falconfox-dev
+Environment=FALCONFOX_URL=http://127.0.0.1:9725
+Environment=FALCONFOX_TELEGRAM_STATE_DIR=@HOME@/.local/state/falconfox-dev/falconfox/telegram
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=@HOME@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+ExecStart=@REPO@/.venv/bin/falconfox-telegram
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

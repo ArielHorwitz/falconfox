@@ -9,7 +9,7 @@ Environment=FALCONFOX_DAEMON=1
 # shims the CLI) must be on it for an agent to invoke `falconfox` by name.
 # It has to be set here: systemd ignores PATH set via environment.d.
 Environment=PATH=@HOME@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
-ExecStart=@REPO@/.venv/bin/falconfox daemon --foreground
+ExecStart=@REPO@/.venv/bin/falconfox daemon --foreground --port 9721
 Restart=always
 RestartSec=2
 

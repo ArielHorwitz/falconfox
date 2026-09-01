@@ -103,12 +103,10 @@ agents are editing.
 
 The two instances are separated by more than the branch: the dev units set
 `XDG_STATE_HOME`/`XDG_CONFIG_HOME` to `~/.local/state/falconfox-dev` and
-`~/.config/falconfox-dev`, so dev has its own config, its own state and its
-own bot token. Each daemon writes `server.json` into its own state dir and the
-CLI reads it from there, so the two never collide on a port and the variables
-alone decide which instance a command talks to. Only production owns the
-`falconfox` and `falconfox-telegram` shims in `~/.local/bin`, so a bare
-`falconfox` in a shell always means production:
+`~/.config/falconfox-dev`, so dev has its own config, its own state, its own
+bot token and its own port. Only production owns the `falconfox` and
+`falconfox-telegram` shims in `~/.local/bin`, so a bare `falconfox` in a shell
+always means production:
 
 ```sh
 XDG_STATE_HOME=~/.local/state/falconfox-dev \
@@ -116,9 +114,24 @@ XDG_CONFIG_HOME=~/.config/falconfox-dev \
     ~/projects/falconfox/.venv/bin/falconfox list
 ```
 
-The dev unit files are hand-written and live only in
-`~/.config/systemd/user/`; `setup.sh` renders the production pair from
-`deploy/*.service` and does not know about them.
+**Ports are pinned, not searched.** Production binds 9721 and dev binds 9725,
+both passed as `daemon --port` in the units. Unpinned, a daemon searches
+upward from 9721 and takes the first free port, so which instance holds which
+port depends on the order they started in, and it can change on any restart.
+The bot has no discovery — it reads `FALCONFOX_URL` and otherwise defaults to
+9721 — so its URL is a literal that a reassignment silently invalidates,
+pointing it at the other instance's daemon and that daemon's sessions. Pinned,
+the assignment is a fact and a taken port fails loudly instead.
+
+Both units are rendered from `deploy/*.service`:
+
+```sh
+~/projects/falconfox-prod/deploy/setup.sh install-units       # production pair + shims
+~/projects/falconfox/deploy/setup.sh install-dev-units        # dev pair, no shims
+```
+
+Run each from its own checkout: `@REPO@` is filled in from the script's own
+location, so running the wrong one points a unit at the wrong tree.
 
 ## Updating (the dogfooding loop)
 

@@ -1,0 +1,18 @@
+[Unit]
+Description=FalconFox DEV daemon (dev branch, development checkout)
+
+[Service]
+# The development twin of falconfox-daemon.service. Everything that would
+# collide with the deployment is redirected: its own state (sessions,
+# transcripts, server.json), its own config, and its own pinned port.
+Environment=XDG_STATE_HOME=@HOME@/.local/state/falconfox-dev
+Environment=XDG_CONFIG_HOME=@HOME@/.config/falconfox-dev
+Environment=FALCONFOX_DAEMON=1
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=@HOME@/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+ExecStart=@REPO@/.venv/bin/falconfox daemon --foreground --port 9725
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
