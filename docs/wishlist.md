@@ -164,6 +164,33 @@ Pick it up when the shape has settled. The surface half could land earlier and
 independently — it adds a capability rather than a description, so it does not
 rot.
 
+## Some way to browse files, or let an agent show them over Telegram
+
+*From the phone, 2026-09-03.*
+
+Reading a file that a session produced or is working on means asking the agent
+to cat it into the chat, which is fine for ten lines and useless for anything
+structured. Downloading it as a Telegram document is worse: it lands wherever
+the phone puts downloads and then needs an app to open it.
+
+Two shapes, and they are not exclusive:
+
+* **A file view in the browser.** The most convenient by far, and the one that
+  collides with "Off-loopback remote access" below: the daemon API is
+  unauthenticated remote code execution held safe only by binding 127.0.0.1,
+  so anything served from it has to sit behind a private network (Tailscale or
+  similar) rather than an exposed port. Read-only first (list, view, inline
+  images, download), scoped to session workspaces, with the bot posting a deep
+  link into each topic so a session and its files are one tap apart.
+* **Sending files through Telegram.** A `/get <path>` command, or an agent able
+  to attach a file rather than paste it. Much smaller, needs no infrastructure
+  at all, and works when the VPN does not. Telegram renders images and previews
+  documents in-chat, so this covers more than it sounds like.
+
+Deferred because the browser half is a networking and auth decision before it
+is a feature, and the Telegram half is worth doing on its own whichever way
+that decision goes.
+
 ## Deliberately not planned
 
 **Off-loopback remote access + bearer token.** Listed in the pivot case as the
