@@ -24,7 +24,8 @@ from websockets.exceptions import ConnectionClosed
 from falconfox.watchdog import StallWatchdog
 
 from .api import ApiError, DaemonApi, TelegramApi
-from .rendering import render_messages
+from .rendering import TELEGRAM_MESSAGE_LIMIT, render_messages
+from .shell import ShellRunner, TmuxMissing, tail
 
 log = logging.getLogger("falconfox.telegram")
 
@@ -200,6 +201,10 @@ class FalconFoxTelegramBot:
         # and an unused session is a live subprocess against the cap.
         self.concierge_session_id: str | None = None
         self._reply_parts: dict[str, list[str]] = {}
+        # Shell jobs started with /sh. They run detached in tmux, so this is a
+        # view of them rather than ownership: a job outlives the bot, and a
+        # restarted bot forgets the ids while the tmux sessions carry on.
+        self._shell = ShellRunner(self.state_dir)
         # session -> the topic it owns, and the reverse. A turn's destination
         # is now just a thread id: the chat is always the forum. None means
         # General, which is the manager's topic.
@@ -991,6 +996,9 @@ class FalconFoxTelegramBot:
             return True
         # /switch is gone with the pointer: a session is addressed by writing
         # in its topic, so there is nothing left to switch.
+        if command in ("/sh", "/jobs", "/tail", "/kill"):
+            await self._shell_command(dest, command, text, parts)
+            return True
         if command == "/name":
             target = (self._threads.get(dest.thread)
                       if dest.thread is not None else None)
@@ -1003,6 +1011,95 @@ class FalconFoxTelegramBot:
             await self._say(dest, f"Renamed session to {' '.join(parts[1:])}.")
             return True
         return False
+
+    # --- shell ------------------------------------------------------------
+
+    async def _shell_command(self, dest: Dest, command: str, text: str,
+                             parts: list[str]) -> None:
+        if command == "/sh":
+            # Deliberately not shlex-split: the argument is a command line,
+            # and re-joining split tokens would quietly rewrite quoting.
+            body = text.split(None, 1)[1].strip() if len(parts) > 1 else ""
+            if not body:
+                await self._say(dest, "Usage: /sh <command>")
+                return
+            await self._run_shell(dest, body)
+            return
+        if command == "/jobs":
+            await self._say(dest, await self._jobs_report())
+            return
+        job = self._shell.jobs.get(parts[1]) if len(parts) > 1 else None
+        if job is None:
+            await self._say(dest, f"Usage: {command} <job id> — see /jobs.")
+            return
+        if command == "/tail":
+            body, clipped = tail(job.read_output(), TELEGRAM_MESSAGE_LIMIT - 200)
+            await self._say(dest, self._job_report(job, body, clipped))
+            return
+        killed = await self._shell.kill(job)
+        await self._say(dest, f"Killed {job.job_id}." if killed
+                        else f"Could not kill {job.job_id}; it may have finished.")
+
+    async def _run_shell(self, dest: Dest, body: str) -> None:
+        cwd = await self._shell_cwd(dest)
+        try:
+            job = await self._shell.start(body, cwd)
+        except (TmuxMissing, RuntimeError, OSError) as error:
+            await self._say(dest, f"Could not start the command: {error}")
+            return
+        log.info("shell job=%s cwd=%s command=%s", job.job_id, cwd, body)
+        await self._shell.wait(job)
+        body_text, clipped = tail(job.read_output(), TELEGRAM_MESSAGE_LIMIT - 200)
+        await self._say(dest, self._job_report(job, body_text, clipped))
+
+    async def _shell_cwd(self, dest: Dest) -> Path:
+        """A session's topic runs in that session's directory.
+
+        Resolved from the daemon, and falling back to the default path when it
+        cannot be reached -- a wedged daemon is precisely when /sh is worth
+        having, so it must not be what stops a command from running.
+        """
+        session_id = self._threads.get(dest.thread) if dest.thread is not None else None
+        if session_id is not None:
+            try:
+                meta = await self.daemon.session(session_id)
+            except ApiError:
+                log.warning("could not read the cwd for session %s", session_id)
+            else:
+                path = meta.get("path")
+                if path:
+                    return Path(path)
+        return Path(self.config.default_path)
+
+    def _job_report(self, job, body: str, clipped: bool) -> str:
+        status = job.read_status()
+        if status is None:
+            head = f"⏳ {job.job_id} still running ({job.elapsed:.0f}s)"
+        else:
+            head = f"{'✅' if status == 0 else '❌'} {job.job_id} exited {status}"
+        lines = [f"{head} — {job.cwd}", f"$ {job.command}"]
+        if clipped:
+            lines.append(f"(tail only; whole output in {job.log_path})")
+        lines.append(body or "(no output)")
+        if status is None:
+            lines.append(f"/tail {job.job_id} · /kill {job.job_id} · "
+                         f"tmux attach -t {job.session}")
+        return "\n".join(lines)
+
+    async def _jobs_report(self) -> str:
+        if not self._shell.jobs:
+            return ("No jobs from this bot process. Jobs outlive a restart: "
+                    "`tmux ls` on the host shows any that are still open.")
+        live = await self._shell.live_sessions()
+        lines = []
+        for job in self._shell.jobs.values():
+            status = job.read_status()
+            state = ("running" if status is None
+                     else f"exited {status}")
+            if job.session not in live:
+                state += ", pane gone"
+            lines.append(f"{job.job_id}  [{state}]  {job.cwd}  $ {job.command}")
+        return "\n".join(lines)
 
     async def _status_report(self) -> str:
         try:

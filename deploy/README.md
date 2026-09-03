@@ -133,6 +133,35 @@ Both units are rendered from `deploy/*.service`:
 Run each from its own checkout: `@REPO@` is filled in from the script's own
 location, so running the wrong one points a unit at the wrong tree.
 
+## Running commands from the chat
+
+`/sh <command>` runs a command on the host and replies with its output. In a
+session's topic it runs in that session's working directory; anywhere else it
+runs in the bot's default path. `/jobs` lists what this bot process started,
+`/tail <id>` re-reads a job's output, `/kill <id>` stops one.
+
+Each command runs in its own **tmux** session rather than as a child of the
+bot, which is what makes the interesting cases work:
+
+- A command outlives the bot, so `/sh` can restart the daemon, or the bot
+  itself, without killing the process that was asked to do the restarting.
+- A command that hangs can be attached to from a terminal, `tmux attach -t
+  ff-<id>`, which is the only way to see *where* it is stuck. The pane is left
+  open after the command exits, so a finished job can still be inspected.
+- Output is teed to `<state dir>/shell/<id>.log` as it is produced, so the
+  reply can show a tail while the job is still running and the whole thing
+  survives for later reading.
+
+The reply waits about 45 seconds and then says the job is still running rather
+than hanging the chat. Nothing is killed at that point; the job keeps going
+and stays readable.
+
+This is the recovery path when the daemon is wedged or at its session cap,
+which is when asking an agent to do it cannot work. It is also *ungated* in a
+way the agent path is not: an agent's commands are subject to its backend's
+own sandbox and permission rules, and `/sh` has none of that. It is owner-only
+for the same reason every other command is, and every invocation is logged.
+
 ## Updating (the dogfooding loop)
 
 Development happens in `.worktrees/` under the development checkout (or

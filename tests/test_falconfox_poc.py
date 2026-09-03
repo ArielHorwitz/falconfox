@@ -6,6 +6,7 @@ from dataclasses import replace
 import json
 import logging
 import os
+import shutil
 import tempfile
 import tomllib
 import time
@@ -22,6 +23,7 @@ from falconfox_telegram.api import ApiError, _json_request
 from falconfox_telegram.bot import (BUSY_TURN, Dest, DAEMON_DOWN, QUIET_TURN_SECONDS,
                                     TURN_ACTIONS, BotConfig, FalconFoxTelegramBot)
 from falconfox_telegram.rendering import TELEGRAM_MESSAGE_LIMIT, render_messages
+from falconfox_telegram.shell import ShellRunner, tail
 
 
 # Port 9 is the discard port: nothing listens, so a DaemonApi that is not
@@ -1732,6 +1734,102 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
             await bot._reconcile_persisted_turns()
             self.assertEqual(bot._turn_dest, {})
             self.assertEqual(bot.telegram.messages, [])
+
+
+class ShellRunnerTests(unittest.IsolatedAsyncioTestCase):
+    """The tmux-backed runner, exercised against real tmux where it exists."""
+
+    def setUp(self):
+        if shutil.which("tmux") is None:
+            self.skipTest("tmux is not installed")
+
+    async def _run(self, runner, command, cwd):
+        job = await runner.start(command, Path(cwd))
+        self.addAsyncCleanup(runner.kill, job)
+        return job, await runner.wait(job, timeout=30)
+
+    async def test_status_output_and_cwd_come_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = ShellRunner(Path(directory))
+            job, status = await self._run(runner, "pwd; exit 3", "/tmp")
+            self.assertEqual(status, 3)
+            self.assertIn("/tmp", job.read_output())
+
+    async def test_the_command_is_not_requoted(self):
+        # The command is written to a script rather than passed through two
+        # shells, so quoting survives verbatim. Re-joining shlex tokens here
+        # would break exactly the commands worth running by hand.
+        with tempfile.TemporaryDirectory() as directory:
+            runner = ShellRunner(Path(directory))
+            job, status = await self._run(
+                runner, """printf '%s' "a 'b' c" """, "/tmp")
+            self.assertEqual(status, 0)
+            self.assertEqual(job.read_output(), "a 'b' c")
+
+    async def test_a_slow_command_keeps_running_after_the_wait_gives_up(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = ShellRunner(Path(directory))
+            job = await runner.start("sleep 30", Path("/tmp"))
+            self.addAsyncCleanup(runner.kill, job)
+            self.assertIsNone(await runner.wait(job, timeout=1))
+            self.assertIn(job.session, await runner.live_sessions())
+            self.assertTrue(await runner.kill(job))
+
+
+class ShellCommandTests(unittest.IsolatedAsyncioTestCase):
+    """/sh routing: where it runs, and what it says when it cannot."""
+
+    class FakeRunner:
+        def __init__(self):
+            self.calls = []
+            self.jobs = {}
+
+        def available(self):
+            return True
+
+        async def start(self, command, cwd):
+            # Records and stops: these tests are about *where* a command is
+            # sent, which is decided before tmux is involved at all.
+            self.calls.append((command, Path(cwd)))
+            raise RuntimeError("stub runner")
+
+    def _bot(self, directory):
+        bot = FalconFoxTelegramBot(BotConfig(
+            "token", 7, daemon_url=UNREACHABLE_DAEMON, forum_chat_id=-1001,
+            state_dir=Path(directory), default_path=Path("/tmp"),
+        ))
+        bot.telegram = FakeTelegram()
+        bot._shell = self.FakeRunner()
+        return bot
+
+    async def test_a_topic_runs_in_its_session_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._bind("abcd1234", 42)
+
+            class Daemon:
+                async def session(self, session_id):
+                    return {"session_id": session_id, "path": "/srv/work"}
+
+            bot.daemon = Daemon()
+            await bot._command(Dest(-1001, 42), "/sh ls -la")
+            self.assertEqual(bot._shell.calls, [("ls -la", Path("/srv/work"))])
+
+    async def test_an_unreachable_daemon_falls_back_to_the_default_path(self):
+        # A wedged daemon is the case /sh exists for, so failing to resolve a
+        # session's directory must not stop the command from running.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._bind("abcd1234", 42)
+            await bot._command(Dest(-1001, 42), "/sh whoami")
+            self.assertEqual(bot._shell.calls, [("whoami", Path("/tmp"))])
+
+    async def test_bare_sh_explains_itself(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            await bot._command(Dest(-1001, None), "/sh   ")
+            self.assertEqual(bot._shell.calls, [])
+            self.assertIn("Usage: /sh", bot.telegram.messages[0][1])
 
 
 class RenderingTests(unittest.TestCase):
