@@ -172,13 +172,26 @@ def _quote(value: str) -> str:
 _CONTROL = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\r")
 
 
-def tail(text: str, limit: int) -> tuple[str, bool]:
-    """The last `limit` characters, and whether anything was dropped.
+def tail(text: str, limit: int, measure=len) -> tuple[str, bool]:
+    """The longest ending that fits `limit`, and whether anything was dropped.
 
     The *tail* rather than the head: a command that failed says why at the
     end, and that is the line worth spending the message on.
+
+    `measure` exists because the budget is in *sent* characters, not source
+    ones. Output goes to Telegram HTML-escaped, where a single `<` becomes
+    four characters, so measuring the raw text would overrun the message limit
+    on exactly the output most likely to contain markup.
     """
     cleaned = _CONTROL.sub("", text)
-    if len(cleaned) <= limit:
+    if measure(cleaned) <= limit:
         return cleaned, False
-    return cleaned[-limit:], True
+    # Binary search the suffix length: the measure only grows with it.
+    shortest, longest = 0, len(cleaned)
+    while shortest < longest:
+        candidate = (shortest + longest + 1) // 2
+        if measure(cleaned[-candidate:]) <= limit:
+            shortest = candidate
+        else:
+            longest = candidate - 1
+    return cleaned[-shortest:], True

@@ -152,6 +152,11 @@ bot, which is what makes the interesting cases work:
   reply can show a tail while the job is still running and the whole thing
   survives for later reading.
 
+Output comes back as a code block, for the reason any terminal is monospace:
+alignment carries meaning that a proportional font destroys. The tail is
+budgeted in *escaped* characters, since output containing markup costs several
+characters per one it shows.
+
 The reply waits about 45 seconds and then says the job is still running rather
 than hanging the chat. Nothing is killed at that point; the job keeps going
 and stays readable.

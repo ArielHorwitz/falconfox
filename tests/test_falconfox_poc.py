@@ -1824,6 +1824,22 @@ class ShellCommandTests(unittest.IsolatedAsyncioTestCase):
             await bot._command(Dest(-1001, 42), "/sh whoami")
             self.assertEqual(bot._shell.calls, [("whoami", Path("/tmp"))])
 
+    async def test_output_comes_back_as_a_code_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            await bot._say_block(Dest(-1001, None), "header", "a < b & c")
+            _, html_text, plain = bot.telegram.html_messages[0]
+            self.assertIn("<pre>a &lt; b &amp; c</pre>", html_text)
+            self.assertEqual(plain, "header\na < b & c")
+
+    def test_the_tail_budget_counts_escaped_length(self):
+        # Raw length would fit and the escaped message would then be rejected
+        # by Telegram, which is how output full of markup loses the whole
+        # message rather than its head.
+        body, clipped = tail("<" * 50, 40, measure=lambda value: len(value) * 4)
+        self.assertTrue(clipped)
+        self.assertEqual(len(body), 10)
+
     async def test_bare_sh_explains_itself(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)

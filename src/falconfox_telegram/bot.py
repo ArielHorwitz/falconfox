@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ import time
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
@@ -142,6 +143,13 @@ class BotConfig:
 # If that lands, move audio to `upload_voice` or move streaming to one of the
 # unused actions (`choose_sticker` aside, `find_location`, `upload_photo`, the
 # video ones).
+def _sent_length(text: str) -> int:
+    """How long `text` is once Telegram HTML-escaped: the length that counts
+    against the message limit, which for markup-heavy output is far more than
+    len() suggests."""
+    return len(html.escape(text, quote=False))
+
+
 TURN_ACTIONS = {
     "starting": "choose_sticker",    # resuming or launching the ACP subprocess
     "working": "typing",             # alive, but producing nothing right now
@@ -1026,15 +1034,20 @@ class FalconFoxTelegramBot:
             await self._run_shell(dest, body)
             return
         if command == "/jobs":
-            await self._say(dest, await self._jobs_report())
+            if not self._shell.jobs:
+                await self._say(dest, "No jobs from this bot process. Jobs "
+                                      "outlive a restart: `tmux ls` on the host "
+                                      "shows any that are still open.")
+                return
+            listing = await self._jobs_listing()
+            await self._say_block(dest, f"{len(self._shell.jobs)} job(s)", listing)
             return
         job = self._shell.jobs.get(parts[1]) if len(parts) > 1 else None
         if job is None:
             await self._say(dest, f"Usage: {command} <job id> — see /jobs.")
             return
         if command == "/tail":
-            body, clipped = tail(job.read_output(), TELEGRAM_MESSAGE_LIMIT - 200)
-            await self._say(dest, self._job_report(job, body, clipped))
+            await self._say_job(dest, job)
             return
         killed = await self._shell.kill(job)
         await self._say(dest, f"Killed {job.job_id}." if killed
@@ -1049,8 +1062,7 @@ class FalconFoxTelegramBot:
             return
         log.info("shell job=%s cwd=%s command=%s", job.job_id, cwd, body)
         await self._shell.wait(job)
-        body_text, clipped = tail(job.read_output(), TELEGRAM_MESSAGE_LIMIT - 200)
-        await self._say(dest, self._job_report(job, body_text, clipped))
+        await self._say_job(dest, job)
 
     async def _shell_cwd(self, dest: Dest) -> Path:
         """A session's topic runs in that session's directory.
@@ -1071,32 +1083,55 @@ class FalconFoxTelegramBot:
                     return Path(path)
         return Path(self.config.default_path)
 
-    def _job_report(self, job, body: str, clipped: bool) -> str:
-        status = job.read_status()
-        if status is None:
-            head = f"⏳ {job.job_id} still running ({job.elapsed:.0f}s)"
-        else:
-            head = f"{'✅' if status == 0 else '❌'} {job.job_id} exited {status}"
-        lines = [f"{head} — {job.cwd}", f"$ {job.command}"]
-        if clipped:
-            lines.append(f"(tail only; whole output in {job.log_path})")
-        lines.append(body or "(no output)")
-        if status is None:
-            lines.append(f"/tail {job.job_id} · /kill {job.job_id} · "
-                         f"tmux attach -t {job.session}")
-        return "\n".join(lines)
+    async def _say_job(self, dest: Dest, job) -> None:
+        """Report a job: a plain header, then its output as a code block.
 
-    async def _jobs_report(self) -> str:
-        if not self._shell.jobs:
-            return ("No jobs from this bot process. Jobs outlive a restart: "
-                    "`tmux ls` on the host shows any that are still open.")
+        Output is monospace for the reason any terminal is: a command's
+        alignment carries meaning, and Telegram's proportional font destroys
+        it. It also stops output that happens to contain markup from being
+        read as formatting.
+        """
+        status = job.read_status()
+        header = [f"{self._job_mark(job, status)} — {job.cwd}", f"$ {job.command}"]
+        if status is None:
+            header.append(f"/tail {job.job_id} · /kill {job.job_id} · "
+                          f"tmux attach -t {job.session}")
+        # The budget is what is left of the message once the header and the
+        # <pre> wrapper are paid for, measured after escaping.
+        spent = _sent_length("\n".join(header)) + len("<pre></pre>") + 80
+        body, clipped = tail(job.read_output(), TELEGRAM_MESSAGE_LIMIT - spent,
+                             measure=_sent_length)
+        if clipped:
+            header.append(f"(tail only; whole output in {job.log_path})")
+        await self._say_block(dest, "\n".join(header), body or "(no output)")
+
+    def _job_mark(self, job, status: Optional[int]) -> str:
+        if status is None:
+            return f"⏳ {job.job_id} still running ({job.elapsed:.0f}s)"
+        return f"{'✅' if status == 0 else '❌'} {job.job_id} exited {status}"
+
+    async def _say_block(self, dest: Dest, header: str, body: str) -> None:
+        """Send `header` as text and `body` as a code block.
+
+        Built directly rather than through render_messages: the body is
+        arbitrary command output, and handing it to a markdown renderer would
+        let a stray fence or asterisk in it decide the formatting.
+        """
+        await self.telegram.html_message(
+            dest.chat,
+            f"{html.escape(header, quote=False)}\n<pre>{html.escape(body, quote=False)}</pre>",
+            f"{header}\n{body}",
+            thread=dest.thread)
+
+    async def _jobs_listing(self) -> str:
         live = await self._shell.live_sessions()
         lines = []
         for job in self._shell.jobs.values():
             status = job.read_status()
-            state = ("running" if status is None
-                     else f"exited {status}")
+            state = "running" if status is None else f"exited {status}"
             if job.session not in live:
+                # The pane is gone, so there is nothing left to attach to --
+                # worth saying, since the id still reads as usable otherwise.
                 state += ", pane gone"
             lines.append(f"{job.job_id}  [{state}]  {job.cwd}  $ {job.command}")
         return "\n".join(lines)
