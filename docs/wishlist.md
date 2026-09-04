@@ -191,6 +191,25 @@ Deferred because the browser half is a networking and auth decision before it
 is a feature, and the Telegram half is worth doing on its own whichever way
 that decision goes.
 
+## Tell a session when its turn was interrupted
+
+*From the session-context discussion, 2026-09-04.*
+
+A turn killed mid-flight by a daemon restart or an eviction leaves no trace
+the agent can see. Its next turn opens on the user's next message as if
+nothing happened, so it cannot tell whether the work it was doing finished,
+half-finished, or never started, and it will often assert one of those
+confidently.
+
+FalconFox knows what the session cannot: it had a turn in flight when it
+stopped, and roughly how far in. The fix is to say so on the next send, in the
+same hidden-context channel that already re-sends a transcript to a backend
+without native resume.
+
+Deferred because it is a second producer for a channel whose first one, the
+FalconFox session context, is not built yet. Worth doing right after, and not
+before.
+
 ## Deliberately not planned
 
 **Off-loopback remote access + bearer token.** Listed in the pivot case as the
