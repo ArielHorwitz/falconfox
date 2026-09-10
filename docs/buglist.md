@@ -86,6 +86,34 @@ causing it, which starved clients of the one durable record of the change.
 That sweep was dropped on 2026-09-10 to take it out of the picture, and
 whether the intermittency survives without it is the open question.
 
+## Command output is too wide for a phone
+
+*Reported from use, 2026-09-10. Narrowed to mobile the same day.*
+
+Anything that reaches Telegram as monospace is formatted for a terminal, and a
+terminal is not what is reading it. `falconfox list` prints a fixed-width
+table whose columns grow to fit their contents and whose last column is a full
+path, which is ninety-odd columns for an ordinary listing. Shell job output
+relayed by `_say_job` is whatever the command chose to print. Both land in a
+`<pre>` block, where a phone has a fraction of that width to draw them in.
+
+The bot's own listings do not have the problem, which is the useful contrast:
+`_session_entry` writes one proportional-font line per session and expects it
+to reflow. `<pre>` reflows as well — it wraps, on mobile and on desktop both —
+but what goes into it was built assuming it would not.
+
+So nothing is cut off or scrolled out of reach: it is wrapped. A wrapped row
+of a fixed-width table has lost exactly the alignment that monospace was
+chosen to protect, which `_say_job` says in as many words. `<pre>` is wide
+enough that `/sh` and `/jobs` rarely trip this on desktop at fullscreen.
+Mobile is not, even at the smallest font setting — and mobile is the case that
+matters, since the phone is what falconfox is driven from.
+
+The fix wants a notion of how wide the reader is, which nothing here has: the
+CLI formats the same way whether a terminal or a phone is asking. A thinner
+default layout, a configured width, or a narrow human form alongside `--json`
+for the agent — undecided, and worth deciding before any of it is built.
+
 ## Known-broken by design
 
 **The web UI does not work against the flat session model.** Flattening removed
