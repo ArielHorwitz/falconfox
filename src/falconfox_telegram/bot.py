@@ -1726,7 +1726,7 @@ class FalconFoxTelegramBot:
             sessions = await self.daemon.sessions(include_hidden=True)
             current = next((item.get("tags") or [] for item in sessions
                             if item["session_id"] == session_id), [])
-            await self._say(dest, self._tags_report(current))
+            await self._say(dest, self._tags_report(current, vocabulary=True))
             return
         try:
             session = await self.daemon.tag(session_id, [] if tags == ["-"] else tags)
@@ -1793,15 +1793,24 @@ class FalconFoxTelegramBot:
                         + (f"{len(remaining)} still waiting." if remaining
                            else "The tray is empty."))
 
-    def _tags_report(self, tags: list[str]) -> str:
-        """What the tags are, and which of them is the one being drawn."""
+    def _tags_report(self, tags: list[str], vocabulary: bool = False) -> str:
+        """What the tags are, and which of them is the one being drawn.
+
+        The configured vocabulary is only for a bare `/tags`, which is the
+        question "what can I set?". Repeating it after every set answered a
+        question nobody asked, and it is the longest part of the message.
+        """
         lines = [f"🏷 {', '.join(tags)}" if tags else "🏷 No tags."]
         drawn = next((tag for tag in tags if tag in self._icon_emoji), None)
         if drawn:
             lines.append(f"Topic icon: {self._icon_emoji[drawn]} (from {drawn})")
-        if self._icon_emoji:
-            lines.append("Configured: " + " · ".join(
-                f"{glyph} {tag}" for tag, glyph in self._icon_emoji.items()))
+        if vocabulary and self._icon_emoji:
+            # One per line: this is a list to read down and pick from, and
+            # separator-joined it wrapped into an unreadable run.
+            lines.append("")
+            lines.append("Configured icons:")
+            lines.extend(f"{glyph} {tag}"
+                         for tag, glyph in self._icon_emoji.items())
         return "\n".join(lines)
 
     async def _stop_command(self, dest: Dest, command: str) -> None:

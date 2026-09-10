@@ -2997,7 +2997,18 @@ class TagsCommandTests(unittest.IsolatedAsyncioTestCase):
             body = bot.telegram.messages[0][1]
             self.assertIn("❗️ (from urgent)", body,
                           "the first mapped tag is the one on the topic")
-            self.assertIn("📁 archived", body, "the rest are still offered")
+            self.assertNotIn("Configured icons:", body,
+                             "setting tags does not need the whole vocabulary")
+
+    async def test_the_vocabulary_is_offered_on_a_bare_tags_only(self):
+        # It is the longest part of the message and answers "what can I set?",
+        # which is the bare form's question and not the setting form's.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            await bot._handle_update(self._update("/tags"))
+            body = bot.telegram.messages[0][1]
+            self.assertIn("\n📁 archived", body, "one per line, to read down")
+            self.assertIn("\n❗️ urgent", body)
 
     async def test_tags_replace_the_whole_list(self):
         with tempfile.TemporaryDirectory() as directory:
