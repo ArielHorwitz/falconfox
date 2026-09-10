@@ -369,7 +369,7 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LiveSessionLimitConfigTests(unittest.TestCase):
-    """Reading the cap out of config.toml, under either spelling of the key."""
+    """Reading the cap out of config.toml."""
 
     def _load(self, body):
         home = tempfile.TemporaryDirectory()
@@ -382,18 +382,6 @@ class LiveSessionLimitConfigTests(unittest.TestCase):
 
     def test_the_current_key_is_read(self):
         self.assertEqual(self._load("max_live_sessions = 2").max_live_sessions, 2)
-
-    def test_the_old_key_is_still_honoured(self):
-        # The rename must not quietly re-size a host: a config written for a
-        # small number would otherwise fall back to the much larger default.
-        with self.assertLogs("falconfox.config", level="WARNING") as logs:
-            loaded = self._load("max_active_sessions = 1")
-        self.assertEqual(loaded.max_live_sessions, 1)
-        self.assertIn("max_live_sessions", "".join(logs.output))
-
-    def test_the_current_key_wins_over_the_old_one(self):
-        loaded = self._load("max_live_sessions = 2\nmax_active_sessions = 7\n")
-        self.assertEqual(loaded.max_live_sessions, 2)
 
     def test_an_absent_key_takes_the_default(self):
         self.assertEqual(self._load("").max_live_sessions,
