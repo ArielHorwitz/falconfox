@@ -574,10 +574,6 @@ class FakeTelegram:
         self.reactions = getattr(self, "reactions", [])
         self.reactions.append((message_id, emoji))
 
-    async def delete_message(self, chat_id, message_id):
-        self.deleted_messages = getattr(self, "deleted_messages", [])
-        self.deleted_messages.append((chat_id, message_id))
-
     async def rename_topic(self, chat_id, thread, name):
         self.renamed = getattr(self, "renamed", [])
         self.renamed.append((thread, name))
@@ -2667,28 +2663,19 @@ class TopicIconTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bot._icon_map, {"archived": "5001", "raw": "999"},
                              "an emoji outside the allowed set is dropped, not sent")
 
-    async def test_the_icon_notice_is_swept_but_a_rename_notice_is_not(self):
+    async def test_an_icon_notice_is_left_alone(self):
+        # The bot used to delete this notice about 60ms after causing it.
+        # Topic icons intermittently failed to reach clients and that notice
+        # is the only durable record of the change, so it stays now.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             await bot._handle_update({"message": {
                 "chat": {"id": -1001}, "message_id": 7, "message_thread_id": 42,
                 "forum_topic_edited": {"icon_custom_emoji_id": "5001"}}})
-            await bot._handle_update({"message": {
-                "chat": {"id": -1001}, "message_id": 8, "message_thread_id": 42,
-                "forum_topic_edited": {"name": "renamed"}}})
-            self.assertEqual(bot.telegram.deleted_messages, [(-1001, 7)])
-
-    async def test_the_notice_is_swept_though_the_bot_itself_authored_it(self):
-        # Observed live: the notice arrives authored by the bot, so the
-        # non-owner guard dropped it before the sweep ever ran and every icon
-        # change left its "changed the topic icon" line in the topic.
-        with tempfile.TemporaryDirectory() as directory:
-            bot = self._bot(directory)
-            await bot._handle_update({"message": {
-                "chat": {"id": -1001}, "message_id": 7, "message_thread_id": 42,
-                "from": {"id": 9999},
-                "forum_topic_edited": {"icon_custom_emoji_id": "5001"}}})
-            self.assertEqual(bot.telegram.deleted_messages, [(-1001, 7)])
+            # `delete_message` is gone from the client entirely, so a bot
+            # that still tried to sweep would raise here rather than assert.
+            self.assertEqual(bot.telegram.messages, [],
+                             "the notice is evidence for clients, not litter")
 
     async def test_reconciling_remembers_the_titles_it_found(self):
         # Without this the title map is empty after a restart, so the first

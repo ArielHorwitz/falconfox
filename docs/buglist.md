@@ -105,10 +105,35 @@ the same tag does nothing: the bot believes the topic already wears it. The
 workaround is to tag through a different value and back, which forces two real
 edits.
 
-Seen once, 2026-09-09, as an icon that did not appear to change on setting a
-tag. That instance turned out to be a client-side render lag rather than a
-lost update -- the call went out and Telegram accepted it -- so this is the
-fragility the incident exposed rather than the incident itself.
+Seen first on 2026-09-09 and read then as client-side render lag. That
+reading was wrong, see below.
+
+## Topic icons intermittently do not reach clients
+
+A tag change sometimes leaves a client showing the previous icon, at random:
+most changes land, some do not. Measured on 2026-09-10, the half we own is
+provably healthy. The daemon emits `session_updated`, the bot applies the
+icon in well under a second, and Telegram accepts the edit. Re-sending the
+same icon afterwards answers `TOPIC_NOT_MODIFIED`, which is the only way to
+read a topic's icon back, since `getForumTopic` and `getForumTopics` do not
+exist (re-measured 2026-09-10, still 404). So the server holds what the bot
+believes it holds, and the divergence is downstream of that.
+
+Two things were ruled out. It is not render lag: a stale icon survived a
+full client cache clear, so the client was being served the stale value
+rather than failing to draw the fresh one. It is not lost service messages
+being replayed either, since the topic history contains none.
+
+One aggravator is known. Several icon edits in quick succession (three in
+1.3 seconds, while testing) left the authoritative icon correct but clients
+stuck on the *first* of the burst, which suggests Telegram's own topic-list
+index races rapid edits. Ordinary tagging does not usually burst like that,
+so this explains a test artifact rather than the reported symptom.
+
+The bot used to delete the "changed the topic icon" notice about 60ms after
+causing it, which starved clients of the one durable record of the change.
+That sweep was dropped on 2026-09-10 to take it out of the picture, and
+whether the intermittency survives without it is the open question.
 
 ## Known-broken by design
 

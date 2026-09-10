@@ -438,7 +438,7 @@ Facts about Telegram, not about this deployment:
    id that goes stale moments later. This is the most likely way a setup
    silently half-works.
 3. The bot can be added already promoted, in one tap, with
-   `https://t.me/{bot_name}?startgroup&admin=manage_topics+delete_messages`.
+   `https://t.me/{bot_name}?startgroup&admin=manage_topics`.
    Offer the link rather than describing permission screens.
 
 So the short path is: the user creates a group and enables Topics, then taps
@@ -448,10 +448,9 @@ A working forum is a supergroup with `is_forum`, the bot an administrator, and
 `can_manage_topics`. When one is missing, say which one. "The bot is not an
 admin there" is useful; "setup failed" is not.
 
-`can_delete_messages` is wanted but not required: the deeplink above asks for
-it, and without it Telegram's "changed the topic icon" notices pile up in the
-chat because the bot cannot clear them. A forum missing only that right is
-working, and saying it is broken would be wrong.
+`can_delete_messages` is not needed. Changing a topic icon posts a "changed
+the topic icon" notice and the bot leaves it alone, so there is nothing here
+that deletes messages.
 
 ## Where work belongs
 
@@ -1167,33 +1166,6 @@ class FalconFoxTelegramBot:
             log.warning("could not persist the learned forum", exc_info=True)
         log.info("forum learned: %s", chat_id)
 
-    async def _sweep_icon_notice(self, message: dict) -> None:
-        """Delete the "changed the topic icon" notice the bot just caused.
-
-        Setting an icon posts a service message into the topic, which would
-        make a tag change cost a line of chat -- the clutter the two-message
-        turn was designed to avoid. The bot cannot suppress it, so it deletes
-        it on the way back, best-effort: without `can_delete_messages` the
-        call simply fails and the notice stays.
-
-        Narrowly icon-only edits. A rename carries `name` in the same event,
-        and that notice is left alone: it is not what this feature added.
-        """
-        edited = message.get("forum_topic_edited")
-        if not isinstance(edited, dict):
-            return
-        if "icon_custom_emoji_id" not in edited or "name" in edited:
-            return
-        chat_id = (message.get("chat") or {}).get("id")
-        message_id = message.get("message_id")
-        if chat_id is None or message_id is None:
-            return
-        try:
-            await self.telegram.delete_message(chat_id, message_id)
-        except ApiError:
-            log.debug("could not delete an icon-change notice in %s",
-                      chat_id, exc_info=True)
-
     def _load_topics(self) -> None:
         try:
             raw = json.loads(self._topics_file.read_text())
@@ -1371,8 +1343,9 @@ class FalconFoxTelegramBot:
     async def _apply_icon(self, session: dict, thread: int) -> None:
         """Put the session's tag icon on its topic, if it is not there already.
 
-        Every edit posts a service message into the topic, so this acts only
-        on a real change -- and the bot deletes the echo when it arrives.
+        Every edit posts a service message into the topic and the bot no
+        longer deletes it, so acting on a non-change would be visible chat
+        noise. Hence the guard: only a real change is sent.
         """
         if not self._icon_map:
             return
@@ -1505,13 +1478,7 @@ class FalconFoxTelegramBot:
             return False, "the bot is not an administrator there"
         if not member.get("can_manage_topics"):
             return False, "the bot lacks the Manage Topics right there"
-        usable = f"{chat.get('title') or chat_id} is a usable forum"
-        if not member.get("can_delete_messages"):
-            # Not a failure: everything works, but each tag change leaves a
-            # "changed the topic icon" notice the bot cannot sweep.
-            usable += (" — but without the Delete Messages right, so topic "
-                       "icon notices will stay in the chat")
-        return True, usable
+        return True, f"{chat.get('title') or chat_id} is a usable forum"
 
     async def _maybe_adopt_forum(self, chat_id: int) -> None:
         """Take a group as the forum when there is no working one."""
@@ -1567,10 +1534,6 @@ class FalconFoxTelegramBot:
                 await self._handle_membership(membership)
             return
         message = update.get("message") or {}
-        # Before identity is judged, and nothing else is: the notice an icon
-        # change causes is authored by the bot, so every later guard drops it
-        # -- and it is the one message here that exists to be deleted.
-        await self._sweep_icon_notice(message)
         sender = (message.get("from") or {}).get("id")
         if sender is not None and sender != self.config.owner_id:
             # "Which chat" used to answer "who": every configured chat was the
