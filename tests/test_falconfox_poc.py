@@ -3000,6 +3000,34 @@ class TagsCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Configured icons:", body,
                              "setting tags does not need the whole vocabulary")
 
+    async def test_tags_that_draw_nothing_say_so(self):
+        # Silence here reads as "it worked" while the topic quietly keeps
+        # whatever icon it had.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            await bot._handle_update(self._update("/tags notes review"))
+            body = bot.telegram.messages[0][1]
+            self.assertIn("⚠️ No icon for these.", body)
+            self.assertIn("Send /tags", body, "say what to do about it")
+
+    async def test_the_bare_form_does_not_point_at_itself(self):
+        # The vocabulary is already in this message, so pointing at /tags
+        # would point at the message it is in.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot.daemon.tags = ["notes"]
+            await bot._handle_update(self._update("/tags"))
+            body = bot.telegram.messages[0][1]
+            self.assertIn("⚠️ No icon for these.", body)
+            self.assertNotIn("Send /tags", body)
+            self.assertIn("Configured icons:", body)
+
+    async def test_no_tags_at_all_is_not_a_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            await bot._handle_update(self._update("/tags -"))
+            self.assertNotIn("⚠️", bot.telegram.messages[0][1])
+
     async def test_the_vocabulary_is_offered_on_a_bare_tags_only(self):
         # It is the longest part of the message and answers "what can I set?",
         # which is the bare form's question and not the setting form's.

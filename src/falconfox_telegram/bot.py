@@ -1804,6 +1804,16 @@ class FalconFoxTelegramBot:
         drawn = next((tag for tag in tags if tag in self._icon_emoji), None)
         if drawn:
             lines.append(f"Topic icon: {self._icon_emoji[drawn]} (from {drawn})")
+        elif tags and self._icon_emoji:
+            # Tags that draw nothing are perfectly ordinary, but staying
+            # quiet about it reads as "it worked", and the topic silently
+            # keeping its old icon is the thing worth saying.
+            warning = "⚠️ No icon for these."
+            if not vocabulary:
+                # The bare form lists them just below, so pointing at it
+                # would point at the message it is already in.
+                warning += " Send /tags to see the ones that draw."
+            lines.append(warning)
         if vocabulary and self._icon_emoji:
             # One per line: this is a list to read down and pick from, and
             # separator-joined it wrapped into an unreadable run.
