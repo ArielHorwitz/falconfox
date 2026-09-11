@@ -190,3 +190,97 @@ during a run of back-to-back calls. Not a capability limit, but it means
 bulk topic work — reconciling many sessions at startup, say — needs the same
 retry discipline as any other Telegram call, and cannot assume a tight loop
 will succeed.
+
+## Icons and titles, measured again (2026-09-10 and 2026-09-11)
+
+Measured against the **dev** bot in the live forum, a year of Bot API later,
+while settling what topics should display.
+
+### There is still no way to read a topic back
+
+`getForumTopic` and `getForumTopics` both return **404 Not Found**
+(re-measured 2026-09-10). The earlier finding stands.
+
+There is a workaround worth knowing, because it is the only one: **re-send
+the icon you believe is set.** Telegram answers `TOPIC_NOT_MODIFIED` when it
+already holds that value, and `ok: true` when it did not. That turns
+`editForumTopic` into a one-bit read oracle, and it is how the bot half of the
+stale-icon investigation was proved healthy.
+
+The probe is not free. It is idempotent only when the guess is right, and a
+wrong guess *changes* the icon, which is exactly what happened once during the
+investigation.
+
+### The 112 are a hard ceiling for a bot
+
+`getForumTopicIconStickers` returns 112 custom emoji, all from the set named
+`Topics`. Custom emoji taken from any other set (`RestrictedEmoji`,
+`EmojiStatus`, `DuckEmoji` were tried) are refused:
+
+```
+Bad Request: PREMIUM_ACCOUNT_REQUIRED
+```
+
+Per [core.telegram.org/api/forum](https://core.telegram.org/api/forum),
+Premium users may pass any custom emoji while everyone else is confined to
+that pack. **A bot cannot hold Premium**, so there is no automated route to a
+wider vocabulary. A Premium *user* can still set any emoji by hand.
+
+### Titles take anything
+
+By contrast the topic **name** is free text, 1 to 128 characters. Accepted
+live: an arbitrary emoji outside the icon set (🦖), a multi-codepoint ZWJ
+sequence (🏳️‍🌈), and mixed RTL and non-Latin script.
+
+**So the vocabulary limit applies to the icon slot alone.** Anything that
+needs a wide alphabet belongs in the title.
+
+### icon_color exists, and is write-once
+
+`createForumTopic` takes an optional `icon_color` from six values: `0x6FB92F`,
+`0xFFB139`, `0xFB295C`, `0xEC239D`, `0x8540F1`, `0x40ADF5`. `editForumTopic`
+does **not** accept it. A topic's colour is fixed for life at creation, so
+every topic the client has already made is stuck with whatever it was given.
+
+The colour is what fills the **default badge**, shown when no custom emoji is
+set. Measured on mobile: that badge is a talking bubble, blue by default, and
+when the title begins with an emoji followed by text it renders a **question
+mark**.
+
+**Consequence: clearing the icon is not a neutral resting state.** A client
+that prefixes glyphs onto titles must set an explicit icon rather than clear
+one.
+
+### Service messages are the topic list preview
+
+Every icon change posts a `forum_topic_edited` service message, and the topic
+list draws it as that topic's preview row, displacing the last real message.
+
+Deleting it is not the answer. That was tried and it broke clients (see the
+"Topic icons intermittently do not reach clients" entry in
+[buglist.md](../../buglist.md): the notice is the only durable record a client
+that was offline has of the change). **Ordering is the answer.** Issue the
+icon change immediately before a message the bot was going to send anyway and
+the notice is buried the moment it lands.
+
+This rules out debouncing an icon change, because editing a message does not
+move it. A change deferred until a state had held for N seconds arrives after
+the progress message already exists, and sits on top as the newest thing.
+
+### Rate limits, documented and observed
+
+The documented limits are deliberately vague: about **20 messages per minute
+to a group**, roughly one per second to a single chat, around 30 per second
+overall, and 429 on exceeding.
+
+The group limit is the binding one and it is easy to underestimate, because
+**a forum is a single group**. Every topic is a thread inside it and they all
+share one budget.
+
+Observed here: `unpinAllForumTopicMessages` returned `Too Many Requests: retry
+after 3` on back-to-back calls (2026-08-29). Whether the service message from
+an `editForumTopic` counts against the group budget is undocumented and was
+not measured.
+
+**This is why the icon carries `live` and not turn state.** Turn state changes
+twice per turn. Liveness changes when sessions are switched.
