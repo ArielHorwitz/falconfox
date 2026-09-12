@@ -44,6 +44,9 @@ DAEMON_UP = "\u2705 FalconFox is up"
 # it is worse than noise: the caller never records what it wanted, so it asks
 # again on the next event, forever.
 TOPIC_UNCHANGED = "TOPIC_NOT_MODIFIED"
+# Seconds to wait after a reconcile call that actually fired. See the comment
+# in `_reconcile_topics` for why this is paced on work rather than on loops.
+RECONCILE_PACE = 4.0
 
 # What happened to the message the user sent, marked on that message itself.
 # A reaction costs no message and no service message, which is the whole
@@ -370,13 +373,13 @@ manager in General, or the private chat's own session.
 
 - `/id` prints this chat's session id, tap-to-copy. Cheaper than asking an
   agent, which costs a turn.
-- `/tags [tags...]` shows this session's tags, or replaces them; `-` clears.
-  The forum draws the first tag it has a configured icon for as the topic
-  icon. The call replaces the whole list, so tags are carried forward by
-  repeating them.
+- `/tag [tags...]` shows this session's tags, or replaces them; `-` clears.
+  Every tag with a configured glyph is drawn at the front of the topic title,
+  in the order the tags were set. The call replaces the whole list, so tags
+  are carried forward by repeating them.
 - `/tray [ids...]` shows the files waiting to be sent with the next
   message, or removes them by id; `-` clears the lot. Note the sense is the
-  opposite of `/tags`: arguments **remove**, they do not replace. Removing a
+  opposite of `/tag`: arguments **remove**, they do not replace. Removing a
   file deletes it, since it was never going to reach you.
 - `/name <name>` renames the session whose topic it is typed in, and retitles
   the topic to match. Only in a topic: General and the private chat have no
@@ -495,7 +498,7 @@ COMMANDS = (
     ("/home [name]", "spawn in the default path", MANAGEMENT),
     ("/status", "show daemon status", MANAGEMENT),
     ("/id", "session id", SESSION),
-    ("/tags [tags...]", "show or set tags (`-` clears)", SESSION),
+    ("/tag [tags...]", "show or set tags (`-` clears)", SESSION),
     ("/tray [ids...]", "show waiting files, or remove them (`-` clears)", SESSION),
     ("/stop", "end the turn", SESSION),
     ("/unqueue", "drop the queue", SESSION),
@@ -635,8 +638,9 @@ class FalconFoxTelegramBot:
         # General, which is the manager's topic.
         self._topics: dict[str, int] = {}
         self._threads: dict[int, str] = {}
-        # Last title mirrored onto each topic, so the steady stream of
-        # session_updated events only acts on a real change.
+        # Last *composed* title mirrored onto each topic -- glyphs and name
+        # together -- so the steady stream of session_updated events only acts
+        # on a real change, whether the name moved or the tags did.
         self._topic_names: dict[str, str] = {}
         # Last icon applied to each topic ("" for none). Remembered rather
         # than read back, because the Bot API cannot report a topic's current
@@ -644,12 +648,13 @@ class FalconFoxTelegramBot:
         # would re-apply on every startup, and every re-application is a
         # service message in the topic.
         self._topic_icons: dict[str, str] = {}
-        # tag -> custom emoji id, resolved once at startup from the user's
-        # `[telegram.topic_icons]` map. Empty when they configured none.
-        self._icon_map: dict[str, str] = {}
-        # The same map as configured, kept for showing: /tags can print the
-        # glyph itself, where the id is nineteen digits of nothing.
+        # tag -> glyph, from `[telegram.tag_icons]`. Drawn into the title,
+        # which is free text, so these are used as configured: no resolution
+        # against the forum icon set and nothing to validate.
         self._icon_emoji: dict[str, str] = {}
+        # The one icon every topic wears, resolved once at startup from
+        # `telegram.default_topic_icon`. "" when unset or unresolvable.
+        self._default_icon: str = ""
         self._turn_dest: dict[str, Dest] = {}
         # Messages typed while a turn was running, per session, each with the
         # message id that carried it. Held here rather than in the daemon,
@@ -768,7 +773,7 @@ class FalconFoxTelegramBot:
         if self.forum_chat_id is not None:
             await self._ensure_manager()
         try:
-            await self._load_icon_map()
+            await self._load_icons()
         except Exception:
             log.warning("could not load the topic icon map", exc_info=True)
         try:
@@ -1176,9 +1181,17 @@ class FalconFoxTelegramBot:
         # old one would make a second topic for every existing session.
         topics = raw.get("topics", raw) if isinstance(raw, dict) else {}
         icons = raw.get("icons", {}) if isinstance(raw, dict) else {}
+        names = raw.get("names", {}) if isinstance(raw, dict) else {}
         self._topics = {k: int(v) for k, v in topics.items() if isinstance(v, int)}
         self._threads = {v: k for k, v in self._topics.items()}
         self._topic_icons = {k: str(v) for k, v in icons.items()
+                             if k in self._topics}
+        # Titles are remembered across restarts rather than guessed at. The
+        # Bot API cannot read a topic's title back, so the alternative is to
+        # re-send it on every start and let Telegram reject it -- which is a
+        # wasted call per session per start, and the reconciler now pauses
+        # after every call that fires.
+        self._topic_names = {k: str(v) for k, v in names.items()
                              if k in self._topics}
 
     def _persist_topics(self) -> None:
@@ -1187,7 +1200,8 @@ class FalconFoxTelegramBot:
             self.state_dir.mkdir(parents=True, exist_ok=True)
             temporary = self._topics_file.with_suffix(".tmp")
             temporary.write_text(json.dumps(
-                {"topics": self._topics, "icons": self._topic_icons}))
+                {"topics": self._topics, "icons": self._topic_icons,
+                 "names": self._topic_names}))
             temporary.replace(self._topics_file)
         except OSError:
             log.warning("could not persist the topic map", exc_info=True)
@@ -1290,76 +1304,97 @@ class FalconFoxTelegramBot:
         if thread is not None:
             self._threads.pop(thread, None)
             self._topic_icons.pop(session_id, None)
+            self._topic_names.pop(session_id, None)
             self._persist_topics()
         return thread
 
-    async def _load_icon_map(self) -> None:
-        """Resolve the configured tag→icon map into custom emoji ids.
+    async def _load_icons(self) -> None:
+        """Read the tag glyphs, and resolve the one configured topic icon.
 
-        The map is written in emoji (`archived = "📁"`) because nobody
-        maintains nineteen-digit ids by hand, and `getForumTopicIconStickers`
-        turns one into the other for free -- no arguments, no admin rights.
-        A raw id is passed through, for anything the endpoint does not list.
+        The two halves have deliberately different rules. Tag glyphs are drawn
+        into the *title*, which is free text, so they are taken as written and
+        any emoji works. The topic icon slot accepts only Telegram's own forum
+        set, so that one value is checked against
+        `getForumTopicIconStickers`, which turns an emoji into the
+        nineteen-digit id for free -- no arguments, no admin rights. A raw id
+        is passed through, for anything the endpoint does not list.
 
-        Failure is not fatal: the forum works without icons, so a bad entry
+        Failure is not fatal: the forum works without either, so a bad entry
         drops out with a warning rather than taking the client down.
         """
-        configured = falconfox_config.topic_icons()
+        self._icon_emoji = falconfox_config.tag_icons()
+        if self._icon_emoji:
+            log.info("tag glyphs configured for: %s", sorted(self._icon_emoji))
+        configured = falconfox_config.default_topic_icon()
         if not configured:
+            return
+        if configured.isdigit():
+            self._default_icon = configured
             return
         try:
             stickers = await self.telegram.icon_stickers()
         except ApiError:
-            log.warning("could not read the topic icon set; icons are off",
-                        exc_info=True)
+            log.warning("could not read the topic icon set; the default "
+                        "topic icon is off", exc_info=True)
             return
         by_emoji = {item.get("emoji"): item.get("custom_emoji_id")
                     for item in stickers if item.get("custom_emoji_id")}
-        for tag, value in configured.items():
-            if value.isdigit():
-                self._icon_map[tag] = value
-            elif value in by_emoji:
-                self._icon_map[tag] = by_emoji[value]
-                self._icon_emoji[tag] = value
-            else:
-                log.warning("topic icon for tag %r is not an allowed forum "
-                            "icon: %r", tag, value)
-        log.info("topic icons configured for tags: %s", sorted(self._icon_map))
-
-    def _icon_for(self, session: dict) -> str:
-        """The icon a session's tags ask for, or "" for none.
-
-        First match wins, in the order the tags were set: one topic has one
-        icon slot, and the user's ordering is how they say which tag matters
-        most. A tag with no mapping falls through to the next one, so tags
-        stay useful whether or not they are drawn.
-        """
-        for tag in session.get("tags") or []:
-            icon = self._icon_map.get(tag)
-            if icon:
-                return icon
-        return ""
-
-    async def _apply_icon(self, session: dict, thread: int) -> None:
-        """Put the session's tag icon on its topic, if it is not there already.
-
-        Every edit posts a service message into the topic and the bot no
-        longer deletes it, so acting on a non-change would be visible chat
-        noise. Hence the guard: only a real change is sent.
-        """
-        if not self._icon_map:
+        if configured not in by_emoji:
+            log.warning("the default topic icon %r is not an allowed forum "
+                        "icon; the icon slot is left alone", configured)
             return
+        self._default_icon = by_emoji[configured]
+        log.info("default topic icon: %s", configured)
+
+    def _glyphs_for(self, session: dict) -> str:
+        """The tag glyphs a session's title carries, in tag order.
+
+        Every mapped tag is drawn, because the title has room for all of them.
+        That is the whole point of moving them here: the icon slot held one,
+        so tag order had to mean priority, and now it only means order.
+        """
+        return "".join(self._icon_emoji[tag]
+                       for tag in session.get("tags") or []
+                       if tag in self._icon_emoji)
+
+    def _title_for(self, session: dict) -> str:
+        """The composed topic title: tag glyphs, then the session name.
+
+        Always recomputed from the name and never parsed back out of an
+        existing title, so a session whose *name* contains an emoji cannot be
+        mistaken for one wearing a glyph.
+
+        The 128-character cap is spent on the name: the slice takes the tail,
+        which is the name's end, and leaves the glyphs standing.
+        """
+        name = session.get("name") or session.get("session_id") or ""
+        glyphs = self._glyphs_for(session)
+        return f"{glyphs} {name}"[:128] if glyphs else name[:128]
+
+    async def _apply_icon(self, session: dict, thread: int) -> bool:
+        """Put the default icon on a topic, if it is not there already.
+
+        Every topic wears the same one, so this fires once per topic ever, and
+        only for topics that predate the setting -- a topic created since gets
+        its icon inside `createForumTopic`, where an icon is free. The slot
+        carries no signal yet; this keeps the path warm for when it does.
+
+        Returns whether a call was actually made, because the caller paces
+        itself on work done rather than on topics seen.
+        """
+        if not self._default_icon:
+            return False
         session_id = session.get("session_id")
-        icon = self._icon_for(session)
+        icon = self._default_icon
         if self._topic_icons.get(session_id, "") == icon:
-            return
+            return False
         try:
             await self.telegram.set_topic_icon(self.forum_chat_id, thread, icon)
         except ApiError as error:
             if TOPIC_UNCHANGED not in str(error):
                 log.warning("could not set the icon on topic %s", thread,
                             exc_info=True)
-                return
+                return False
             # Already wearing it -- someone set it by hand, or a previous run
             # did and the memory of it was lost. Record it and stop asking.
             log.info("topic %s already had the icon asked for", thread)
@@ -1367,6 +1402,7 @@ class FalconFoxTelegramBot:
         self._persist_topics()
         log.info("topic icon set: session=%s thread=%s icon=%s",
                  session_id, thread, icon or "(none)")
+        return True
 
     async def _ensure_topic(self, session: dict) -> int | None:
         """Give a session a topic, creating one if it has none.
@@ -1384,8 +1420,8 @@ class FalconFoxTelegramBot:
         existing = self._topics.get(session_id)
         if existing is not None:
             return existing
-        title = session.get("name") or session_id
-        icon = self._icon_for(session)
+        title = self._title_for(session)
+        icon = self._default_icon
         try:
             thread = await self.telegram.create_topic(self.forum_chat_id, title, icon)
         except ApiError as error:
@@ -1401,6 +1437,7 @@ class FalconFoxTelegramBot:
         self._bind(session_id, thread)
         self._topic_names[session_id] = title
         self._topic_icons[session_id] = icon
+
         self._persist_topics()
         log.info("topic created: session=%s thread=%s name=%s", session_id, thread, title)
         return thread
@@ -1416,24 +1453,31 @@ class FalconFoxTelegramBot:
             log.info("topic orphaned: session=%s thread=%s no longer exists",
                      session_id, thread)
         for item in sessions:
-            # Remember the titles before anything mirrors them. Without this
-            # the map is empty after a restart, so the first session_updated
-            # per session retitles the topic to the name it already has --
-            # which Telegram refuses with a 400, once per session, every time
-            # the bot starts.
-            if item["session_id"] in self._topics:
-                self._topic_names.setdefault(item["session_id"],
-                                             item.get("name") or "")
-            if item["session_id"] not in self._topics:
-                # Sequential, not gathered: topic management is rate-limited
-                # (429 retry-after observed), so a burst of creations on a
-                # first run must not be fired all at once.
-                await self._ensure_topic(item)
+            session_id = item["session_id"]
+            if session_id not in self._topics:
+                fired = await self._ensure_topic(item) is not None
             else:
-                # Tags can have moved while the bot was down. The remembered
-                # icon makes this a no-op in the ordinary case, so a restart
-                # does not stamp a service message on every topic.
-                await self._apply_icon(item, self._topics[item["session_id"]])
+                # Tags and names can have moved while the bot was down, and
+                # topics that predate the default icon still need it. The
+                # remembered title and icon make all of this a no-op in the
+                # ordinary case, so a restart is silent.
+                thread = self._topics[session_id]
+                fired = await self._apply_title(item, thread)
+                fired = await self._apply_icon(item, thread) or fired
+            if fired:
+                # Sequential is not enough. Topic management is rate-limited
+                # (429 retry-after observed) and every rename or icon edit is
+                # also a service message in the forum, which is one group
+                # sharing one message budget across every topic in it. The
+                # first run after tags moved into titles wants two calls for
+                # every session at once, which is exactly the burst that
+                # budget cannot take.
+                #
+                # Paced on calls that fire rather than on topics seen: once
+                # the forum agrees with the daemon this loop makes no calls
+                # at all, and pacing the iteration would put a minute of dead
+                # time into every restart forever.
+                await asyncio.sleep(RECONCILE_PACE)
 
     async def _poll_telegram(self) -> None:
         offset = None
@@ -1700,8 +1744,8 @@ class FalconFoxTelegramBot:
             # event, so it happens whoever renamed the session.
             await self._say(dest, f"Renamed session to {' '.join(parts[1:])}.")
             return True
-        if command == "/tags":
-            await self._tags_command(dest, parts[1:])
+        if command == "/tag":
+            await self._tag_command(dest, parts[1:])
             return True
         if command == "/tray":
             await self._tray_command(dest, parts[1:])
@@ -1711,7 +1755,7 @@ class FalconFoxTelegramBot:
             return True
         return False
 
-    async def _tags_command(self, dest: Dest, tags: list[str]) -> None:
+    async def _tag_command(self, dest: Dest, tags: list[str]) -> None:
         """Show this session's tags, or replace them.
 
         No arguments shows rather than clears, because showing is what you
@@ -1726,7 +1770,7 @@ class FalconFoxTelegramBot:
             sessions = await self.daemon.sessions(include_hidden=True)
             current = next((item.get("tags") or [] for item in sessions
                             if item["session_id"] == session_id), [])
-            await self._say(dest, self._tags_report(current, vocabulary=True))
+            await self._say(dest, self._tag_report(current, vocabulary=True))
             return
         try:
             session = await self.daemon.tag(session_id, [] if tags == ["-"] else tags)
@@ -1735,13 +1779,13 @@ class FalconFoxTelegramBot:
             return
         # The icon follows from the daemon's session_updated event, so it
         # lands whoever set the tags -- here, the CLI, or the manager.
-        await self._say(dest, self._tags_report(session.get("tags") or []))
+        await self._say(dest, self._tag_report(session.get("tags") or []))
 
     async def _tray_command(self, dest: Dest, ids: list[str]) -> None:
         """Show this session's tray, or remove from it.
 
-        The shape is borrowed from `/tags` and the meaning is inverted:
-        `/tags` arguments replace the set, these remove from it. Removal fits
+        The shape is borrowed from `/tag` and the meaning is inverted:
+        `/tag` arguments replace the set, these remove from it. Removal fits
         the case that actually happens, which is dropping one bad photo out of
         five, so the help line says "remove" rather than leaving it to be
         inferred from the other command.
@@ -1793,32 +1837,40 @@ class FalconFoxTelegramBot:
                         + (f"{len(remaining)} still waiting." if remaining
                            else "The tray is empty."))
 
-    def _tags_report(self, tags: list[str], vocabulary: bool = False) -> str:
-        """What the tags are, and which of them is the one being drawn.
+    def _tag_report(self, tags: list[str], vocabulary: bool = False) -> str:
+        """The session's tags, each with the glyph it draws.
 
-        The configured vocabulary is only for a bare `/tags`, which is the
+        Concerned with the tags and their glyphs only. What the composed title
+        looks like is visible in the topic itself, and repeating it here would
+        be a second thing to keep true.
+
+        The configured vocabulary is only for a bare `/tag`, which is the
         question "what can I set?". Repeating it after every set answered a
         question nobody asked, and it is the longest part of the message.
         """
-        lines = [f"🏷 {', '.join(tags)}" if tags else "🏷 No tags."]
-        drawn = next((tag for tag in tags if tag in self._icon_emoji), None)
-        if drawn:
-            lines.append(f"Topic icon: {self._icon_emoji[drawn]} (from {drawn})")
-        elif tags and self._icon_emoji:
-            # Tags that draw nothing are perfectly ordinary, but staying
-            # quiet about it reads as "it worked", and the topic silently
-            # keeping its old icon is the thing worth saying.
-            warning = "⚠️ No icon for these."
+        drawn = [tag for tag in tags if tag in self._icon_emoji]
+        if tags:
+            shown = "  ".join(
+                f"{self._icon_emoji[tag]}{tag}" if tag in self._icon_emoji
+                else tag for tag in tags)
+            lines = [f"🏷 {shown}"]
+        else:
+            lines = ["🏷 No tags."]
+        if tags and not drawn and self._icon_emoji:
+            # Tags that draw nothing are perfectly ordinary, but staying quiet
+            # about it reads as "it worked", and a title that did not change
+            # is the thing worth saying.
+            warning = "⚠️ No glyphs for these."
             if not vocabulary:
-                # The bare form lists them just below, so pointing at it
-                # would point at the message it is already in.
-                warning += " Send /tags to see the ones that draw."
+                # The bare form lists them just below, so pointing at it would
+                # point at the message it is already in.
+                warning += " Send /tag to see the ones that draw."
             lines.append(warning)
         if vocabulary and self._icon_emoji:
             # One per line: this is a list to read down and pick from, and
             # separator-joined it wrapped into an unreadable run.
             lines.append("")
-            lines.append("Configured icons:")
+            lines.append("Configured glyphs:")
             lines.extend(f"{glyph} {tag}"
                          for tag, glyph in self._icon_emoji.items())
         return "\n".join(lines)
@@ -2670,18 +2722,30 @@ class FalconFoxTelegramBot:
         thread = self._topics.get(session_id)
         if thread is None:
             return
-        name = session.get("name")
-        if name and self._topic_names.get(session_id) != name:
-            try:
-                await self.telegram.rename_topic(self.forum_chat_id, thread, name)
-                self._topic_names[session_id] = name
-            except ApiError as error:
-                if TOPIC_UNCHANGED in str(error):
-                    # Already titled that; remembering it is the whole point.
-                    self._topic_names[session_id] = name
-                else:
-                    log.warning("could not retitle topic %s", thread, exc_info=True)
+        await self._apply_title(session, thread)
         await self._apply_icon(session, thread)
+
+    async def _apply_title(self, session: dict, thread: int) -> bool:
+        """Mirror the composed title onto a topic, if it has changed.
+
+        Returns whether a call was actually made, because the reconciler
+        paces itself on work done rather than on topics seen.
+        """
+        session_id = session.get("session_id")
+        title = self._title_for(session)
+        if not title or self._topic_names.get(session_id) == title:
+            return False
+        try:
+            await self.telegram.rename_topic(self.forum_chat_id, thread, title)
+        except ApiError as error:
+            if TOPIC_UNCHANGED not in str(error):
+                log.warning("could not retitle topic %s", thread, exc_info=True)
+                return True
+            # Already titled that; remembering it is the whole point.
+            log.info("topic %s already had the title asked for", thread)
+        self._topic_names[session_id] = title
+        self._persist_topics()
+        return True
 
     async def _finish_turn(self, session_id: str, event: dict | None) -> None:
         """Close out a turn: deliver the remainder, stop the indicator, account

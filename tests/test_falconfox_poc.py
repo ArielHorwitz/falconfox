@@ -26,6 +26,7 @@ from falconfox.errors import FalconFoxError
 from falconfox.engine.session import AgentSession, PromptPart
 from falconfox.storage import SessionStore
 from falconfox.watchdog import StallWatchdog
+from falconfox_telegram import bot as bot_module
 from falconfox_telegram.api import ApiError, DaemonApi, _json_request
 from falconfox_telegram.bot import (QUEUED_FIRST, REACT_QUEUED, REACT_RECEIVED,
                                     REACT_RUNNING, REACT_DONE, REACT_DISCARDED,
@@ -2535,64 +2536,114 @@ class SessionTagTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TopicIconTests(unittest.IsolatedAsyncioTestCase):
-    """Tag icons on forum topics. Every edit posts a service message, so the
-    tests are mostly about *not* making calls."""
+    """Tag glyphs in the title, and the one constant topic icon. Every rename
+    or icon edit posts a service message, so the tests are mostly about *not*
+    making calls."""
 
-    def _bot(self, directory, icon_map=None):
+    def _bot(self, directory, glyphs=None, default_icon="5009"):
         bot = FalconFoxTelegramBot(BotConfig(
             "token", 7, daemon_url=UNREACHABLE_DAEMON, forum_chat_id=-1001,
             state_dir=Path(directory),
         ))
         bot.telegram = FakeTelegram()
-        bot._icon_map = dict({"archived": "5001", "urgent": "5002"}
-                             if icon_map is None else icon_map)
+        bot._icon_emoji = dict({"archived": "\U0001f4c1", "urgent": "\u2757\ufe0f"}
+                               if glyphs is None else glyphs)
+        bot._default_icon = default_icon
         return bot
 
-    async def test_the_first_tag_with_an_icon_wins(self):
+    # --- the title ------------------------------------------------------
+
+    async def test_every_mapped_tag_is_drawn_in_tag_order(self):
+        # The whole point of moving to the title: the icon slot held one, so
+        # order had to mean priority. Here it only means order.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
-            self.assertEqual(bot._icon_for({"tags": ["urgent", "archived"]}), "5002")
-            self.assertEqual(bot._icon_for({"tags": ["archived", "urgent"]}), "5001")
+            self.assertEqual(
+                bot._title_for({"name": "work", "tags": ["urgent", "archived"]}),
+                "\u2757\ufe0f\U0001f4c1 work")
+            self.assertEqual(
+                bot._title_for({"name": "work", "tags": ["archived", "urgent"]}),
+                "\U0001f4c1\u2757\ufe0f work")
 
-    async def test_an_unmapped_tag_falls_through_to_the_next(self):
+    async def test_an_unmapped_tag_is_skipped_and_the_rest_still_draw(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
-            self.assertEqual(bot._icon_for({"tags": ["golang", "archived"]}), "5001")
-            self.assertEqual(bot._icon_for({"tags": ["golang"]}), "")
+            self.assertEqual(
+                bot._title_for({"name": "work", "tags": ["golang", "archived"]}),
+                "\U0001f4c1 work")
+            self.assertEqual(
+                bot._title_for({"name": "work", "tags": ["golang"]}), "work",
+                "no glyphs means no leading space either")
 
-    async def test_a_new_topic_carries_its_icon_without_an_edit(self):
+    async def test_the_length_cap_is_spent_on_the_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            title = bot._title_for({"name": "x" * 200, "tags": ["urgent"]})
+            self.assertEqual(len(title), 128)
+            self.assertTrue(title.startswith("\u2757\ufe0f "),
+                            "the glyphs are what the title is for")
+
+    async def test_a_name_that_is_itself_an_emoji_is_not_confused_for_a_glyph(self):
+        # The title is always recomputed and never parsed back, which is what
+        # keeps /name and the glyphs from fighting.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            self.assertEqual(
+                bot._title_for({"name": "\U0001f996 dino", "tags": []}),
+                "\U0001f996 dino")
+
+    async def test_a_tag_change_alone_retitles_the_topic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._bind("work", 42)
+            await bot._mirror_session({"session_id": "work", "name": "work",
+                                       "tags": []})
+            await bot._mirror_session({"session_id": "work", "name": "work",
+                                       "tags": ["urgent"]})
+            self.assertEqual(bot.telegram.renamed,
+                             [(42, "work"), (42, "\u2757\ufe0f work")])
+
+    # --- the icon -------------------------------------------------------
+
+    async def test_a_new_topic_carries_the_default_icon_without_an_edit(self):
         # Creation takes the icon as an argument; an edit would cost a
         # service message in a topic that is one second old.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             await bot._ensure_topic({"session_id": "work", "name": "work",
                                      "tags": ["archived"]})
-            self.assertEqual(bot.telegram.topics, [("work", "5001")])
+            self.assertEqual(bot.telegram.topics,
+                             [("\U0001f4c1 work", "5009")])
             self.assertEqual(getattr(bot.telegram, "icons", []), [])
 
-    async def test_an_unchanged_icon_makes_no_call(self):
-        with tempfile.TemporaryDirectory() as directory:
-            bot = self._bot(directory)
-            session = {"session_id": "work", "tags": ["archived"]}
-            bot._bind("work", 42)
-            await bot._apply_icon(session, 42)
-            await bot._apply_icon(session, 42)
-            self.assertEqual(bot.telegram.icons, [(42, "5001")],
-                             "re-applying would stamp a service message per event")
-
-    async def test_dropping_every_mapped_tag_clears_the_icon(self):
+    async def test_tags_do_not_touch_the_icon(self):
+        # The slot carries no signal yet. Retagging must not write to it.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             bot._bind("work", 42)
             await bot._apply_icon({"session_id": "work", "tags": ["archived"]}, 42)
             await bot._apply_icon({"session_id": "work", "tags": []}, 42)
-            self.assertEqual(bot.telegram.icons, [(42, "5001"), (42, "")])
+            self.assertEqual(bot.telegram.icons, [(42, "5009")],
+                             "one icon, applied once, whatever the tags do")
 
-    async def test_with_no_map_configured_nothing_is_ever_called(self):
+    async def test_an_unchanged_icon_makes_no_call(self):
         with tempfile.TemporaryDirectory() as directory:
-            bot = self._bot(directory, icon_map={})
+            bot = self._bot(directory)
+            session = {"session_id": "work", "tags": []}
             bot._bind("work", 42)
-            await bot._apply_icon({"session_id": "work", "tags": ["archived"]}, 42)
+            self.assertTrue(await bot._apply_icon(session, 42))
+            self.assertFalse(await bot._apply_icon(session, 42),
+                             "re-applying would stamp a service message")
+            self.assertEqual(bot.telegram.icons, [(42, "5009")])
+
+    async def test_with_no_default_configured_the_slot_is_left_alone(self):
+        # Not the same as clearing it: a cleared icon draws a badge from the
+        # title's first character, which is a question mark once that is a
+        # glyph.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory, default_icon="")
+            bot._bind("work", 42)
+            self.assertFalse(await bot._apply_icon({"session_id": "work"}, 42))
             self.assertEqual(getattr(bot.telegram, "icons", []), [])
 
     async def test_an_icon_already_in_place_counts_as_applied(self):
@@ -2607,9 +2658,9 @@ class TopicIconTests(unittest.IsolatedAsyncioTestCase):
                 raise ApiError("Bad Request: TOPIC_NOT_MODIFIED")
 
             bot.telegram.set_topic_icon = _unchanged
-            session = {"session_id": "work", "tags": ["archived"]}
+            session = {"session_id": "work", "tags": []}
             await bot._apply_icon(session, 42)
-            self.assertEqual(bot._topic_icons.get("work"), "5001")
+            self.assertEqual(bot._topic_icons.get("work"), "5009")
 
             calls = []
             async def _count(chat_id, thread, icon):
@@ -2630,6 +2681,8 @@ class TopicIconTests(unittest.IsolatedAsyncioTestCase):
             await bot._mirror_session({"session_id": "work", "name": "the work"})
             self.assertEqual(bot._topic_names.get("work"), "the work")
 
+    # --- what survives a restart ----------------------------------------
+
     async def test_the_applied_icon_survives_a_restart(self):
         # The Bot API cannot report a topic's icon, so the only alternative to
         # remembering is re-applying blindly -- a service message per topic
@@ -2637,12 +2690,27 @@ class TopicIconTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             bot._bind("work", 42)
-            await bot._apply_icon({"session_id": "work", "tags": ["archived"]}, 42)
+            await bot._apply_icon({"session_id": "work"}, 42)
             restarted = self._bot(directory)
             restarted._load_topics()
             self.assertEqual(restarted._topics, {"work": 42})
-            await restarted._apply_icon({"session_id": "work", "tags": ["archived"]}, 42)
+            self.assertFalse(await restarted._apply_icon({"session_id": "work"}, 42))
             self.assertEqual(getattr(restarted.telegram, "icons", []), [])
+
+    async def test_the_composed_title_survives_a_restart(self):
+        # Titles are remembered rather than guessed. Guessing costs a call per
+        # session per start, and the reconciler now sleeps after every call.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._bind("work", 42)
+            session = {"session_id": "work", "name": "work", "tags": ["urgent"]}
+            self.assertTrue(await bot._apply_title(session, 42))
+            restarted = self._bot(directory)
+            restarted._load_topics()
+            self.assertEqual(restarted._topic_names.get("work"),
+                             "\u2757\ufe0f work")
+            self.assertFalse(await restarted._apply_title(session, 42))
+            self.assertEqual(getattr(restarted.telegram, "renamed", []), [])
 
     async def test_the_old_flat_topic_file_still_loads(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2652,16 +2720,40 @@ class TopicIconTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bot._topics, {"work": 42},
                              "dropping the old shape would make a second topic each")
             self.assertEqual(bot._topic_icons, {})
+            self.assertEqual(bot._topic_names, {})
 
-    async def test_the_map_is_configured_in_emoji(self):
+    # --- configuration ---------------------------------------------------
+
+    async def test_tag_glyphs_are_taken_as_written(self):
+        # They go in the title, which is free text, so there is nothing to
+        # validate and no reason to reach for the sticker set.
         with tempfile.TemporaryDirectory() as directory:
-            bot = self._bot(directory, icon_map={})
-            with patch.object(config, "topic_icons",
-                              return_value={"archived": "📁", "raw": "999",
-                                            "nope": "🦖"}):
-                await bot._load_icon_map()
-            self.assertEqual(bot._icon_map, {"archived": "5001", "raw": "999"},
-                             "an emoji outside the allowed set is dropped, not sent")
+            bot = self._bot(directory, glyphs={})
+            with patch.object(config, "tag_icons",
+                              return_value={"dino": "\U0001f996"}), \
+                 patch.object(config, "default_topic_icon", return_value=""):
+                await bot._load_icons()
+            self.assertEqual(bot._icon_emoji, {"dino": "\U0001f996"},
+                             "an emoji outside the forum set is fine in a title")
+
+    async def test_the_default_icon_is_checked_against_the_forum_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory, glyphs={}, default_icon="")
+            with patch.object(config, "tag_icons", return_value={}), \
+                 patch.object(config, "default_topic_icon",
+                              return_value="\U0001f4c1"):
+                await bot._load_icons()
+            self.assertEqual(bot._default_icon, "5001")
+
+    async def test_a_default_icon_outside_the_forum_set_is_dropped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory, glyphs={}, default_icon="")
+            with patch.object(config, "tag_icons", return_value={}), \
+                 patch.object(config, "default_topic_icon",
+                              return_value="\U0001f996"):
+                await bot._load_icons()
+            self.assertEqual(bot._default_icon, "",
+                             "sending it would be rejected, and clearing is worse")
 
     async def test_an_icon_notice_is_left_alone(self):
         # The bot used to delete this notice about 60ms after causing it.
@@ -2677,24 +2769,54 @@ class TopicIconTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bot.telegram.messages, [],
                              "the notice is evidence for clients, not litter")
 
-    async def test_reconciling_remembers_the_titles_it_found(self):
-        # Without this the title map is empty after a restart, so the first
-        # session_updated retitles every topic to the name it already has --
-        # which Telegram refuses, once per session, on every start.
+    # --- reconciling ------------------------------------------------------
+
+    async def test_reconciling_migrates_a_topic_once_and_then_goes_quiet(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             bot._bind("work", 42)
 
             class _Daemon:
                 async def sessions(inner):
-                    return [{"session_id": "work", "name": "the work session"}]
+                    return [{"session_id": "work", "name": "the work session",
+                             "tags": ["urgent"]}]
 
             bot.daemon = _Daemon()
-            await bot._reconcile_topics()
-            self.assertEqual(bot._topic_names.get("work"), "the work session")
-            await bot._mirror_session({"session_id": "work",
-                                       "name": "the work session"})
-            self.assertEqual(getattr(bot.telegram, "renamed", []), [])
+            with patch.object(bot_module, "RECONCILE_PACE", 0):
+                await bot._reconcile_topics()
+                self.assertEqual(bot.telegram.renamed,
+                                 [(42, "\u2757\ufe0f the work session")])
+                self.assertEqual(bot.telegram.icons, [(42, "5009")])
+                await bot._reconcile_topics()
+            self.assertEqual(len(bot.telegram.renamed), 1,
+                             "a second pass has nothing left to do")
+            self.assertEqual(len(bot.telegram.icons), 1)
+
+    async def test_reconciling_pauses_after_calls_that_fire_not_topics_seen(self):
+        # The forum is one group sharing one message budget across every topic
+        # in it, and migration wants two calls per session at once. But once
+        # it agrees with the daemon this loop makes no calls, and pacing the
+        # iteration would put dead time into every restart forever.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._bind("work", 42)
+
+            class _Daemon:
+                async def sessions(inner):
+                    return [{"session_id": "work", "name": "work", "tags": []}]
+
+            bot.daemon = _Daemon()
+            naps = []
+
+            async def _sleep(seconds):
+                naps.append(seconds)
+
+            with patch.object(bot_module.asyncio, "sleep", _sleep):
+                await bot._reconcile_topics()
+                self.assertEqual(naps, [bot_module.RECONCILE_PACE],
+                                 "one pause, though two calls fired")
+                await bot._reconcile_topics()
+            self.assertEqual(len(naps), 1, "nothing fired, so nothing waited")
 
 
 class QueueAndStopTests(unittest.IsolatedAsyncioTestCase):
@@ -2948,7 +3070,7 @@ class ReactionTests(unittest.IsolatedAsyncioTestCase):
                              "the reply lands whatever the decoration does")
 
 
-class TagsCommandTests(unittest.IsolatedAsyncioTestCase):
+class TagCommandTests(unittest.IsolatedAsyncioTestCase):
     """Tagging from the topic itself, without going through the manager."""
 
     def _bot(self, directory):
@@ -2958,7 +3080,6 @@ class TagsCommandTests(unittest.IsolatedAsyncioTestCase):
         ))
         bot.telegram = FakeTelegram()
         bot._bind("session", 20)
-        bot._icon_map = {"archived": "5001", "urgent": "5002"}
         bot._icon_emoji = {"archived": "📁", "urgent": "❗️"}
         self.tagged = []
         outer = self
@@ -2982,58 +3103,59 @@ class TagsCommandTests(unittest.IsolatedAsyncioTestCase):
                             "message_thread_id": 20, "message_id": 1,
                             "from": {"id": 7}}}
 
-    async def test_bare_tags_shows_rather_than_clears(self):
+    async def test_a_bare_tag_shows_rather_than_clears(self):
         # Clearing by accident is not recoverable from the chat.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
-            await bot._handle_update(self._update("/tags"))
+            await bot._handle_update(self._update("/tag"))
             self.assertEqual(self.tagged, [])
             self.assertIn("urgent", bot.telegram.messages[0][1])
 
-    async def test_the_report_names_the_icon_actually_drawn(self):
+    async def test_the_report_glyphs_every_tag_that_draws(self):
+        # One slot became many, so there is no longer a winner to name.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
-            await bot._handle_update(self._update("/tags urgent archived"))
+            await bot._handle_update(self._update("/tag urgent archived"))
             body = bot.telegram.messages[0][1]
-            self.assertIn("❗️ (from urgent)", body,
-                          "the first mapped tag is the one on the topic")
-            self.assertNotIn("Configured icons:", body,
+            self.assertIn("\u2757\ufe0furgent", body)
+            self.assertIn("\U0001f4c1archived", body)
+            self.assertNotIn("Configured glyphs:", body,
                              "setting tags does not need the whole vocabulary")
 
     async def test_tags_that_draw_nothing_say_so(self):
         # Silence here reads as "it worked" while the topic quietly keeps
-        # whatever icon it had.
+        # the title does not change.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
-            await bot._handle_update(self._update("/tags notes review"))
+            await bot._handle_update(self._update("/tag notes review"))
             body = bot.telegram.messages[0][1]
-            self.assertIn("⚠️ No icon for these.", body)
-            self.assertIn("Send /tags", body, "say what to do about it")
+            self.assertIn("⚠️ No glyphs for these.", body)
+            self.assertIn("Send /tag", body, "say what to do about it")
 
     async def test_the_bare_form_does_not_point_at_itself(self):
-        # The vocabulary is already in this message, so pointing at /tags
+        # The vocabulary is already in this message, so pointing at /tag
         # would point at the message it is in.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             bot.daemon.tags = ["notes"]
-            await bot._handle_update(self._update("/tags"))
+            await bot._handle_update(self._update("/tag"))
             body = bot.telegram.messages[0][1]
-            self.assertIn("⚠️ No icon for these.", body)
-            self.assertNotIn("Send /tags", body)
-            self.assertIn("Configured icons:", body)
+            self.assertIn("⚠️ No glyphs for these.", body)
+            self.assertNotIn("Send /tag", body)
+            self.assertIn("Configured glyphs:", body)
 
     async def test_no_tags_at_all_is_not_a_warning(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
-            await bot._handle_update(self._update("/tags -"))
+            await bot._handle_update(self._update("/tag -"))
             self.assertNotIn("⚠️", bot.telegram.messages[0][1])
 
-    async def test_the_vocabulary_is_offered_on_a_bare_tags_only(self):
+    async def test_the_vocabulary_is_offered_on_a_bare_tag_only(self):
         # It is the longest part of the message and answers "what can I set?",
         # which is the bare form's question and not the setting form's.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
-            await bot._handle_update(self._update("/tags"))
+            await bot._handle_update(self._update("/tag"))
             body = bot.telegram.messages[0][1]
             self.assertIn("\n📁 archived", body, "one per line, to read down")
             self.assertIn("\n❗️ urgent", body)
@@ -3041,13 +3163,13 @@ class TagsCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_tags_replace_the_whole_list(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
-            await bot._handle_update(self._update("/tags archived slow"))
+            await bot._handle_update(self._update("/tag archived slow"))
             self.assertEqual(self.tagged, [("session", ["archived", "slow"])])
 
     async def test_a_lone_hyphen_clears(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
-            await bot._handle_update(self._update("/tags -"))
+            await bot._handle_update(self._update("/tag -"))
             self.assertEqual(self.tagged, [("session", [])])
             self.assertIn("No tags", bot.telegram.messages[0][1])
 
@@ -3059,7 +3181,7 @@ class TagsCommandTests(unittest.IsolatedAsyncioTestCase):
                 raise ApiError("tags must not contain whitespace")
 
             bot.daemon.tag = _refuse
-            await bot._handle_update(self._update("/tags 'needs review'"))
+            await bot._handle_update(self._update("/tag 'needs review'"))
             self.assertIn("Could not set tags", bot.telegram.messages[0][1])
 
 
@@ -3236,7 +3358,7 @@ class TrayTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("left knee", rich)
 
     async def test_tray_arguments_remove_rather_than_replace(self):
-        # The inversion against /tags, which is why the help line says
+        # The inversion against /tag, which is why the help line says
         # "remove" plainly.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)

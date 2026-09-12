@@ -161,13 +161,13 @@ exists, and this is a second producer for it.
 
 *From the /help environments case, 2026-09-08.*
 
-`/tags` acts on whichever session speaks in the chat it is typed in, so in
+`/tag` acts on whichever session speaks in the chat it is typed in, so in
 General it tags the **session manager** and in the private chat it tags the
 concierge. Both are accepted in full: the tags are stored, reported back, and
-then never drawn, because a tag is rendered as a *topic* icon and neither of
-those sessions has a topic. Nothing is broken and nothing says so either.
+then never drawn, because a tag is rendered into a *topic title* and neither
+of those sessions has a topic. Nothing is broken and nothing says so either.
 
-It reaches there three ways — the user typing `/tags` in General, `falconfox
+It reaches there three ways — the user typing `/tag` in General, `falconfox
 tag` naming an infrastructure session, and an agent tagging itself — and the
 last is the one that matters, since an agent that gets a success back has no
 way to learn that the label went nowhere.

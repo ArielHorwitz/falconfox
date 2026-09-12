@@ -339,19 +339,37 @@ def global_hotkeys() -> dict:
     return {**DEFAULT_HOTKEYS, **data.get('hotkeys', {})}
 
 
-def topic_icons() -> dict:
-    """The Telegram client's tag→icon map, from `[telegram.topic_icons]`.
+def tag_icons() -> dict:
+    """The Telegram client's tag→glyph map, from `[telegram.tag_icons]`.
 
     Read as a narrow slice rather than folded into `Config`, the same way
     hotkeys and the log level are: it belongs to one client, and the daemon
     has no opinion about it. There is deliberately no default -- shipping one
-    would put icons on a fresh install that nobody chose, and would quietly
+    would put glyphs on a fresh install that nobody chose, and would quietly
     make the example vocabulary canonical.
+
+    These are drawn into the topic *title*, which is free text, so any emoji
+    is allowed and nothing is validated. That is the difference from
+    `default_topic_icon`, which occupies the icon slot and is not.
     """
     data = _read_toml(global_config_path())
-    icons = data.get("telegram", {}).get("topic_icons", {})
+    icons = data.get("telegram", {}).get("tag_icons", {})
     return {str(tag).strip().lower(): str(value)
             for tag, value in icons.items() if str(value).strip()}
+
+
+def default_topic_icon() -> str:
+    """The one icon every topic wears, from `telegram.default_topic_icon`.
+
+    The icon slot takes only Telegram's own forum-icon set, so unlike the tag
+    glyphs this is checked against `getForumTopicIconStickers` before it is
+    used. Empty means leave the slot alone, which is not the same as clearing
+    it: a topic with no custom emoji falls back to a badge drawn from the
+    title's first character, and a title that starts with a tag glyph renders
+    that badge as a question mark.
+    """
+    data = _read_toml(global_config_path())
+    return str(data.get("telegram", {}).get("default_topic_icon", "")).strip()
 
 
 def log_level() -> str:

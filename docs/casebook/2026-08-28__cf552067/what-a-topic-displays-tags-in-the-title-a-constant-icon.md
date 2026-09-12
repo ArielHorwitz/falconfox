@@ -7,7 +7,7 @@ drawn as the topic icon, which holds exactly one value out of 112, so most of
 a session's tags were invisible and tag *order* had to double as a priority
 rule to decide which one won.
 
-The dev config is the evidence. It carries 29 tags across three axes, and its
+The dev config is the evidence. It carries 25 tags across four groups, and its
 own prose instructs the user to *"put the status first unless the kind is the
 thing worth seeing"*. That sentence exists only to work around the one slot.
 
