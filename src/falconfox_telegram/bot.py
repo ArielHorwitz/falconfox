@@ -1462,6 +1462,20 @@ class FalconFoxTelegramBot:
         log.info("topic created: session=%s thread=%s name=%s", session_id, thread, title)
         return thread
 
+    async def _pace(self) -> None:
+        """Wait out the forum's message budget after a call that fired.
+
+        Every rename and every icon edit is also a service message, and a
+        forum is one group sharing one budget across every topic in it. The
+        first run after the tag vocabulary changes wants two calls for every
+        session at once, which is exactly the burst that budget cannot take.
+
+        Paced on calls rather than on topics seen: once the forum agrees with
+        the daemon this makes no calls at all, so a settled restart never
+        waits.
+        """
+        await asyncio.sleep(RECONCILE_PACE)
+
     async def _reconcile_topics_guarded(self) -> None:
         """`_reconcile_topics`, never fatal. It runs as its own task now, so
         an exception here would otherwise be swallowed by the task rather
@@ -1486,29 +1500,24 @@ class FalconFoxTelegramBot:
         for item in sessions:
             session_id = item["session_id"]
             if session_id not in self._topics:
-                fired = await self._ensure_topic(item) is not None
+                if await self._ensure_topic(item) is not None:
+                    await self._pace()
             else:
                 # Tags and names can have moved while the bot was down, and
                 # topics that predate the default icon still need it. The
                 # remembered title and icon make all of this a no-op in the
                 # ordinary case, so a restart is silent.
                 thread = self._topics[session_id]
-                fired = await self._apply_title(item, thread)
-                fired = await self._apply_icon(item, thread) or fired
-            if fired:
-                # Sequential is not enough. Topic management is rate-limited
-                # (429 retry-after observed) and every rename or icon edit is
-                # also a service message in the forum, which is one group
-                # sharing one message budget across every topic in it. The
-                # first run after tags moved into titles wants two calls for
-                # every session at once, which is exactly the burst that
-                # budget cannot take.
-                #
-                # Paced on calls that fire rather than on topics seen: once
-                # the forum agrees with the daemon this loop makes no calls
-                # at all, and pacing the iteration would put a minute of dead
-                # time into every restart forever.
-                await asyncio.sleep(RECONCILE_PACE)
+                # Two separate calls, so two separate pauses. Pausing once per
+                # topic put two service messages into every four seconds,
+                # which is thirty a minute against a budget of about twenty,
+                # and Telegram throttled it by holding requests for forty
+                # seconds rather than refusing them. Measured on the first
+                # migration, 2026-09-12.
+                if await self._apply_title(item, thread):
+                    await self._pace()
+                if await self._apply_icon(item, thread):
+                    await self._pace()
 
     async def _poll_telegram(self) -> None:
         offset = None

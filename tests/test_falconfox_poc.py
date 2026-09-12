@@ -2792,6 +2792,32 @@ class TopicIconTests(unittest.IsolatedAsyncioTestCase):
                              "a second pass has nothing left to do")
             self.assertEqual(len(bot.telegram.icons), 1)
 
+    async def test_a_topic_needing_only_one_call_pauses_only_once(self):
+        # The bug this replaced paused per topic, so two calls shared one
+        # pause and the forum saw thirty messages a minute against a budget
+        # of twenty. Telegram throttled by holding requests for forty seconds.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._bind("work", 42)
+            bot._topic_icons["work"] = "5009"          # icon already right
+            session = {"session_id": "work", "name": "work", "tags": []}
+
+            class _Daemon:
+                async def sessions(inner):
+                    return [dict(session)]
+
+            bot.daemon = _Daemon()
+            naps = []
+
+            async def _sleep(seconds):
+                naps.append(seconds)
+
+            with patch.object(bot_module.asyncio, "sleep", _sleep):
+                await bot._reconcile_topics()
+            self.assertEqual(bot.telegram.renamed, [(42, "work")])
+            self.assertEqual(getattr(bot.telegram, "icons", []), [])
+            self.assertEqual(len(naps), 1, "one call, one pause")
+
     async def test_one_session_gets_one_topic_under_concurrency(self):
         # Reconciling runs alongside the event loop, so a session_added and a
         # reconcile pass can reach _ensure_topic for the same session at once.
@@ -2873,10 +2899,11 @@ class TopicIconTests(unittest.IsolatedAsyncioTestCase):
 
             with patch.object(bot_module.asyncio, "sleep", _sleep):
                 await bot._reconcile_topics()
-                self.assertEqual(naps, [bot_module.RECONCILE_PACE],
-                                 "one pause, though two calls fired")
+                self.assertEqual(naps, [bot_module.RECONCILE_PACE] * 2,
+                                 "a rename and an icon edit are two messages, "
+                                 "so they are two pauses")
                 await bot._reconcile_topics()
-            self.assertEqual(len(naps), 1, "nothing fired, so nothing waited")
+            self.assertEqual(len(naps), 2, "nothing fired, so nothing waited")
 
 
 class QueueAndStopTests(unittest.IsolatedAsyncioTestCase):
