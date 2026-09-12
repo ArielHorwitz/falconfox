@@ -2792,6 +2792,66 @@ class TopicIconTests(unittest.IsolatedAsyncioTestCase):
                              "a second pass has nothing left to do")
             self.assertEqual(len(bot.telegram.icons), 1)
 
+    async def test_one_session_gets_one_topic_under_concurrency(self):
+        # Reconciling runs alongside the event loop, so a session_added and a
+        # reconcile pass can reach _ensure_topic for the same session at once.
+        # The check that it has no topic is separated from the create by an
+        # await, and the loser of that race is an unreachable second topic.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            session = {"session_id": "work", "name": "work", "tags": []}
+            created = await asyncio.gather(
+                bot._ensure_topic(dict(session)),
+                bot._ensure_topic(dict(session)),
+                bot._ensure_topic(dict(session)),
+            )
+            self.assertEqual(len(bot.telegram.topics), 1,
+                             "three callers, one createForumTopic")
+            self.assertEqual(set(created), {bot._topics["work"]},
+                             "every caller gets the thread that was made")
+
+    async def test_a_slow_reconcile_does_not_hold_up_the_loops(self):
+        # Awaiting reconcile before the loops start left the bot deaf for the
+        # length of a paced migration: no Telegram polling, no daemon events.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._bind("work", 42)
+
+            class _Daemon:
+                async def sessions(inner):
+                    return [{"session_id": "work", "name": "work", "tags": []}]
+
+            bot.daemon = _Daemon()
+            started = asyncio.Event()
+
+            async def _slow(seconds):
+                started.set()
+                # Never resolves, and does not re-enter the patched sleep.
+                await asyncio.get_running_loop().create_future()
+
+            with patch.object(bot_module.asyncio, "sleep", _slow):
+                task = asyncio.create_task(bot._reconcile_topics_guarded())
+                # If this returns, the paced reconcile is off the hot path.
+                await asyncio.wait_for(started.wait(), timeout=2)
+                self.assertFalse(task.done(), "still mid-pace, as intended")
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    async def test_a_failing_reconcile_is_logged_not_swallowed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+
+            class _Daemon:
+                async def sessions(inner):
+                    raise ApiError("the daemon is not there")
+
+            bot.daemon = _Daemon()
+            with self.assertLogs("falconfox.telegram", level="WARNING") as caught:
+                await bot._reconcile_topics_guarded()
+            self.assertTrue(any("reconciliation failed" in line
+                                for line in caught.output))
+
     async def test_reconciling_pauses_after_calls_that_fire_not_topics_seen(self):
         # The forum is one group sharing one message budget across every topic
         # in it, and migration wants two calls per session at once. But once

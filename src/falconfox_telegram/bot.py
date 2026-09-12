@@ -655,6 +655,12 @@ class FalconFoxTelegramBot:
         # The one icon every topic wears, resolved once at startup from
         # `telegram.default_topic_icon`. "" when unset or unresolvable.
         self._default_icon: str = ""
+        # Serialises topic creation. Reconciling runs alongside the event
+        # loop now, so a `session_added` and a reconcile pass can both reach
+        # `_ensure_topic` for one session, and the check that it has no topic
+        # is separated from the create by an await. Without this that race
+        # makes two topics for one session, and the loser is unreachable.
+        self._topic_lock = asyncio.Lock()
         self._turn_dest: dict[str, Dest] = {}
         # Messages typed while a turn was running, per session, each with the
         # message id that carried it. Held here rather than in the daemon,
@@ -776,10 +782,13 @@ class FalconFoxTelegramBot:
             await self._load_icons()
         except Exception:
             log.warning("could not load the topic icon map", exc_info=True)
-        try:
-            await self._reconcile_topics()
-        except Exception:
-            log.warning("topic reconciliation failed", exc_info=True)
+        # Reconciling paces itself (see RECONCILE_PACE), so a first run after
+        # the tag vocabulary changes is minutes of work, not milliseconds.
+        # Awaiting it here left the bot deaf for that whole window -- no
+        # Telegram polling and no daemon events -- on exactly the restart
+        # doing the most work. It runs alongside the loops instead, which is
+        # what `_topic_lock` is for.
+        reconciler = asyncio.create_task(self._reconcile_topics_guarded())
         loops = [asyncio.create_task(coroutine) for coroutine in (
             self._receive_events(), self._poll_telegram(),
         )]
@@ -790,9 +799,10 @@ class FalconFoxTelegramBot:
             for finished in done:
                 finished.result()
         finally:
+            reconciler.cancel()
             for loop in loops:
                 loop.cancel()
-            await asyncio.gather(*loops, return_exceptions=True)
+            await asyncio.gather(reconciler, *loops, return_exceptions=True)
             # In-memory turn state dies with the connection, but the persisted
             # map survives on purpose: the next connection reconciles it
             # against the daemon -- adopting turns still running, recovering
@@ -1420,6 +1430,16 @@ class FalconFoxTelegramBot:
         existing = self._topics.get(session_id)
         if existing is not None:
             return existing
+        async with self._topic_lock:
+            return await self._create_topic(session, session_id)
+
+    async def _create_topic(self, session: dict, session_id: str) -> int | None:
+        """Make the topic. Called only under `_topic_lock`."""
+        # Re-read under the lock: whoever held it may have been creating this
+        # very session's topic, and the caller's check predates the wait.
+        existing = self._topics.get(session_id)
+        if existing is not None:
+            return existing
         title = self._title_for(session)
         icon = self._default_icon
         try:
@@ -1441,6 +1461,17 @@ class FalconFoxTelegramBot:
         self._persist_topics()
         log.info("topic created: session=%s thread=%s name=%s", session_id, thread, title)
         return thread
+
+    async def _reconcile_topics_guarded(self) -> None:
+        """`_reconcile_topics`, never fatal. It runs as its own task now, so
+        an exception here would otherwise be swallowed by the task rather
+        than logged."""
+        try:
+            await self._reconcile_topics()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning("topic reconciliation failed", exc_info=True)
 
     async def _reconcile_topics(self) -> None:
         """Make the topic map agree with the daemon's session list. Sessions
