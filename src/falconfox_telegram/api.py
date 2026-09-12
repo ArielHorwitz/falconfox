@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import logging
 import shutil
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -24,6 +25,18 @@ log = logging.getLogger("falconfox.telegram.api")
 # already announced the session.
 _REQUESTS = concurrent.futures.ThreadPoolExecutor(
     max_workers=32, thread_name_prefix="falconfox-http")
+
+# How long a call may take before it is worth saying so. This deployment sees
+# Telegram calls hang until the read timeout, and until 2026-09-12 nothing
+# said so anywhere: the callers that hit it most (the chat action, the
+# progress edit) log their failures at debug, so a 40-second stall was
+# invisible from the logs and visible only as an indicator that died. A call
+# that takes longer than this is not normal and the operator should be able
+# to find it.
+SLOW_REQUEST_SECONDS = 10.0
+# The default read timeout. Generous, because most calls are worth waiting
+# for; the ones that are not pass their own.
+REQUEST_TIMEOUT = 40.0
 
 
 class ApiError(Exception):
@@ -54,7 +67,8 @@ def _multipart(fields: dict, file_field: str, file_path: Path) -> tuple[bytes, s
     return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
-async def _json_request(url: str, method: str = "GET", body: dict | None = None):
+async def _json_request(url: str, method: str = "GET", body: dict | None = None,
+                        timeout: float = REQUEST_TIMEOUT):
     def perform():
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(
@@ -62,7 +76,7 @@ async def _json_request(url: str, method: str = "GET", body: dict | None = None)
             headers={"Content-Type": "application/json"} if data is not None else {},
         )
         try:
-            with urllib.request.urlopen(request, timeout=40) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = response.read()
                 return json.loads(payload) if payload else None
         except urllib.error.HTTPError as error:
@@ -88,7 +102,17 @@ async def _json_request(url: str, method: str = "GET", body: dict | None = None)
             # on the daemon, which was healthy throughout.
             raise ApiError(f"{type(error).__name__}: {error}") from error
 
-    return await asyncio.get_running_loop().run_in_executor(_REQUESTS, perform)
+    started = time.monotonic()
+    try:
+        return await asyncio.get_running_loop().run_in_executor(_REQUESTS, perform)
+    finally:
+        elapsed = time.monotonic() - started
+        if elapsed >= SLOW_REQUEST_SECONDS:
+            # The method only, never the url: a Telegram url carries the bot
+            # token in its path, and a log line is exactly where that must not
+            # end up.
+            log.warning("slow request: %s took %.1fs",
+                        url.rsplit("/", 1)[-1], elapsed)
 
 
 class DaemonApi:
@@ -170,8 +194,10 @@ class TelegramApi:
         self.base_url = f"https://api.telegram.org/bot{token}"
         self.file_url = f"https://api.telegram.org/file/bot{token}"
 
-    async def call(self, method: str, body: dict | None = None):
-        payload = await _json_request(f"{self.base_url}/{method}", "POST", body or {})
+    async def call(self, method: str, body: dict | None = None,
+                   timeout: float = REQUEST_TIMEOUT):
+        payload = await _json_request(f"{self.base_url}/{method}", "POST",
+                                      body or {}, timeout=timeout)
         if not payload.get("ok"):
             raise ApiError(payload.get("description", f"Telegram {method} failed"))
         return payload.get("result")
@@ -326,10 +352,16 @@ class TelegramApi:
                 return
             raise
 
+    # A chat action expires in about 5 seconds, so one that has been in flight
+    # for longer than that is already worthless -- and waiting on it is how the
+    # indicator died, because the waiting is what stops the next one going out.
+    ACTION_TIMEOUT = 8.0
+
     async def chat_action(self, chat_id: int, action: str,
                           thread: int | None = None) -> None:
         await self.call("sendChatAction",
-                        self._thread({"chat_id": chat_id, "action": action}, thread))
+                        self._thread({"chat_id": chat_id, "action": action}, thread),
+                        timeout=self.ACTION_TIMEOUT)
 
     # --- forum topics ---------------------------------------------------
     #

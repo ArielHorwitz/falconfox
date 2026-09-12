@@ -686,6 +686,7 @@ class FalconFoxTelegramBot:
         # which refuses a mid-turn prompt on purpose and should keep doing so.
         self._queues: dict[str, list[dict]] = {}
         self._activity_tasks: dict[str, asyncio.Task] = {}
+        self._progress_tasks: dict[str, asyncio.Task] = {}
         self._activity_state: dict[str, str] = {}
         self._turn_working: set[str] = set()
         # The daemon's id for the turn this client is carrying, plus what this
@@ -865,9 +866,10 @@ class FalconFoxTelegramBot:
         """Clear per-connection state. The persisted turn map is left alone:
         reconciliation on the next connect decides each turn's real fate."""
         self._ws = None
-        for activity in self._activity_tasks.values():
-            activity.cancel()
+        for task in (*self._activity_tasks.values(), *self._progress_tasks.values()):
+            task.cancel()
         self._activity_tasks.clear()
+        self._progress_tasks.clear()
         self._activity_state.clear()
         self._turn_working.clear()
         self._turn_id.clear()
@@ -2318,17 +2320,26 @@ class FalconFoxTelegramBot:
         return "\n".join(lines)
 
     def _start_activity(self, session_id: str, dest: Dest) -> None:
-        """Ensure a refresh loop is running."""
-        task = self._activity_tasks.get(session_id)
-        # `task.done()` matters: a finished task is still *in* the dict, and the
-        # old `session_id not in self._typing_tasks` guard read that as live. One
-        # failed sendChatAction therefore silenced a turn permanently, with the
-        # `working` safety net unable to restart it because it hit the same
-        # guard.
-        if task is not None and not task.done():
-            return
-        self._activity_tasks[session_id] = asyncio.create_task(
-            self._activity_loop(session_id, dest))
+        """Ensure both refresh loops are running.
+
+        Two tasks, not one, and that is the whole point of them being here
+        twice (found by dogfooding, 2026-09-12). They used to share a task,
+        which meant they shared a stall: a Telegram call from this host can
+        hang until its read timeout, and while the progress edit hung, the
+        chat action behind it in the same loop never went out. The indicator
+        died for forty seconds at a time and nothing anywhere said why.
+
+        Neither loop can now stop the other. Each still survives its own
+        failures, which is what `task.done()` is for below: a finished task is
+        still *in* the dict, and reading membership as "alive" is how one
+        failed call used to silence a turn permanently.
+        """
+        for tasks, loop in ((self._activity_tasks, self._activity_loop),
+                            (self._progress_tasks, self._progress_loop)):
+            task = tasks.get(session_id)
+            if task is not None and not task.done():
+                continue
+            tasks[session_id] = asyncio.create_task(loop(session_id, dest))
 
     async def _set_activity(self, session_id: str, state: str) -> None:
         """Record what the session is doing, and keep the indicator alive.
@@ -2351,7 +2362,7 @@ class FalconFoxTelegramBot:
         # a `.get() is None` guard here would silently mute the manager topic.
         dest = self._turn_dest[session_id]
         # Unconditional, so it doubles as the safety net that revives a loop
-        # which died mid-turn.
+        # which died mid-turn -- either of them.
         self._start_activity(session_id, dest)
         self._activity_state[session_id] = state
 
@@ -2804,17 +2815,19 @@ class FalconFoxTelegramBot:
         for what was handed over — and say so when that is nothing. Idempotent:
         the `idle` that follows a `turn_ended` finds nothing left to do."""
         self._turn_working.discard(session_id)
-        activity = self._activity_tasks.pop(session_id, None)
+        running = [task for task in (self._activity_tasks.pop(session_id, None),
+                                     self._progress_tasks.pop(session_id, None))
+                   if task is not None]
         had_turn = session_id in self._turn_dest
         dest = self._turn_dest.pop(session_id, None)
-        if activity:
+        for task in running:
             # Awaited, not merely cancelled: cancellation lands at the task's
             # next await, so an unawaited cancel leaves a tick still in flight
             # while the reply is being sent. Popping the destination first
             # means anything that does slip through finds the turn ended.
-            activity.cancel()
+            task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await activity
+                await task
         self._activity_state.pop(session_id, None)
         turn_id = self._turn_id.pop(session_id, None) or (event or {}).get("turn_id")
         started = self._turn_started_at.pop(session_id, None)
@@ -2896,9 +2909,22 @@ class FalconFoxTelegramBot:
             await self._flush_queue(session_id, dest)
 
     async def _activity_loop(self, session_id: str, dest: Dest) -> None:
+        """Keep "typing…" alive. Nothing else belongs in here: this is the one
+        signal that says the turn is not dead, and every await added to it is
+        another way for it to stop saying so."""
         try:
             while True:
                 await self._send_action(session_id, dest)
+                await asyncio.sleep(ACTION_REFRESH_SECONDS)
+        except asyncio.CancelledError:
+            raise
+
+    async def _progress_loop(self, session_id: str, dest: Dest) -> None:
+        """Keep the progress message current. Slower than it looks: most ticks
+        find nothing to do, since content marks itself dirty and the clock is
+        paced apart again (see `_update_progress`)."""
+        try:
+            while True:
                 await self._update_progress(session_id, dest)
                 await asyncio.sleep(ACTION_REFRESH_SECONDS)
         except asyncio.CancelledError:

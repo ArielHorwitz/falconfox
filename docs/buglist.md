@@ -51,6 +51,32 @@ consequence that does not happen, at a level that says something needs
 attention, on an ordinary restart. Either say it is waiting for the daemon,
 or say nothing until a retry has actually failed.
 
+## Telegram calls from this host intermittently hang until the read timeout
+
+*Diagnosed while dogfooding the turn-feedback simplification, 2026-09-12.
+Cause unknown; the symptom is now contained rather than fixed.*
+
+A call to the Bot API occasionally stops responding and sits there until
+`urlopen`'s read timeout (40s, `REQUEST_TIMEOUT`). It is not load: the host
+was idle, the bot's run-queue wait across a CPU-heavy stretch measured 0ms,
+and round trips to `api.telegram.org` measure ~50ms when they work at all.
+Today's journal has it on `getUpdates` ("Telegram polling failed:
+TimeoutError"), and the comment in `_send_action` records it from 2026-08-25
+on `sendChatAction`.
+
+How it was found: "typing…" died mid-turn and the progress message arrived in
+a 48-second batch. Watching the bot's sockets for 62s of a live turn showed
+about six connections where a 4-second tick should produce fifteen — the
+indicator loop was blocked inside one hung call.
+
+What has been done about it: the chat action and the progress edit no longer
+share a task, so one hang can no longer take the other down; the action gets
+an 8-second timeout, since one older than that is worthless anyway; and
+`_json_request` logs any call over 10s at WARNING, so the next occurrence
+leaves a trace. None of that explains why the calls hang. If the WARNING lines
+show a pattern (one method, one time of day, one IPv6 route — the bot reaches
+Telegram over v6 here), that is the thread to pull.
+
 ## An extra "Working..." message appears after the reply
 
 *Reported from use, 2026-09-08. Not investigated.*

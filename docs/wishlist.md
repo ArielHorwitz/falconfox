@@ -25,12 +25,13 @@ against them, or whether a forum's topics share one group allowance. Checked
 at the source, 2026-09-12. The progress message is edited every few seconds
 per live turn, so this is exactly the thing that would find the limit first.
 
-Wanted: parse `retry_after`, log it at WARNING with the method that hit it,
-and let the pacing be tuned against data instead of against inference. Honour
-the backoff too, if it turns out to happen at all. A week of logs checked on
-2026-09-12 held one 429, on `getUpdates`, none on edits — which is weak
-evidence that current volumes are nowhere near a ceiling, and no evidence
-about where the ceiling is.
+Half of this landed on 2026-09-12 for a different reason: `_json_request` now
+logs any call over 10 seconds at WARNING, so a call that is being held rather
+than answered leaves a trace. What is still missing is the 429 itself —
+parsing `retry_after`, naming the method that hit it, and honouring the
+backoff. A week of logs checked on 2026-09-12 held one 429, on `getUpdates`,
+none on edits, which is weak evidence that current volumes are nowhere near a
+ceiling and no evidence about where the ceiling is.
 
 See [2026-09-12__c716ca46](casebook/2026-09-12__c716ca46/overview.md), which
 chose a cadence on how it reads rather than on a number it could not verify.

@@ -119,20 +119,59 @@ Two smaller consequences fell out of the same reasoning:
 `sendChatAction` was never the expensive call. The loop that carries it is,
 because that loop also edits.
 
-## Also closed by this
+## What dogfooding found the same day
 
-A buglist entry, ["Chat actions lag the session's
-state"](../../buglist.md) (reported 2026-09-08, never investigated): the
-actions appeared to trail the state they reported. With one action for the
-whole turn there is no state for it to trail. The entry is deleted rather
-than answered — nobody ever found the cause, and the lag is now unobservable.
+Within an hour of going live: **"typing…" stopped appearing.** Reported from
+the phone as intermittent, with the progress message arriving in a
+48-second batch.
+
+It was a regression, and not where it looked. The indicator loop had always
+carried two jobs — send the chat action, then edit the progress message — and
+a Telegram call from this host intermittently hangs until its 40-second read
+timeout. While the edit hung, the action queued behind it in the same loop
+never went out. That stall predates this case by weeks. What this case removed
+was the thing hiding it: `_set_activity` used to fire a chat action as its own
+detached task on every state change, which kept the indicator alive across a
+stalled loop, at the cost of an API call per event.
+
+So the collapse from three signals to one was right, and it left the one
+remaining signal riding a loop that could stall. The two jobs are now two
+tasks, neither able to stop the other; the chat action gets an 8-second
+timeout, since one that has been in flight longer than the ~5 seconds it
+survives is worthless; and `_json_request` logs any call over 10 seconds at
+WARNING, because the whole reason this took an afternoon is that a 40-second
+stall was invisible in the logs.
+
+**How it was found** is worth keeping, because none of the obvious suspects
+were it. The host has one CPU and the turn that showed the symptom was running
+the test suite in a loop, which looked conclusive — but the bot's run-queue
+wait across that stretch measured 0ms, and the first measurement that said
+otherwise had been taken against the *stable* bot's pid rather than the dev
+one. `sendChatAction` with the exact live chat and thread returned `ok:true`
+by hand. What settled it was counting the bot's sockets: `urllib` opens a
+fresh connection per call, so 62 seconds of a live turn should show fifteen
+short-lived connections and showed about six, two of them held for ~30s.
+
+## The buglist entry this reopens
+
+["Chat actions lag the session's state"](../../buglist.md), reported
+2026-09-08 and never investigated, was this same fault seen from the phone:
+the action trailed the state because the loop that sent it was periodically
+stuck. An earlier draft of this case deleted that entry, on the reasoning that
+one action for the whole turn leaves no state to lag. That reasoning was
+wrong — the lag was never about which action was being sent.
+
+It is back on the list, rewritten around what is actually known: Telegram
+calls from this host hang until the read timeout, cause unknown. The symptom
+is contained now, not explained.
 
 The unexplained ["extra 'Working...' message appears after the
-reply"](../../buglist.md) is *not* fixed here and stays on the list.
+reply"](../../buglist.md) is *not* fixed here and stays on the list too.
 
 ## Where this stands
 
-Built 2026-09-12, suite green at 258 tests. **Open until it has been used**,
+Built 2026-09-12, dogfooded the same day (see above), suite green at 261
+tests. **Open until it has been used further**,
 which is the standard the case it supersedes set for itself: the 2026-08-24
 case closed on a couple of days of phone use, not on a green suite, and the
 things it got wrong were the desk guesses it named as desk guesses.

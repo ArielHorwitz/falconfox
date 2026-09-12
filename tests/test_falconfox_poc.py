@@ -996,6 +996,77 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await asyncio.sleep(0)
 
+    async def test_a_hung_progress_edit_does_not_stop_the_typing_indicator(self):
+        # Found by dogfooding, 2026-09-12. The two shared one loop, so they
+        # shared a stall: a Telegram call from that host hangs until its read
+        # timeout, and while the edit hung the chat action queued behind it
+        # never went out. "typing…" died for forty seconds at a time.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            release = asyncio.Event()
+
+            class HangingEdits(FakeTelegram):
+                async def edit_message(self, chat_id, message_id, text):
+                    await release.wait()
+                    await super().edit_message(chat_id, message_id, text)
+
+            bot.telegram = HangingEdits()
+            bot._progress_msg["session"] = 99
+            bot._progress_dirty.add("session")
+            # Several ticks in a few milliseconds. One action proves nothing --
+            # the shared loop sent its action before reaching the edit that hung
+            # -- so what is being asserted is that they *keep coming* while the
+            # edit is still in flight.
+            with patch.object(bot_module, "ACTION_REFRESH_SECONDS", 0.005):
+                bot._start_activity("session", Dest(-1001, 20))
+                await asyncio.sleep(0.05)
+            self.assertGreaterEqual(len(bot.telegram.actions), 3,
+                                    "the indicator must not wait on the progress edit")
+            self.assertEqual(bot.telegram.edits, [], "the edit is still hung")
+            release.set()
+            for task in (bot._activity_tasks.pop("session"),
+                         bot._progress_tasks.pop("session")):
+                task.cancel()
+
+    async def test_a_hung_chat_action_does_not_stop_the_progress_message(self):
+        # The same independence, read the other way round.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            release = asyncio.Event()
+
+            class HangingActions(FakeTelegram):
+                async def chat_action(self, chat_id, action, thread=None):
+                    await release.wait()
+                    await super().chat_action(chat_id, action, thread=thread)
+
+            bot.telegram = HangingActions()
+            bot._progress_msg["session"] = 99
+            bot._progress_dirty.add("session")
+            # One edit is enough here: the shared loop sent the action *first*,
+            # so a hung one meant the edit never happened at all.
+            with patch.object(bot_module, "ACTION_REFRESH_SECONDS", 0.005):
+                bot._start_activity("session", Dest(-1001, 20))
+                await asyncio.sleep(0.05)
+            self.assertTrue(bot.telegram.edits,
+                            "progress must not wait on the chat action")
+            self.assertEqual(bot.telegram.actions, [], "the action is still hung")
+            release.set()
+            for task in (bot._activity_tasks.pop("session"),
+                         bot._progress_tasks.pop("session")):
+                task.cancel()
+
+    async def test_ending_a_turn_stops_both_loops(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            bot._start_activity("session", Dest(-1001, 20))
+            activity = bot._activity_tasks["session"]
+            progress = bot._progress_tasks["session"]
+            await self._idle(bot)
+            self.assertEqual(bot._activity_tasks, {})
+            self.assertEqual(bot._progress_tasks, {})
+            self.assertTrue(activity.cancelled() or activity.done())
+            self.assertTrue(progress.cancelled() or progress.done())
+
     async def test_turn_ended_finalizes_and_the_following_idle_is_a_no_op(self):
         # The turn's end is now a fact the daemon states, not a state the client
         # infers. The idle that follows must find nothing left to do.
