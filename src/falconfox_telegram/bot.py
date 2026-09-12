@@ -48,27 +48,15 @@ TOPIC_UNCHANGED = "TOPIC_NOT_MODIFIED"
 # in `_reconcile_topics` for why this is paced on work rather than on loops.
 RECONCILE_PACE = 4.0
 
-# What happened to the message the user sent, marked on that message itself.
-# A reaction costs no message and no service message, which is the whole
-# point in a chat where every line is clutter on a phone screen -- and a bot
-# gets exactly one reaction per message, which suits it, since a message is
-# in exactly one state.
-#
-# Written as escapes on purpose: these are Telegram's own ReactionTypeEmoji
-# values, bare codepoints with no variation selector, and an escape is the
-# only way that stays visible to whoever edits this next.
-REACT_QUEUED = "\U0001f440"     # 👀 held while another turn runs
-REACT_RECEIVED = "\U0001fae1"   # 🫡 handed to the daemon, not yet started
-REACT_RUNNING = "\u270d"        # ✍ the agent is working on it
-REACT_DONE = "\U0001f44c"       # 👌 finished and delivered
-REACT_DISCARDED = "\U0001f494"  # 💔 cancelled, unqueued, or otherwise dropped
-REACT_FAILED = "\U0001f631"     # 😱 errored, lost, or delivered nothing
-
 # Queued rather than refused. The first one explains itself, because the two
-# ways out are not discoverable; the rest just count, because the whole point
-# is to add less to the chat than retyping would.
-# Said once per turn, not once per message: the reaction says "queued" on
-# every one of them, but no reaction can say what the ways out are.
+# ways out are not discoverable; the rest just count, in the progress
+# message's header, because the whole point is to add less to the chat than
+# retyping would.
+#
+# Said once per turn, not once per message: this used to be the half of the
+# story a 👀 reaction could not tell, and the reaction covered the rest. The
+# reactions are gone (user decision, 2026-09-12) and the header covers them
+# now.
 QUEUED_FIRST = (
     "📥 Queued — it goes out when this turn ends.\n"
     "/stop ends the turn now · /unqueue drops it · /fullstop does both."
@@ -92,15 +80,14 @@ LOST_TURN = (
     "⚠️ A turn was in flight for session {session_id}, but the session no "
     "longer exists — anything not already delivered is gone."
 )
-# The "stuck" half of turn feedback. Nothing can distinguish a long tool call
-# from a hung turn from outside, so the bot states the observable fact -- how
-# long since the daemon last said anything about this session -- exactly once
-# per quiet spell, and leaves the judgement to the reader.
-QUIET_TURN = (
-    "⏳ Nothing from the agent in {minutes} min (last activity: {state}). A "
-    "long tool call looks just like a stuck turn from here — /status shows "
-    "the daemon's view."
-)
+# The "stuck" half of turn feedback was a message of its own, said once per
+# quiet spell after three minutes of silence. It is now the progress header's
+# clock (user decision, 2026-09-12): the same observable fact, stated
+# continuously instead of once, and by a message that already exists. What a
+# reader does with it is unchanged, because nothing here can tell a long tool
+# call from a hung turn -- only /status can.
+
+
 class Dest(NamedTuple):
     """Where a turn talks: a chat, and a topic within it.
 
@@ -114,7 +101,6 @@ class Dest(NamedTuple):
     thread: int | None = None
 
 
-QUIET_TURN_SECONDS = 180
 # Service messages that are not prompts. Topic events are the bot's own
 # lifecycle calls echoing back through the update stream.
 # What a non-text message can carry, and what to call it when Telegram sends
@@ -512,14 +498,20 @@ COMMANDS = (
 )
 
 
-TURN_ACTIONS = {
-    "starting": "choose_sticker",    # resuming or launching the ACP subprocess
-    "working": "typing",             # alive, but producing nothing right now
-    "thinking": "find_location",     # agent_thought_chunk
-    "streaming": "record_voice",     # agent_message_chunk -- output is flowing
-    "tool": "upload_document",       # a tool call is running
-}
-DEFAULT_ACTION = TURN_ACTIONS["working"]
+# One action for the whole turn (user decision, 2026-09-12). The chat action
+# used to name the activity state -- find_location for thinking,
+# record_voice for streaming, upload_document for a tool call -- which was
+# added before the progress message existed and was the only account of what
+# a turn was doing. The progress message now says all of that, in words, with
+# the tool names in it, so the mime was left saying the same thing worse: a
+# bot "recording voice" describes nothing a reader can act on. What survives
+# is the one bit the progress message cannot carry, since an edit does not
+# notify: that the turn is still alive.
+#
+# Telegram expires an action after about 5 seconds, so the refresh has to be
+# under that. Faster buys nothing -- it re-arms the same timer -- and costs
+# real budget, because this is the loop that also edits the progress message.
+TURN_ACTION = "typing"
 ACTION_REFRESH_SECONDS = 4
 
 # A turn produces two kinds of text and the chat now separates them (user
@@ -535,8 +527,35 @@ ACTION_REFRESH_SECONDS = 4
 # the turn (so a turn that narrates nothing still has one), updated from the
 # activity loop so a hung edit can never stall the event pipeline, and capped
 # by trimming its oldest lines.
+#
+# The header carries a clock (user decision, 2026-09-12), and it is what
+# replaced the quiet notice: a turn that has gone silent used to be reported
+# once, in its own message, after three minutes of nothing. A clock climbing
+# above narration that has stopped changing says the same thing continuously
+# and costs no message at all.
+#
+# It is the one part of this message that changes with no new content, so it
+# is paced on its own rather than on the 4-second tick that carries content:
+# four refreshes a minute, which reads as live without spending an edit every
+# tick on a turn that is saying nothing. Narration is not throttled -- when
+# there is something new to show, the next tick shows it.
+#
+# What this is *not* is a calculated fit to a documented budget. Telegram
+# publishes three limits (one message per second per chat, 20 a minute to the
+# same group, ~30 a second overall) and all three are about *sending*; neither
+# the FAQ nor the API reference says whether an edit counts against them, or
+# whether a forum's topics share one allowance. So this is chosen on how it
+# reads, at a rate modest under any plausible answer. If the real limit ever
+# bites it will arrive as a 429, which is worth logging loudly.
 PROGRESS_HEADER = "🛠 Working…"
 PROGRESS_LIMIT = 3500
+# How often a clock that is the *only* thing to have changed may spend an edit.
+PROGRESS_CLOCK_SECONDS = 15
+# What is waiting behind this turn, shown in the header beside the clock. The
+# first queued message says this in words, threaded to itself; the ones after
+# it used to say it with a 👀 reaction and now say it here, where a count is
+# more use than a mark on each.
+PROGRESS_QUEUED = "📥 {count} queued"
 # Thought blocks join the progress message (user decision, 2026-08-25: the
 # chain of thought streams into it), but trimmed: a single thinking block can
 # run to thousands of characters and would evict everything else. The opening
@@ -685,7 +704,6 @@ class FalconFoxTelegramBot:
         # while the bot was away, so they deliver from the transcript instead.
         self._adopted: set[str] = set()
         self._last_event_at: dict[str, float] = {}
-        self._quiet_notified: set[str] = set()
         # The two-message turn: the user's prompt message (the final reply
         # threads to it), and the per-turn progress message with its
         # accumulated narration/tool lines.
@@ -693,12 +711,15 @@ class FalconFoxTelegramBot:
         self._progress_msg: dict[str, int] = {}
         self._progress_lines: dict[str, list[str]] = {}
         self._progress_dirty: set[str] = set()
+        # What the header said the last time an edit went out, and when that
+        # was: the first tells a clock that has moved from one that has not,
+        # the second paces a refresh that carries nothing but the clock.
+        self._progress_sent: dict[str, tuple[str, float]] = {}
         self._seen_tools: dict[str, set[str]] = {}
         self._thought_parts: dict[str, list[str]] = {}
         # Latest usage figures per session (context used/size, token totals),
         # merged from the daemon's usage events for the turn's final stamp.
         self._usage_view: dict[str, dict] = {}
-        self._action_sends: set[asyncio.Task] = set()
         self._ws = None
         self._ws_lock = asyncio.Lock()
         # The turn→chat map, persisted so it survives the process. A bot
@@ -855,11 +876,11 @@ class FalconFoxTelegramBot:
         self._consumed.clear()
         self._adopted.clear()
         self._last_event_at.clear()
-        self._quiet_notified.clear()
         self._prompt_msg.clear()
         self._progress_msg.clear()
         self._progress_lines.clear()
         self._progress_dirty.clear()
+        self._progress_sent.clear()
         self._seen_tools.clear()
         self._thought_parts.clear()
         self._usage_view.clear()
@@ -927,9 +948,6 @@ class FalconFoxTelegramBot:
             if state is None:
                 log.warning("persisted turn lost: session=%s no longer exists", session_id)
                 await self._say(dest, LOST_TURN.format(session_id=session_id))
-                await self._react(dest, record.get("prompt_msg"), REACT_FAILED)
-                for item in record.get("queued") or []:
-                    await self._react(dest, item.get("message_id"), REACT_FAILED)
                 if record.get("queued"):
                     # The turn's own reply is gone with the session; say the
                     # queued messages went with it rather than dropping them
@@ -966,10 +984,9 @@ class FalconFoxTelegramBot:
             self._progress_lines[session_id] = list(record["progress"])
         if record.get("queued"):
             self._queues[session_id] = list(record["queued"])
-        # Seed the quiet clock: the turn has a past, but this process has no
-        # event history for it. Without this, adoption instantly fired a
-        # spurious "quiet for 10 min" warning (observed on the first live
-        # adoption, 2026-08-25 16:23) because the fallback is the start time.
+        # The turn has a past, but this process has no event history for it,
+        # so "last heard from" starts now. /status reads this; the header's
+        # clock does not, and shows the turn's real age from the record above.
         self._last_event_at[session_id] = time.monotonic()
         self._turn_working.add(session_id)
         self._adopted.add(session_id)
@@ -1267,7 +1284,6 @@ class FalconFoxTelegramBot:
                             f"not let a bot download more than 20MB, though it lets "
                             f"one send 50MB. Not our limit, and no way around it.",
                             reply_to=prompt_msg)
-            await self._react(dest, prompt_msg, REACT_FAILED)
             return
         try:
             remote = await self.telegram.file_path(attachment["file_id"])
@@ -1283,7 +1299,6 @@ class FalconFoxTelegramBot:
             log.warning("could not take a file for %s", session_id, exc_info=True)
             await self._say(dest, f"Could not take that file: {error}",
                             reply_to=prompt_msg)
-            await self._react(dest, prompt_msg, REACT_FAILED)
             return
         self._trays.setdefault(session_id, []).append({
             "file_id": stored["file_id"], "path": stored["path"],
@@ -1293,10 +1308,9 @@ class FalconFoxTelegramBot:
         self._persist_tray()
         log.info("tray add: session=%s file=%s name=%s depth=%d", session_id,
                  stored["file_id"], stored["name"], len(self._trays[session_id]))
-        # The reaction and the receipt say different things. The receipt says
-        # what happened, once; 👀 says what is still true, which is what makes
-        # the sweep visible later without spending another message on it.
-        await self._react(dest, prompt_msg, REACT_QUEUED)
+        # The receipt is the whole of it now. It says what happened, once,
+        # threaded to the file it happened to; a 👀 on that message used to
+        # say the file was *still* waiting, and /tray is what answers that.
         await self._say_html(
             dest,
             TRAY_RECEIPT.format(name=html.escape(stored["name"], quote=False),
@@ -1863,7 +1877,6 @@ class FalconFoxTelegramBot:
             except ApiError:
                 log.warning("could not delete tray file %s", item["file_id"],
                             exc_info=True)
-            await self._react(dest, item.get("message_id"), REACT_DISCARDED)
         remaining = [item for item in tray if item not in dropped]
         if remaining:
             self._trays[session_id] = remaining
@@ -1929,8 +1942,6 @@ class FalconFoxTelegramBot:
             return
         dropped = (self._drop_queue(session_id)
                    if command in ("/unqueue", "/fullstop") else [])
-        for item in dropped:
-            await self._react(dest, item.get("message_id"), REACT_DISCARDED)
         if command == "/unqueue":
             await self._say(dest, f"🗑 Dropped {len(dropped)} queued message(s)."
                             if dropped else "Nothing was queued.")
@@ -2306,8 +2317,8 @@ class FalconFoxTelegramBot:
                     f"queued={len(self._queues.get(session_id, []))}")
         return "\n".join(lines)
 
-    def _start_activity(self, session_id: str, dest: Dest) -> bool:
-        """Ensure a refresh loop is running. True if this call started one."""
+    def _start_activity(self, session_id: str, dest: Dest) -> None:
+        """Ensure a refresh loop is running."""
         task = self._activity_tasks.get(session_id)
         # `task.done()` matters: a finished task is still *in* the dict, and the
         # old `session_id not in self._typing_tasks` guard read that as live. One
@@ -2315,37 +2326,34 @@ class FalconFoxTelegramBot:
         # `working` safety net unable to restart it because it hit the same
         # guard.
         if task is not None and not task.done():
-            return False
+            return
         self._activity_tasks[session_id] = asyncio.create_task(
             self._activity_loop(session_id, dest))
-        return True
 
     async def _set_activity(self, session_id: str, state: str) -> None:
-        """Record what the session is doing and show it in the chat."""
+        """Record what the session is doing, and keep the indicator alive.
+
+        Recording only. A state change used to send its own chat action,
+        because the action named the state and a change meant a different
+        word; with one action for the whole turn there is nothing new to
+        send, and the loop's own 4-second tick is the only thing that has to
+        keep running. The state itself still matters -- /status reports it.
+
+        That also takes this call off the Telegram path entirely, which is
+        where it wanted to be: it sits on the event pipeline, and one hung
+        send here stalled every queued daemon event behind it (observed live
+        2026-08-25, 09:06: a 40-second read timeout delayed a finished reply
+        by 45 seconds).
+        """
         if session_id not in self._turn_dest:
             return
         # None is a real destination (General), so membership is the test --
         # a `.get() is None` guard here would silently mute the manager topic.
         dest = self._turn_dest[session_id]
-        # Before the equality check, so this doubles as the safety net that
-        # revives a loop which died mid-turn.
-        started = self._start_activity(session_id, dest)
-        previous = self._activity_state.get(session_id)
-        if previous == state:
-            return
+        # Unconditional, so it doubles as the safety net that revives a loop
+        # which died mid-turn.
+        self._start_activity(session_id, dest)
         self._activity_state[session_id] = state
-        # Streamed output fires an event per chunk; only a *change* is worth an
-        # API call. A fresh loop sends immediately, so it needs no second one.
-        #
-        # Detached, never awaited inline: this sits on the event-pipeline path,
-        # and one hung Telegram call here stalls every queued daemon event
-        # behind it. Observed live (2026-08-25, 09:06): a 40s read timeout
-        # delayed a finished reply by 45 seconds. The indicator is droppable
-        # decoration; the pipeline is not allowed to wait for it.
-        if not started:
-            task = asyncio.create_task(self._send_action(session_id, dest))
-            self._action_sends.add(task)
-            task.add_done_callback(self._action_sends.discard)
 
     def _close_block(self, session_id: str) -> None:
         """A tool call has interrupted the text: what came before it is
@@ -2387,6 +2395,19 @@ class FalconFoxTelegramBot:
             lines.append(marker)
         self._progress_dirty.add(session_id)
 
+    def _progress_header(self, session_id: str) -> str:
+        """The live header: what the turn is doing, for how long, and what is
+        waiting behind it. Rebuilt on every tick, and its text is what decides
+        whether the tick spends an edit."""
+        started = self._turn_started_at.get(session_id)
+        header = PROGRESS_HEADER
+        if started is not None:
+            header += f" ({_format_elapsed(time.monotonic() - started)})"
+        queued = len(self._queues.get(session_id, ()))
+        if queued:
+            header += f" · {PROGRESS_QUEUED.format(count=queued)}"
+        return header
+
     async def _update_progress(self, session_id: str, dest: Dest, *,
                                final_note: str | None = None) -> None:
         """Create or edit the turn's progress message. Rides the activity loop
@@ -2400,17 +2421,29 @@ class FalconFoxTelegramBot:
             # landed. `final_note` is the finalization itself, which runs
             # after the destination is popped, so it is exempt.
             return
+        header = final_note or self._progress_header(session_id)
         if final_note is None and session_id not in self._progress_dirty:
-            return
+            sent, sent_at = self._progress_sent.get(session_id, ("", 0.0))
+            if header == sent:
+                # The common tick: nothing new, and not even the clock has
+                # moved on from what is already on screen.
+                return
+            if time.monotonic() - sent_at < PROGRESS_CLOCK_SECONDS:
+                # Only the clock moved, and it moved recently enough that this
+                # tick has nothing worth an edit. Anything with content to show
+                # marks itself dirty and never reaches here.
+                return
         lines = self._progress_lines.get(session_id) or []
         message_id = self._progress_msg.get(session_id)
         # Nothing accumulated and nothing on screen to stamp: stay silent. (A
         # normal turn has a message from _forward; this guards turns primed by
-        # other paths, e.g. adopted ones whose creation failed.)
-        if not lines and (final_note is None or message_id is None):
+        # other paths, e.g. adopted ones whose creation failed.) A message that
+        # does exist is edited even with no lines under it, because the header
+        # alone is the whole point on a turn that has narrated nothing yet.
+        if not lines and message_id is None:
             return
         self._progress_dirty.discard(session_id)
-        header = final_note or PROGRESS_HEADER
+        self._progress_sent[session_id] = (header, time.monotonic())
         text = "\n".join([header, "", *lines]) if lines else header
         while len(text) > PROGRESS_LIMIT and len(lines) > 1:
             del lines[0]
@@ -2425,7 +2458,10 @@ class FalconFoxTelegramBot:
                 await self.telegram.edit_message(dest.chat, message_id, text)
         except ApiError as error:
             # Progress is decoration; a failed update waits for the next tick.
+            # The recorded header goes with it: nothing reached the screen, so
+            # remembering what was sent would silence the retry.
             self._progress_dirty.add(session_id)
+            self._progress_sent.pop(session_id, None)
             log.debug("progress update failed for %s: %s", session_id, error)
 
     async def _send_reply(self, session_id: str, dest: Dest) -> None:
@@ -2456,37 +2492,19 @@ class FalconFoxTelegramBot:
 
     async def _send_action(self, session_id: str, dest: Dest) -> None:
         if session_id not in self._turn_dest:
-            # Same race as the progress message: these are fired as their own
-            # tasks and nothing cancels the ones already queued, so a stale
-            # one would show "typing…" after the answer had arrived.
+            # Same race as the progress message: cancelling the loop is not
+            # instantaneous, and a tick already inside its HTTP call finishes
+            # it, so a stale one would show "typing…" after the answer landed.
             return
-        action = TURN_ACTIONS.get(
-            self._activity_state.get(session_id, ""), DEFAULT_ACTION)
         try:
-            await self.telegram.chat_action(dest.chat, action, thread=dest.thread)
+            await self.telegram.chat_action(dest.chat, TURN_ACTION,
+                                            thread=dest.thread)
         except ApiError as error:
             # Never fatal to the loop. A 429 from the rate limiter -- likeliest
             # on exactly the long turn that needs an indicator -- or one of the
             # read timeouts this deployment sees used to end the task outright
             # and leave the turn silent for the rest of its life.
-            log.debug("chat action %s failed for %s: %s", action, session_id, error)
-
-    async def _react(self, dest: Dest, message_id: int | None,
-                     emoji: str | None) -> None:
-        """Mark a message with the bot's one reaction. Best-effort.
-
-        There is no endpoint listing the emoji Telegram accepts as reactions,
-        so a wrong one can only fail at the call. It fails loudly in the log
-        and silently in the chat: a lost marker is decoration, and must never
-        cost a turn.
-        """
-        if message_id is None:
-            return
-        try:
-            await self.telegram.set_reaction(dest.chat, message_id, emoji)
-        except ApiError:
-            log.warning("could not react %r to message %s", emoji, message_id,
-                        exc_info=True)
+            log.debug("chat action failed for %s: %s", session_id, error)
 
     async def _enqueue_message(self, session_id: str, dest: Dest, text: str,
                                prompt_msg: int | None = None) -> None:
@@ -2496,7 +2514,10 @@ class FalconFoxTelegramBot:
         self._persist_turns()
         log.info("queued mid-turn message: session=%s dest=%s depth=%d",
                  session_id, dest, len(queue))
-        await self._react(dest, prompt_msg, REACT_QUEUED)
+        # The depth is in the header, and it is the receipt for something the
+        # user just did, so it goes out on the next tick rather than waiting
+        # for the clock's turn to come round.
+        self._progress_dirty.add(session_id)
         if len(queue) == 1:
             await self._say(dest, QUEUED_FIRST, reply_to=prompt_msg)
 
@@ -2504,6 +2525,9 @@ class FalconFoxTelegramBot:
         dropped = self._queues.pop(session_id, [])
         if dropped:
             self._persist_turns()
+            # Same as queueing: the header's count answers for this, so it
+            # must not sit at a depth that is no longer true.
+            self._progress_dirty.add(session_id)
         return dropped
 
     async def _flush_queue(self, session_id: str, dest: Dest) -> None:
@@ -2525,11 +2549,8 @@ class FalconFoxTelegramBot:
         text = "\n\n".join(item["text"] for item in queued)
         log.info("flushing queue: session=%s messages=%d chars=%d",
                  session_id, len(queued), len(text))
-        # They are one prompt now, and the last of them is its address: it
-        # carries the turn's markers from here. The rest lose their "queued"
-        # glyph, which stopped being true the moment this ran.
-        for item in queued[:-1]:
-            await self._react(dest, item.get("message_id"), None)
+        # They are one prompt now, and the last of them is its address: the
+        # turn threads its reply there.
         await self._forward(session_id, dest, text,
                             prompt_msg=queued[-1].get("message_id"))
 
@@ -2562,6 +2583,7 @@ class FalconFoxTelegramBot:
             self._prompt_msg[session_id] = prompt_msg
         self._progress_lines.pop(session_id, None)
         self._progress_msg.pop(session_id, None)
+        self._progress_sent.pop(session_id, None)
         self._seen_tools.pop(session_id, None)
         self._thought_parts.pop(session_id, None)
         self._turn_started_at[session_id] = time.monotonic()
@@ -2578,23 +2600,16 @@ class FalconFoxTelegramBot:
             await self._ws.send(json.dumps({
                 "action": "send", "session_id": session_id, "text": text,
             }))
-        # Handed over, but the agent may not have it yet: a stored session
-        # resumes an ACP subprocess first, and that gap is the one the typing
-        # indicator cannot tell apart from work.
-        await self._react(dest, prompt_msg, REACT_RECEIVED)
-        # What was carried stops being pending, so it loses the 👀 it wore
-        # while it waited -- the same clearing `_flush_queue` does for the
-        # messages it joined into one prompt.
-        for item in carried:
-            await self._react(dest, item.get("message_id"), None)
         # The progress message exists from the first moment of the turn (user
         # decision, 2026-08-25) -- sent after the prompt so a slow Telegram
         # call never delays the actual work, and silently: progress is
         # ambient, only the response should ping.
         try:
-            message_id = await self._say(dest, PROGRESS_HEADER, silent=True)
+            header = self._progress_header(session_id)
+            message_id = await self._say(dest, header, silent=True)
             if message_id is not None:
                 self._progress_msg[session_id] = message_id
+                self._progress_sent[session_id] = (header, time.monotonic())
                 self._persist_turns()
         except ApiError as error:
             log.debug("could not create the progress message: %s", error)
@@ -2607,10 +2622,9 @@ class FalconFoxTelegramBot:
         session_id = event.get("session_id")
         if not session_id:
             return
-        # Any event is a sign of life; a fresh one also ends a quiet spell, so
-        # the next long silence gets its own notice.
+        # Any event is a sign of life, and /status reports how long ago the
+        # last one was.
         self._last_event_at[session_id] = time.monotonic()
-        self._quiet_notified.discard(session_id)
         event_type = event.get("type")
         if event_type == "message":
             role = event.get("role")
@@ -2706,8 +2720,6 @@ class FalconFoxTelegramBot:
                 self._turn_id[session_id] = event.get("turn_id") or ""
                 self._persist_turns()
                 log.info("turn started: session=%s turn=%s", session_id, event.get("turn_id"))
-                await self._react(self._turn_dest[session_id],
-                                  self._prompt_msg.get(session_id), REACT_RUNNING)
             return
         if event_type == "turn_ended":
             # The authoritative end of a turn. `idle` below stays only as a
@@ -2832,9 +2844,6 @@ class FalconFoxTelegramBot:
                 note = "✖️ Turn cancelled"
             else:
                 note = "✅ Turn finished"
-            marker = (REACT_FAILED if outcome == "error"
-                      else REACT_DISCARDED if stop == "cancelled"
-                      else REACT_DONE)
             if elapsed >= 0:
                 note += f" · {_format_elapsed(elapsed)}"
             if tools:
@@ -2852,10 +2861,10 @@ class FalconFoxTelegramBot:
         self._consumed.pop(session_id, None)
         self._adopted.discard(session_id)
         self._last_event_at.pop(session_id, None)
-        self._quiet_notified.discard(session_id)
         self._reply_parts.pop(session_id, None)
         prompt_msg = self._prompt_msg.pop(session_id, None)
         self._progress_msg.pop(session_id, None)
+        self._progress_sent.pop(session_id, None)
         self._progress_lines.pop(session_id, None)
         self._progress_dirty.discard(session_id)
         self._seen_tools.pop(session_id, None)
@@ -2878,10 +2887,8 @@ class FalconFoxTelegramBot:
                     detail = f"the agent produced no output; stop reason: {stop or 'unknown'}"
                 log.warning("turn delivered nothing: session=%s turn=%s %s",
                             session_id, turn_id, detail)
-                marker = REACT_FAILED
                 await self._say(dest, SILENT_TURN.format(detail=detail),
                                             reply_to=prompt_msg)
-            await self._react(dest, prompt_msg, marker)
         # Last, and outside the had_turn branch: a queue drains whenever a turn
         # ends, however it ended. /stop does not flush anything itself -- it
         # ends the turn, and this is what ending a turn does.
@@ -2893,28 +2900,6 @@ class FalconFoxTelegramBot:
             while True:
                 await self._send_action(session_id, dest)
                 await self._update_progress(session_id, dest)
-                await self._check_quiet(session_id, dest)
                 await asyncio.sleep(ACTION_REFRESH_SECONDS)
         except asyncio.CancelledError:
             raise
-
-    async def _check_quiet(self, session_id: str, dest: Dest) -> None:
-        """Say -- once per spell -- that a turn has gone quiet for a long time."""
-        if session_id in self._quiet_notified:
-            return
-        last = self._last_event_at.get(session_id) or self._turn_started_at.get(session_id)
-        if last is None:
-            return
-        quiet = time.monotonic() - last
-        if quiet < QUIET_TURN_SECONDS:
-            return
-        self._quiet_notified.add(session_id)
-        state = self._activity_state.get(session_id) or "working"
-        log.info("quiet turn: session=%s quiet=%.0fs state=%s", session_id, quiet, state)
-        try:
-            await self._say(dest, QUIET_TURN.format(
-                minutes=int(quiet // 60), state=state),
-                reply_to=self._prompt_msg.get(session_id))
-        except Exception:
-            # The notice is decoration; the loop it rides on is not.
-            log.warning("could not report the quiet turn to %s", dest)

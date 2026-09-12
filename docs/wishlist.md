@@ -8,6 +8,33 @@ Keep entries short and honest about status. When something is picked up, delete
 the entry; the reason it was wanted belongs in whatever case takes it on. See
 [buglist.md](buglist.md) for things that are broken rather than missing.
 
+## Notice when Telegram rate-limits us
+
+*From the turn-feedback simplification, 2026-09-12.*
+
+`api.py` has no 429 handling. A "Too Many Requests" is just an `ApiError`, and
+the callers that matter swallow it: a failed progress edit is logged at
+`debug` and retried on the next tick, a failed chat action at `debug` too. The
+bot could sit against a limit indefinitely and say nothing anywhere.
+
+That matters more than it looks, because the budget is genuinely unknown.
+Telegram documents three limits and all three are about *sending* — one
+message a second per chat, 20 a minute to the same group, ~30 a second overall
+— and says nothing about whether `editMessageText` or `sendChatAction` count
+against them, or whether a forum's topics share one group allowance. Checked
+at the source, 2026-09-12. The progress message is edited every few seconds
+per live turn, so this is exactly the thing that would find the limit first.
+
+Wanted: parse `retry_after`, log it at WARNING with the method that hit it,
+and let the pacing be tuned against data instead of against inference. Honour
+the backoff too, if it turns out to happen at all. A week of logs checked on
+2026-09-12 held one 429, on `getUpdates`, none on edits — which is weak
+evidence that current volumes are nowhere near a ceiling, and no evidence
+about where the ceiling is.
+
+See [2026-09-12__c716ca46](casebook/2026-09-12__c716ca46/overview.md), which
+chose a cadence on how it reads rather than on a number it could not verify.
+
 ## Desktop client — delete the dead web UI soon, maybe repair it later
 
 *From the falconfox pivot case, 2026-08-24. Reversed from the phone,

@@ -1,5 +1,16 @@
 # Overview
 
+**PARTLY SUPERSEDED 2026-09-12** by
+[2026-09-12__c716ca46](../2026-09-12__c716ca46/overview.md). This case
+answered "idle / working / stuck" three times at three altitudes and said so;
+the progress message, the last of the three to arrive, turned out to subsume
+the other two. The five-state chat action is now one `typing` for the whole
+turn, the quiet-turn warning is a clock in the progress header, and the
+reactions on the user's own message are gone entirely. The two-message turn,
+the thought streaming, the stamp, the threading, the adoption and the
+transcript recovery are all untouched and are still what this case says they
+are.
+
 **Status: CLOSED (2026-08-28).** Closed on live use rather than on tests,
 which is the standard it set for itself: after a couple of days of Telegram
 use from the phone, the per-turn granularity works well and the feedback is

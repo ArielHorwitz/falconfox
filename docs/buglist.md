@@ -51,14 +51,6 @@ consequence that does not happen, at a level that says something needs
 attention, on an ordinary restart. Either say it is waiting for the daemon,
 or say nothing until a retry has actually failed.
 
-## Chat actions lag the session's state
-
-*Reported from use, 2026-09-08. Not investigated.*
-
-The actions the bot uses to show what a session is doing (typing, sending a
-file, recording voice) seem to be delayed somewhat behind the state they
-report.
-
 ## An extra "Working..." message appears after the reply
 
 *Reported from use, 2026-09-08. Not investigated.*

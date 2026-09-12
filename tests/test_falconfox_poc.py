@@ -28,10 +28,9 @@ from falconfox.storage import SessionStore
 from falconfox.watchdog import StallWatchdog
 from falconfox_telegram import bot as bot_module
 from falconfox_telegram.api import ApiError, DaemonApi, _json_request
-from falconfox_telegram.bot import (QUEUED_FIRST, REACT_QUEUED, REACT_RECEIVED,
-                                    REACT_RUNNING, REACT_DONE, REACT_DISCARDED,
-                                    REACT_FAILED, Dest, DAEMON_DOWN, QUIET_TURN_SECONDS,
-                                    TURN_ACTIONS, BotConfig, FalconFoxTelegramBot)
+from falconfox_telegram.bot import (QUEUED_FIRST, Dest, DAEMON_DOWN,
+                                    PROGRESS_HEADER, PROGRESS_CLOCK_SECONDS,
+                                    TURN_ACTION, BotConfig, FalconFoxTelegramBot)
 from falconfox_telegram.rendering import TELEGRAM_MESSAGE_LIMIT, render_messages
 from falconfox_telegram.bot import (COMMANDS, PHOTO_LIMIT_BYTES, SECTIONS,
                                     _inline_code, _upload_kind, _write_atomic)
@@ -621,9 +620,8 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             bot.telegram = fake
             bot._turn_dest["session"] = Dest(-1001, 20)
             bot._reply_parts["session"] = []
-            # The drains between events: action sends are detached tasks now
-            # (a hung one must not stall the pipeline), so give each a tick to
-            # land before the next state change.
+            # The drains between events: the indicator rides its own loop task,
+            # so give it a tick to land.
             await bot._handle_event({"type": "agent_state", "session_id": "session",
                                      "state": "working"})
             await asyncio.sleep(0)
@@ -636,18 +634,16 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             await bot._handle_event({"type": "message", "session_id": "session",
                                      "role": "agent", "text": "**world**"})
             await asyncio.sleep(0)
+            self.assertEqual(bot._activity_state["session"], "streaming",
+                             "the state is still tracked, for /status")
             await bot._handle_event({"type": "agent_state", "session_id": "session",
                                      "state": "idle"})
             await asyncio.sleep(0)
-            # One action per state *change*: a chunk-by-chunk stream must not
-            # produce a call per chunk, and the tool call is visible as state
-            # without being rendered as a message of its own.
-            self.assertEqual(fake.actions, [
-                (20, TURN_ACTIONS["working"]),
-                (20, TURN_ACTIONS["streaming"]),
-                (20, TURN_ACTIONS["tool"]),
-                (20, TURN_ACTIONS["streaming"]),
-            ])
+            # The action is sent by the loop alone now, so a stream of events
+            # spends no calls at all on it: what each of them changed used to
+            # be a different action, and is now a progress line. One send, from
+            # the loop's first tick.
+            self.assertEqual(fake.actions, [(20, TURN_ACTION)])
             # The text before the tool call was narration introducing it; both
             # land in the finalized progress message. The reply is only the
             # final block -- the answer, not the working chatter.
@@ -678,15 +674,15 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             # The indicator is live before the daemon has reported any state at
             # all -- the backend may still be starting up or resuming.
-            self.assertEqual(fake.actions, [(20, TURN_ACTIONS["working"])])
+            self.assertEqual(fake.actions, [(20, TURN_ACTION)])
             self.assertEqual(sent, [{"action": "send", "session_id": "session",
                                      "text": "do the thing"}])
-            # A later `working` event must not start a second loop, nor repeat
-            # the action for a state that has not changed.
+            # A later event must not start a second loop, nor send an action of
+            # its own: the running loop is the only thing that sends.
             await bot._handle_event({"type": "agent_state", "session_id": "session",
                                      "state": "working"})
             await asyncio.sleep(0)
-            self.assertEqual(fake.actions, [(20, TURN_ACTIONS["working"])])
+            self.assertEqual(fake.actions, [(20, TURN_ACTION)])
             await bot._handle_event({"type": "agent_state", "session_id": "session",
                                      "state": "idle"})
             self.assertEqual(bot._activity_tasks, {})
@@ -715,12 +711,10 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(bot._activity_tasks["session"].done(),
                              "one failed chat action must not end the loop")
 
-            # Recovered: the next state change reaches the chat.
+            # Recovered: the loop is still there, and its next tick lands.
             fake.action_error = None
-            await bot._handle_event({"type": "message", "session_id": "session",
-                                     "role": "agent", "text": "hi"})
-            await asyncio.sleep(0)
-            self.assertEqual(fake.actions, [(20, TURN_ACTIONS["streaming"])])
+            await bot._send_action("session", Dest(-1001, 20))
+            self.assertEqual(fake.actions, [(20, TURN_ACTION)])
             await bot._handle_event({"type": "agent_state", "session_id": "session",
                                      "state": "idle"})
             self.assertEqual(bot._activity_tasks, {})
@@ -859,7 +853,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
 
             bot._ws = FakeWebSocket()
             await bot._forward("session", Dest(-1001, 20), "question", prompt_msg=1)
-            self.assertEqual(bot.telegram.messages, [(20, "🛠 Working…")])
+            self.assertEqual(bot.telegram.messages, [(20, "🛠 Working… (0s)")])
             self.assertEqual(bot.telegram.message_silent, [True])
             self.assertIn("session", bot._progress_msg)
             await bot._handle_event({"type": "turn_ended", "session_id": "session",
@@ -1176,22 +1170,65 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             persisted = json.loads(bot._turns_file.read_text())
             self.assertEqual(persisted["session"]["thread"], 20)
 
-    async def test_a_long_quiet_turn_is_said_once_per_spell(self):
-        # "Stuck" cannot be told apart from a long tool call from outside, so
-        # the bot states the observable fact -- how long since the daemon last
-        # said anything -- once per quiet spell, not once per tick.
+    async def test_a_long_quiet_turn_shows_it_in_the_header_on_its_own_pace(self):
+        # What replaced the quiet notice. A turn that has said nothing for a
+        # long time is visible as a climbing clock over narration that has
+        # stopped changing, and it costs no message of its own -- nor an edit
+        # per tick, since a clock that is the only thing to have moved is
+        # paced apart from the 4-second tick that carries content.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot_mid_turn(directory)
-            bot._last_event_at["session"] = time.monotonic() - QUIET_TURN_SECONDS - 1
-            await bot._check_quiet("session", Dest(-1001, 20))
-            await bot._check_quiet("session", Dest(-1001, 20))
-            self.assertEqual(len(bot.telegram.messages), 1)
-            self.assertIn("Nothing from the agent", bot.telegram.messages[0][1])
-            # An event ends the spell; the next long silence is its own news.
-            await self._stream(bot, "sign of life")
-            bot._last_event_at["session"] = time.monotonic() - QUIET_TURN_SECONDS - 1
-            await bot._check_quiet("session", Dest(-1001, 20))
-            self.assertEqual(len(bot.telegram.messages), 2)
+            bot._turn_started_at["session"] = time.monotonic() - 601
+            bot._progress_msg["session"] = 99
+            await bot._update_progress("session", Dest(-1001, 20))
+            self.assertEqual(bot.telegram.edits[-1][2], f"{PROGRESS_HEADER} (10m01s)")
+            edits = len(bot.telegram.edits)
+            # The clock has moved, but not long enough ago to be worth an edit.
+            bot._turn_started_at["session"] = time.monotonic() - 605
+            await bot._update_progress("session", Dest(-1001, 20))
+            await bot._update_progress("session", Dest(-1001, 20))
+            self.assertEqual(len(bot.telegram.edits), edits,
+                             "a clock-only tick must not spend an edit")
+            # Once the interval has passed, it does.
+            header, _ = bot._progress_sent["session"]
+            bot._progress_sent["session"] = (
+                header, time.monotonic() - PROGRESS_CLOCK_SECONDS - 1)
+            await bot._update_progress("session", Dest(-1001, 20))
+            self.assertEqual(bot.telegram.edits[-1][2], f"{PROGRESS_HEADER} (10m05s)")
+            self.assertEqual(bot.telegram.messages, [],
+                             "the clock costs no message of its own")
+            await self._idle(bot)
+
+    async def test_narration_is_never_held_back_by_the_clock_s_pace(self):
+        # The pace is for a header that moved on its own. Anything with
+        # something to show marks itself dirty and goes out on the next tick.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            bot._progress_msg["session"] = 99
+            await bot._update_progress("session", Dest(-1001, 20))
+            edits = len(bot.telegram.edits)
+            await self._stream(bot, "a thing happened")
+            bot._close_block("session")
+            await bot._update_progress("session", Dest(-1001, 20))
+            self.assertEqual(len(bot.telegram.edits), edits + 1)
+            self.assertIn("a thing happened", bot.telegram.edits[-1][2])
+            await self._idle(bot)
+
+    async def test_a_queued_message_reaches_the_header_without_waiting(self):
+        # The depth is the receipt for something the user just did, so it does
+        # not sit behind the clock's pace.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory)
+            bot._progress_msg["session"] = 99
+            await bot._update_progress("session", Dest(-1001, 20))
+            edits = len(bot.telegram.edits)
+            await bot._enqueue_message("session", Dest(-1001, 20), "and also", 11)
+            await bot._update_progress("session", Dest(-1001, 20))
+            self.assertEqual(len(bot.telegram.edits), edits + 1)
+            self.assertIn("📥 1 queued", bot.telegram.edits[-1][2])
+            # Dropped rather than flushed: the flush would forward a prompt,
+            # and this fixture has no socket to forward it on.
+            bot._drop_queue("session")
             await self._idle(bot)
 
 
@@ -1313,8 +1350,8 @@ class TurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             old = self._bot(directory)
             old._turn_dest["session"] = Dest(-1001, 20)
-            # Long-running: without a seeded quiet clock, adoption would fire
-            # a spurious "quiet" warning off the inherited start time.
+            # Long-running, so the adopted turn inherits a start time rather
+            # than beginning its clock again at zero.
             old._turn_started_at["session"] = time.monotonic() - 600
             old._persist_turns()
 
@@ -1324,9 +1361,6 @@ class TurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await bot._reconcile_persisted_turns()
             self.assertEqual(bot._turn_dest, {"session": Dest(-1001, 20)})
             self.assertIn("session", bot._adopted)
-            await bot._check_quiet("session", Dest(-1001, 20))
-            self.assertEqual(bot.telegram.messages, [],
-                             "adoption must not trigger the quiet warning")
             # Post-adoption chunks accumulate but must not be delivered from
             # the gappy buffer: the settled transcript at turn end is the only
             # complete source, and nothing may be sent twice.
@@ -1337,8 +1371,6 @@ class TurnRecoveryTests(unittest.IsolatedAsyncioTestCase):
                                      "stop_reason": "end_turn", "output_chars": 14})
             self.assertEqual(len(bot.telegram.html_messages), 1)
             self.assertEqual(bot.telegram.html_messages[0][2], "the full reply")
-            self.assertEqual(bot.telegram.messages, [],
-                             "an adopted, delivered turn has nothing to warn about")
             self.assertEqual(json.loads(bot._turns_file.read_text()), {})
             self.assertEqual(bot._activity_tasks, {})
 
@@ -2967,9 +2999,11 @@ class QueueAndStopTests(unittest.IsolatedAsyncioTestCase):
             await bot._handle_update(self._update("second", message_id=12))
             self.assertEqual(len(bot.telegram.messages), 1,
                              "the ways out are said once, not once per message")
-            self.assertEqual(bot.telegram.reactions,
-                             [(11, REACT_QUEUED), (12, REACT_QUEUED)],
-                             "each queued message says so at no message cost")
+            # No clock here: this fixture puts the session mid-turn without a
+            # start time, and a header with nothing to time simply omits it.
+            self.assertEqual(bot._progress_header("session"),
+                             f"{PROGRESS_HEADER} · 📥 2 queued",
+                             "the depth says they were kept, at no message cost")
             await self._idle(bot)
             self.assertEqual([item["text"] for item in self.sent],
                              ["first\n\nsecond"])
@@ -3048,8 +3082,9 @@ class QueueAndStopTests(unittest.IsolatedAsyncioTestCase):
                              ["after you"])
 
 
-class ReactionTests(unittest.IsolatedAsyncioTestCase):
-    """The user's own message carries what happened to it, at no message cost."""
+class TurnFeedbackTests(unittest.IsolatedAsyncioTestCase):
+    """What a turn tells the chat about itself, now that the reactions on the
+    user's own message are gone and the progress message carries all of it."""
 
     def _bot(self, directory):
         bot = FalconFoxTelegramBot(BotConfig(
@@ -3087,74 +3122,81 @@ class ReactionTests(unittest.IsolatedAsyncioTestCase):
                                  "turn_id": "t1", "outcome": outcome,
                                  "stop_reason": stop})
 
-    async def test_a_message_walks_from_received_to_running_to_done(self):
+    def _stamp(self, bot):
+        """The progress message as it was left standing."""
+        return bot.telegram.edits[-1][2]
+
+    async def test_a_turn_opens_with_a_progress_message_and_closes_stamped(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             await bot._handle_update(self._update("do the thing", message_id=11))
+            self.assertEqual(bot.telegram.messages, [(20, f"{PROGRESS_HEADER} (0s)")],
+                             "the turn announces itself in one message, silently")
+            self.assertEqual(bot.telegram.message_silent, [True])
             await self._run_turn(bot)
-            self.assertEqual(bot.telegram.reactions,
-                             [(11, REACT_RECEIVED), (11, REACT_RUNNING),
-                              (11, REACT_DONE)])
+            self.assertIn("✅ Turn finished", self._stamp(bot))
+            self.assertEqual(bot.telegram.html_messages[0][2], "the answer")
+            self.assertEqual(bot.telegram.html_replies[0], 11,
+                             "the answer threads to the message that asked")
 
-    async def test_a_cancelled_turn_marks_the_message_discarded(self):
+    async def test_a_cancelled_turn_says_so_in_the_progress_message(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             await bot._handle_update(self._update("never mind", message_id=11))
             await self._run_turn(bot, stop="cancelled", deliver=False)
-            self.assertEqual(bot.telegram.reactions[-1], (11, REACT_DISCARDED))
+            self.assertIn("✖️ Turn cancelled", self._stamp(bot))
 
-    async def test_an_errored_turn_marks_the_message_failed(self):
+    async def test_an_errored_turn_says_so_in_the_progress_message(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             await bot._handle_update(self._update("do the thing", message_id=11))
             await self._run_turn(bot, outcome="error", deliver=False)
-            self.assertEqual(bot.telegram.reactions[-1], (11, REACT_FAILED))
+            self.assertIn("⚠️ Turn ended with an error", self._stamp(bot))
 
-    async def test_a_turn_that_delivered_nothing_counts_as_failed(self):
+    async def test_a_turn_that_delivered_nothing_says_so_in_words(self):
         # The silent-turn case: it ends "successfully" with nothing to show,
-        # which is the failure this client kept producing invisibly.
+        # which is the failure this client kept producing invisibly. A 😱 on
+        # the prompt used to carry it; now only the notice does, so the notice
+        # is the whole of the evidence.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             await bot._handle_update(self._update("do the thing", message_id=11))
             await self._run_turn(bot, deliver=False)
-            self.assertEqual(bot.telegram.reactions[-1], (11, REACT_FAILED))
+            self.assertIn("without delivering a reply", bot.telegram.messages[-1][1])
+            self.assertEqual(bot.telegram.message_replies[-1], 11)
 
-    async def test_unqueueing_marks_every_message_it_dropped(self):
+    async def test_the_header_counts_what_is_queued_behind_the_turn(self):
+        # The one thing the reactions did that no message did: say that the
+        # second and third message of a mid-turn burst were kept. The first
+        # explains the ways out in words; the rest are a count in the header.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            await bot._handle_update(self._update("start", message_id=10))
+            self.assertEqual(bot._progress_header("session"),
+                             f"{PROGRESS_HEADER} (0s)")
+            await bot._handle_update(self._update("and also", message_id=11))
+            await bot._handle_update(self._update("and this", message_id=12))
+            self.assertEqual(bot._progress_header("session"),
+                             f"{PROGRESS_HEADER} (0s) · 📥 2 queued")
+            self.assertEqual([text for _, text in bot.telegram.messages[1:]],
+                             [QUEUED_FIRST],
+                             "the ways out are said once, not once per message")
+            # Flushed, so the count goes with them.
+            await bot._handle_event({"type": "turn_ended", "session_id": "session",
+                                     "turn_id": "t1", "outcome": "completed"})
+            self.assertEqual(bot._progress_header("session"),
+                             f"{PROGRESS_HEADER} (0s)")
+
+    async def test_unqueueing_reports_the_count_it_dropped(self):
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             await bot._handle_update(self._update("start", message_id=10))
             await bot._handle_update(self._update("and also", message_id=11))
             await bot._handle_update(self._update("and this", message_id=12))
             await bot._handle_update(self._update("/unqueue", message_id=13))
-            self.assertEqual(bot.telegram.reactions[-2:],
-                             [(11, REACT_DISCARDED), (12, REACT_DISCARDED)])
-
-    async def test_flushing_clears_the_queued_glyph_from_all_but_the_last(self):
-        # They become one prompt, addressed by the last of them; "queued"
-        # stopped being true for the rest the moment it went out.
-        with tempfile.TemporaryDirectory() as directory:
-            bot = self._bot(directory)
-            await bot._handle_update(self._update("start", message_id=10))
-            await bot._handle_update(self._update("and also", message_id=11))
-            await bot._handle_update(self._update("and this", message_id=12))
-            bot.telegram.reactions.clear()
-            await bot._handle_event({"type": "turn_ended", "session_id": "session",
-                                     "turn_id": "t1", "outcome": "completed"})
-            self.assertIn((11, None), bot.telegram.reactions)
-            self.assertIn((12, REACT_RECEIVED), bot.telegram.reactions)
-
-    async def test_a_failed_reaction_never_costs_a_turn(self):
-        with tempfile.TemporaryDirectory() as directory:
-            bot = self._bot(directory)
-
-            async def _explode(chat_id, message_id, emoji):
-                raise ApiError("Bad Request: REACTION_INVALID")
-
-            bot.telegram.set_reaction = _explode
-            await bot._handle_update(self._update("do the thing", message_id=11))
-            await self._run_turn(bot)
-            self.assertEqual(bot.telegram.html_messages[0][2], "the answer",
-                             "the reply lands whatever the decoration does")
+            self.assertIn("Dropped 2 queued message(s)",
+                          bot.telegram.messages[-1][1])
+            self.assertEqual(bot._queues.get("session", []), [])
 
 
 class TagCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -3338,7 +3380,8 @@ class TrayTests(unittest.IsolatedAsyncioTestCase):
             await bot._handle_update(self._photo())
             self.assertEqual(self.sent, [], "a file must not start a turn")
             self.assertEqual(len(bot._trays["session"]), 1)
-            self.assertIn((1, REACT_QUEUED), bot.telegram.reactions)
+            self.assertIn("Filed", bot.telegram.html_messages[0][2],
+                          "the receipt is the whole acknowledgement now")
 
     async def test_the_receipt_carries_a_tappable_id_and_says_when(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3386,13 +3429,6 @@ class TrayTests(unittest.IsolatedAsyncioTestCase):
                             "the files lead, as context for the message")
             self.assertNotIn("session", bot._trays)
 
-    async def test_a_carried_file_loses_the_marker_it_waited_under(self):
-        with tempfile.TemporaryDirectory() as directory:
-            bot = self._bot(directory)
-            await bot._handle_update(self._photo(1))
-            await bot._handle_update(self._text("go"))
-            self.assertIn((1, None), bot.telegram.reactions)
-
     async def test_a_caption_alone_never_prompts(self):
         # The design's one surprise, and it is deliberate: an album's caption
         # rides one of its parts, so this would fire mid-album.
@@ -3416,7 +3452,8 @@ class TrayTests(unittest.IsolatedAsyncioTestCase):
             await bot._handle_update(self._photo(size=30 * 1024 * 1024))
             self.assertEqual(self.store, {})
             self.assertIn("20MB", bot.telegram.messages[0][1])
-            self.assertIn((1, REACT_FAILED), bot.telegram.reactions)
+            self.assertEqual(bot.telegram.message_replies[0], 1,
+                             "the refusal threads to the file it refused")
 
     async def test_a_message_carrying_nothing_we_take_says_so(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3455,7 +3492,7 @@ class TrayTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.removed, ["f0"])
             self.assertEqual([item["file_id"] for item in bot._trays["session"]],
                              ["f1"])
-            self.assertIn((1, REACT_DISCARDED), bot.telegram.reactions)
+            self.assertIn("Removed 1 file(s)", bot.telegram.messages[-1][1])
 
     async def test_removing_deletes_rather_than_unlists(self):
         # It was never going to reach the agent, so nothing is left to keep.
