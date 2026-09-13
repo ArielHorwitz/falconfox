@@ -9,24 +9,77 @@
 #   setup.sh install-dev-units   render the dev instance's units from this
 #                                checkout, without touching the deployment's
 #                                units or the ~/.local/bin shims
+#   setup.sh check-units         report whether systemd is running the unit
+#                                text this checkout rendered (used by the
+#                                health check in update.sh)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/falconfox"
-UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+# Both of these are $HOME-relative, and deliberately do not honour
+# XDG_CONFIG_HOME. The systemd user manager was started at login and reads
+# ~/.config/systemd/user whatever a later caller's environment says, and where
+# the deployment keeps its config is a fact about the host in the same way.
+# Honouring the variable meant that any caller with it set -- every dev agent
+# session has it -- rendered units into a directory nothing reads, exited 0,
+# and left the old unit text running.
+CONFIG_DIR="$HOME/.config/falconfox"
+UNIT_DIR="$HOME/.config/systemd/user"
 BIN_DIR="$HOME/.local/bin"
 DEV_BIN_DIR="$HOME/.local/state/falconfox-dev/bin"
 UNITS=(falconfox-daemon.service falconfox-telegram.service)
 DEV_UNITS=(falconfox-dev-daemon.service falconfox-dev-telegram.service)
+# A checksum of the rendered text, written into the unit as a comment so that
+# systemd hands it back. It is what lets `check-units` compare what is loaded
+# against what was rendered rather than assume they are the same thing.
+STAMP="# falconfox-unit-checksum: "
 
 render_units() {
     mkdir -p "$UNIT_DIR"
-    local unit
+    local unit text
     for unit in "$@"; do
-        sed -e "s|@REPO@|$REPO|g" -e "s|@HOME@|$HOME|g" \
-            "$REPO/deploy/$unit" > "$UNIT_DIR/$unit"
+        text="$(sed -e "s|@REPO@|$REPO|g" -e "s|@HOME@|$HOME|g" \
+            "$REPO/deploy/$unit")"
+        { printf '%s\n' "$text"
+          printf '%s%s\n' "$STAMP" \
+              "$(printf '%s' "$text" | sha256sum | cut -c1-16)"
+        } > "$UNIT_DIR/$unit"
     done
     systemctl --user daemon-reload
+}
+
+unit_stamp() {
+    grep -m1 -o "${STAMP}[0-9a-f]*" || true
+}
+
+# Is systemd running the unit text we just wrote? Three questions, because
+# each can be wrong on its own: the text systemd reads for the unit, the file
+# it reads it from, and whether it has loaded the current contents of that
+# file. A deploy that only checks liveness passes on stale units, which is how
+# a unit-file change -- or its rollback -- can report itself healthy.
+check_units() {
+    local unit rendered loaded fragment reload failed=0
+    for unit in "${UNITS[@]}"; do
+        rendered="$(unit_stamp < "$UNIT_DIR/$unit" 2>/dev/null)"
+        loaded="$(systemctl --user cat "$unit" 2>/dev/null | unit_stamp)"
+        fragment="$(systemctl --user show -p FragmentPath --value "$unit" 2>/dev/null)"
+        reload="$(systemctl --user show -p NeedDaemonReload --value "$unit" 2>/dev/null)"
+        if [[ -z "$rendered" ]]; then
+            echo "units: $UNIT_DIR/$unit is missing or carries no checksum" >&2
+            failed=1
+        elif [[ "$rendered" != "$loaded" ]]; then
+            echo "units: systemd reads other text for $unit than $UNIT_DIR holds" >&2
+            failed=1
+        elif [[ "$(realpath -m "${fragment:-/nonexistent}")" != "$(realpath -m "$UNIT_DIR/$unit")" ]]; then
+            # Resolved on both sides: systemd may report a canonicalised path
+            # (a symlinked $HOME) that names the same file as $UNIT_DIR.
+            echo "units: systemd loads $unit from ${fragment:-nowhere}, not $UNIT_DIR" >&2
+            failed=1
+        elif [[ "$reload" == "yes" ]]; then
+            echo "units: $unit has changed on disk and has not been loaded" >&2
+            failed=1
+        fi
+    done
+    return "$failed"
 }
 
 install_units() {
@@ -77,6 +130,20 @@ fi
 if [[ "${1:-}" == "install-dev-units" ]]; then
     install_dev_units
     exit 0
+fi
+
+if [[ "${1:-}" == "check-units" ]]; then
+    check_units || exit 1
+    echo "units: systemd runs what $UNIT_DIR holds"
+    exit 0
+fi
+
+# Anything else is a mistake, and running the full bootstrap on a VPS is not
+# the place to find out: a subcommand this script does not have used to fall
+# through to the whole thing, which is the one path that restarts services.
+if [[ -n "${1:-}" ]]; then
+    echo "error: unknown argument: $1" >&2
+    exit 1
 fi
 
 command -v uv >/dev/null || {

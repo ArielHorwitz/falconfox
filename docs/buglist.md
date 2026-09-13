@@ -8,34 +8,6 @@ Record what fails, under what conditions, and how bad it is — enough that
 whoever picks it up does not have to rediscover it. Delete the entry when the
 fix lands.
 
-## `setup.sh install-units` writes units where systemd will not look
-
-*Hit while renaming the stable checkout, 2026-09-10. Reproduced, not fixed.*
-
-`UNIT_DIR` is `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user`, read from the
-environment of whoever runs the script. The systemd user manager was started
-at login and looks in `~/.config/systemd/user` regardless, so any caller with
-`XDG_CONFIG_HOME` set renders the units into a directory nothing reads. It
-exits 0, and the units on disk keep their old contents.
-
-Every dev session has `XDG_CONFIG_HOME=~/.config/falconfox-dev` set by its
-unit, which makes an agent session the likely caller to hit it. That is also
-the caller [deploy/README.md](../deploy/README.md) recommends, since
-`update.sh --detach-restart` exists to be run from a chat.
-
-It is worse inside `update.sh` than on its own: `restart_services` calls
-`install-units` before every restart, on the rollback path as well as the
-forward one. A deploy that changes a unit file would then restart the old
-unit and report itself healthy, because the health check tests the daemon and
-the bot, not which unit text they came from.
-
-`CONFIG_DIR` in the same script has the same shape, so the bootstrap path
-checks for `telegram.env` and `config.toml` in the wrong place too.
-
-Fix is to stop honouring the variable for these two paths: the systemd user
-directory and the deployment's config directory are `$HOME`-relative facts,
-not per-caller ones.
-
 ## The bot warns about orientation it goes on to register
 
 *Seen on every restart, 2026-09-10. Cosmetic.*

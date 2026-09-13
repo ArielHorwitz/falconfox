@@ -48,6 +48,19 @@ restart_services() {
 }
 
 healthy() {
+    # Before liveness, because liveness never said *which* unit text is
+    # running: a deploy that changed a unit, or rolled one back, could report
+    # itself healthy on the old one. Asked once rather than inside the retry
+    # loop -- it is settled by the last render and does not become true by
+    # waiting.
+    #
+    # Asked for only if the checkout has it. The rollback path renders units
+    # with the *rolled-back* setup.sh, and a revision older than this one has
+    # no `check-units`: it would take the argument for a bootstrap and run the
+    # lot. Droppable once master is past this commit.
+    if grep -q check-units "$REPO/deploy/setup.sh"; then
+        "$REPO/deploy/setup.sh" check-units || return 1
+    fi
     for _attempt in $(seq 1 15); do
         if "$REPO/.venv/bin/falconfox" list >/dev/null 2>&1; then
             # Daemon is up; give the bot a moment to reconnect and settle

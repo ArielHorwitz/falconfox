@@ -266,10 +266,13 @@ serves both: run it in `~/projects/falconfox-stable` to deploy `master`, or in
 - **From SSH:** `~/projects/falconfox-stable/deploy/update.sh` — everything
   inline.
 
-After restarting, the script health-checks (daemon answers `falconfox list`,
-bot unit active). On failure it **rolls back** to the previous revision,
-re-syncs, restarts, and re-checks. Unit-file changes deploy too (units are
-re-rendered on every update). Everything is appended to
+After restarting, the script health-checks: systemd is running the unit text
+this checkout just rendered (`setup.sh check-units`), the daemon answers
+`falconfox list`, and the bot unit is active. On failure it **rolls back** to
+the previous revision, re-syncs, restarts, and re-checks. Unit-file changes
+deploy too (units are re-rendered on every update), and each rendered unit
+carries a checksum comment so the check can tell the text systemd loaded from
+the text on disk. Everything is appended to
 `~/.local/state/falconfox/update.log` (`falconfox-dev` for dev) — the first thing to read after an
 update went quiet. Deeper forensics: `journalctl --user -u falconfox-daemon`
 / `-u falconfox-telegram`, and `~/.local/state/falconfox/falconfox.log`.
