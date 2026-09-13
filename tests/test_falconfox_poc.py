@@ -382,6 +382,52 @@ class SessionRecordTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.coordinator.snapshot()["usage"], {})
         self.assertFalse(Path(self.temporary.name, "work").exists())
 
+    def _on_disk(self, session_id="work", *, named=False):
+        """A session as a restart finds it: on disk, and nothing cached."""
+        record = make_record(self.coordinator, session_id, name=session_id,
+                             auto_named=not named, persisted=True)
+        self.coordinator.store.write_meta(record.stored())
+        self.coordinator.store.append_event(
+            session_id, {"type": "message", "role": "user", "text": "earlier"})
+        record.transcript = None
+        return record
+
+    async def test_stopping_a_restored_session_does_not_delete_it(self):
+        # `stop` decided keep-versus-delete from the *cached* transcript,
+        # which is empty for every session a restart restores. So stopping a
+        # session that had never been renamed took its directory and its
+        # transcript with it, silently, on the very command the manager
+        # orientation tells an agent to run to free a slot.
+        self._on_disk()
+        restarted = SessionCoordinator(Path(self.temporary.name))
+        restarted.load_persisted()
+        await restarted.stop_session("work")
+        self.assertIn("work", restarted._records, "stop is not delete")
+        self.assertTrue(Path(self.temporary.name, "work", "meta.toml").exists())
+        self.assertEqual([event["text"] for event in restarted.transcript("work")],
+                         ["earlier"])
+
+    async def test_stopping_twice_does_not_delete_what_the_first_stop_kept(self):
+        # The same hole from the other side: the first stop drops the
+        # transcript cache, so the second one looks at nothing and concludes
+        # there was nothing to keep.
+        record = self._on_disk()
+        record.agent = FakeAgent("work")
+        record.transcript = [{"type": "message", "role": "user", "text": "earlier"}]
+        await self.coordinator.stop_session("work")
+        await self.coordinator.stop_session("work")
+        self.assertIn("work", self.coordinator._records)
+        self.assertTrue(Path(self.temporary.name, "work", "meta.toml").exists())
+
+    async def test_a_session_with_nothing_to_keep_is_still_deleted_by_stop(self):
+        # The other half of the rule, which is why the condition exists:
+        # a session that was never named and never spoke has nothing on disk
+        # worth waking up again.
+        record = make_record(self.coordinator, "blank", live=True)
+        await self.coordinator.stop_session("blank")
+        self.assertNotIn("blank", self.coordinator._records)
+        self.assertFalse(record.persisted)
+
     async def test_an_event_to_a_stored_session_does_not_replace_its_transcript(self):
         # A stopped session drops its cached transcript to reclaim the memory.
         # An event arriving before anything reads it used to create a

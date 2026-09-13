@@ -230,14 +230,6 @@ class SessionCoordinator:
             record.transcript = self.store.read_transcript(record.session_id)
         return record.transcript
 
-    def _should_persist(self, record: SessionRecord) -> bool:
-        if record.ephemeral:
-            return False
-        if not record.auto_named:
-            return True
-        return any(event.get("type") == "message"
-                   for event in (record.transcript or []))
-
     def _emit(self, event: dict) -> None:
         event.setdefault("ts", _now_iso())
         session_id = event.get("session_id")
@@ -280,7 +272,7 @@ class SessionCoordinator:
                 # resume then shows the client and a revert then writes to
                 # disk over the real one.
                 self._ensure_transcript(record).append(event)
-                if record.persisted or self._should_persist(record):
+                if record.keeps_state:
                     self._persist_meta(record)
                     self.store.append_event(session_id, event)
         self.bus.publish(event)
@@ -345,9 +337,7 @@ class SessionCoordinator:
             self.log.info("%d session(s) running: %s", len(busy), running)
 
     def _persist_meta(self, record: SessionRecord) -> None:
-        if record.ephemeral:
-            return
-        if not record.persisted and not self._should_persist(record):
+        if not record.keeps_state:
             return
         record.persisted = True
         self.store.write_meta(record.stored())
@@ -953,7 +943,10 @@ class SessionCoordinator:
             await self._stop_locked(record)
 
     async def _stop_locked(self, record: SessionRecord) -> None:
-        if record.ephemeral or not self._should_persist(record):
+        if not record.keeps_state:
+            # Nothing on disk and nothing that earned any: a session that was
+            # never named and never spoke has nothing to wake up again, so
+            # stopping it is deleting it.
             await self._delete_locked(record)
             return
         await self._settle_turn(record, "the session was stopped")

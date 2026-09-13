@@ -74,6 +74,10 @@ class SessionRecord:
 
     # --- what is on disk, and what is only in memory.
     auto_named: bool = True
+    # Whether this session's metadata has ever been written. Not the same
+    # question as `keeps_state`, and the memory of the answer: a session
+    # restored from disk, or one that earned a write earlier and has since
+    # had its transcript cache dropped, is still a session with state.
     persisted: bool = False
     # None means "not read from disk yet", which is not the same as empty:
     # stopping a session drops the cache to reclaim the memory.
@@ -120,6 +124,27 @@ class SessionRecord:
     def live(self) -> bool:
         """Whether this session holds a live agent subprocess."""
         return self.agent is not None
+
+    @property
+    def keeps_state(self) -> bool:
+        """Whether this session is worth keeping on disk.
+
+        One answer to one question, because two callers used to reach it by
+        different routes and disagree. What `stop` keeps and what a write
+        saves have to be the same thing, or stopping a session deletes what
+        the last write put there.
+
+        The transcript is the *last* thing consulted, and only ever to earn
+        an answer that has not been earned yet: it is a cache that a stop
+        drops and a restart starts empty, so reading it first is how a
+        restored session came to look like one that had never said anything.
+        """
+        if self.ephemeral:
+            return False
+        if self.persisted or not self.auto_named:
+            return True
+        return any(event.get("type") == "message"
+                   for event in (self.transcript or []))
 
     def wire(self) -> dict:
         """The session as every client sees it.
