@@ -24,6 +24,7 @@ from falconfox import state as falconfox_state
 from falconfox.coordinator import SessionCoordinator
 from falconfox.errors import FalconFoxError
 from falconfox.engine.session import AgentSession, PromptPart
+from falconfox.record import SessionRecord
 from falconfox.storage import SessionStore
 from falconfox.watchdog import StallWatchdog
 from falconfox_telegram import bot as bot_module
@@ -44,6 +45,52 @@ from falconfox_telegram.shell import ShellRunner, tail
 # tests exercising _ensure_manager fell through to BotConfig's default of
 # 127.0.0.1:9721 -- production -- and spawned real sessions there.
 UNREACHABLE_DAEMON = "http://127.0.0.1:9"
+
+
+class FakeAgent:
+    """A live agent that spawns nothing. Enough for the coordinator to hold."""
+
+    def __init__(self, session_id="abcd1234"):
+        self.session_id = session_id
+        self.sent = []
+        self.stopped = 0
+        self.cancelled = 0
+        self.acp_session_id = None
+        self.config_options = []
+
+    async def send(self, parts):
+        self.sent.append(list(parts))
+
+    async def stop(self):
+        self.stopped += 1
+
+    async def cancel(self):
+        self.cancelled += 1
+
+
+def make_record(coordinator, session_id, *, live=False, **fields):
+    """Put a session into a coordinator without spawning anything for it.
+
+    The record is the whole session, so a test that used to assemble a
+    metadata dict by hand builds one of these instead. `live=True` gives it a
+    `FakeAgent`, since holding an agent is what being live *is*.
+    """
+    record = SessionRecord(
+        session_id=session_id,
+        name=fields.pop("name", session_id),
+        path=fields.pop("path", "/tmp"),
+        backend=fields.pop("backend", "echo"),
+        created=fields.pop("created", "1"),
+        last_active=fields.pop("last_active", "1"),
+    )
+    if live:
+        record.agent = FakeAgent(session_id)
+    for key, value in fields.items():
+        if not hasattr(record, key):
+            raise AttributeError(f"a session record has no {key!r}")
+        setattr(record, key, value)
+    coordinator._records[session_id] = record
+    return record
 
 
 class StorageTests(unittest.TestCase):
@@ -135,14 +182,9 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
     async def test_hidden_survives_a_daemon_restart(self):
         # Without this the plumbing reappears in every listing after a restart
         # and starts competing for slots as if it were the user's work.
-        self.coordinator._metadata["infra"] = {
-            "session_id": "infra", "name": "telegram manager", "path": "/tmp",
-            "backend": "echo", "always_allow": True, "ephemeral": False,
-            "hidden": True, "state": "idle", "live": True,
-            "created": "1", "last_active": "1",
-        }
-        self.coordinator._auto_named["infra"] = False
-        self.coordinator._persist_meta("infra")
+        record = make_record(self.coordinator, "infra", name="telegram manager",
+                             hidden=True, state="idle", live=True, auto_named=False)
+        self.coordinator._persist_meta(record)
         stored = tomllib.loads(
             Path(self.temporary.name, "infra", "meta.toml").read_text())
         self.assertIs(stored.get("hidden"), True,
@@ -156,17 +198,11 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
 
     async def test_ephemeral_sessions_never_persist_or_appear_by_default(self):
-        self.coordinator._metadata["focus"] = {
-            "session_id": "focus", "name": "focus", "path": "/tmp",
-            "backend": "echo", "always_allow": True, "ephemeral": True,
-            "hidden": True,
-            "state": "idle", "live": True, "created": "1", "last_active": "1",
-        }
-        self.coordinator._auto_named["focus"] = False
-        self.coordinator._transcripts["focus"] = [
-            {"type": "message", "role": "user", "text": "switch"}
-        ]
-        self.coordinator._persist_meta("focus")
+        record = make_record(
+            self.coordinator, "focus", name="focus", ephemeral=True, hidden=True,
+            state="idle", live=True, auto_named=False,
+            transcript=[{"type": "message", "role": "user", "text": "switch"}])
+        self.coordinator._persist_meta(record)
         self.assertEqual(self.coordinator.list_sessions(), [])
         self.assertEqual(self.coordinator.list_sessions(include_hidden=True)[0]["session_id"],
                          "focus")
@@ -175,11 +211,8 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_turn_that_produced_no_output_is_a_warning(self):
         # The recurring failure shape: a turn ends with nothing to show and
         # nobody notices. The daemon now notices, at the moment it happens.
-        self.coordinator._metadata["s"] = {
-            "session_id": "s", "name": "quiet", "path": "/tmp", "backend": "echo",
-            "always_allow": True, "ephemeral": True, "state": "working",
-            "live": True, "created": "1", "last_active": "1",
-        }
+        make_record(self.coordinator, "s", name="quiet", ephemeral=True,
+                    state="working", live=True)
         turn = {"type": "turn_ended", "session_id": "s", "turn_id": "t1",
                 "outcome": "completed", "stop_reason": "end_turn", "duration": 1.0,
                 "message_chunks": 0, "output_chars": 0, "thought_chunks": 0,
@@ -194,15 +227,84 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("turn complete", captured.output[0])
 
     async def test_snapshot_contains_metadata_not_transcripts(self):
-        self.coordinator._metadata["one"] = {
-            "session_id": "one", "name": "one", "path": "/tmp", "backend": "echo",
-            "always_allow": True, "ephemeral": False, "state": "stored", "live": False,
-            "created": "1", "last_active": "1",
-        }
-        self.coordinator._transcripts["one"] = [{"type": "message", "text": "large"}]
+        make_record(self.coordinator, "one", name="one",
+                    transcript=[{"type": "message", "text": "large"}])
         snapshot = self.coordinator.snapshot()
         self.assertEqual(snapshot["sessions"][0]["session_id"], "one")
         self.assertNotIn("transcripts", snapshot)
+
+
+class SessionRecordTests(unittest.IsolatedAsyncioTestCase):
+    """A session is one record, so ending one is not a list of fields.
+
+    The two teardown paths used to clear slightly different lists by hand,
+    which made a forgotten field a leak with nothing to catch it.
+    """
+
+    async def asyncSetUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.config_home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.config_home.cleanup)
+        self.env = patch.dict(os.environ, {"XDG_CONFIG_HOME": self.config_home.name})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.coordinator = SessionCoordinator(Path(self.temporary.name))
+
+    def _busy_record(self):
+        return make_record(
+            self.coordinator, "work", name="work", state="idle", live=True,
+            auto_named=False,
+            transcript=[{"type": "message", "role": "user", "text": "hi"}],
+            config_options=[{"id": "model", "current_value": "opus"}],
+            commands=[{"name": "review"}],
+            pending_context=[PromptPart(text="owed", system=True)],
+            usage={"total_tokens": 12},
+            queued=True, queued_text="later",
+        )
+
+    async def test_stopping_gives_up_everything_the_live_agent_owned(self):
+        record = self._busy_record()
+        agent = record.agent
+        await self.coordinator.stop_session("work")
+        self.assertEqual(agent.stopped, 1)
+        self.assertFalse(record.live, "the slot is free the moment the agent goes")
+        self.assertEqual(record.state, "stored")
+        self.assertIsNone(record.transcript)
+        self.assertIsNone(record.config_options)
+        self.assertIsNone(record.commands)
+        self.assertEqual(record.pending_context, [])
+        self.assertFalse(record.queued)
+        self.assertIsNone(record.queued_text)
+        # What the session is on disk survives, which is the whole point of
+        # stop being different from delete.
+        self.assertEqual(record.name, "work")
+        self.assertTrue(record.persisted)
+
+    async def test_deleting_discards_the_record_rather_than_emptying_it(self):
+        record = self._busy_record()
+        await self.coordinator.delete_session("work")
+        self.assertEqual(self.coordinator._records, {})
+        self.assertEqual(record.agent, None)
+        self.assertEqual(self.coordinator.snapshot()["usage"], {})
+        self.assertFalse(Path(self.temporary.name, "work").exists())
+
+    async def test_an_event_to_a_stored_session_does_not_replace_its_transcript(self):
+        # A stopped session drops its cached transcript to reclaim the memory.
+        # An event arriving before anything reads it used to create a
+        # one-event history in its place, which the next resume then showed
+        # the client and a revert then wrote to disk over the real one.
+        record = make_record(self.coordinator, "work", name="work",
+                             auto_named=False, persisted=True)
+        self.coordinator.store.write_meta(record.stored())
+        self.coordinator.store.append_event(
+            "work", {"type": "message", "role": "user", "text": "earlier"})
+        self.coordinator._emit({"type": "notice", "session_id": "work",
+                                "message": "waiting for a free session slot"})
+        transcript = self.coordinator.transcript("work")
+        self.assertEqual([event["type"] for event in transcript],
+                         ["message", "notice"])
+        self.assertEqual(transcript[0]["text"], "earlier")
 
 
 class FileStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -221,11 +323,7 @@ class FileStoreTests(unittest.IsolatedAsyncioTestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.coordinator = SessionCoordinator(Path(self.temporary.name))
-        self.coordinator._metadata["work"] = {
-            "session_id": "work", "name": "work", "path": "/tmp", "backend": "echo",
-            "always_allow": True, "ephemeral": False, "state": "idle", "live": True,
-            "created": "1", "last_active": "1",
-        }
+        make_record(self.coordinator, "work", name="work", state="idle", live=True)
         self.source = Path(self.temporary.name, "download")
         self.source.write_bytes(b"payload")
 
@@ -293,10 +391,8 @@ class FileStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(Path(added["path"]).exists())
 
     async def test_an_ephemeral_session_has_nowhere_to_put_a_file(self):
-        self.coordinator._metadata["throwaway"] = {
-            **self.coordinator._metadata["work"],
-            "session_id": "throwaway", "ephemeral": True,
-        }
+        make_record(self.coordinator, "throwaway", state="idle", live=True,
+                    ephemeral=True)
         with self.assertRaises(FalconFoxError):
             self.coordinator.add_file("throwaway", str(self.source))
 
@@ -327,17 +423,12 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
 
         async def _stop(session_id):
             self.stopped.append(session_id)
-            meta = self.coordinator._metadata[session_id]
-            meta.update(state="stored", live=False)
+            self.coordinator._records[session_id].release()
         self.coordinator.stop_session = _stop
 
     def _live(self, session_id, *, last_active, state="idle", infrastructure=False):
-        self.coordinator._metadata[session_id] = {
-            "session_id": session_id, "name": session_id, "path": "/tmp",
-            "backend": "echo", "always_allow": True, "ephemeral": False,
-            "hidden": infrastructure,
-            "state": state, "live": True, "created": "1", "last_active": last_active,
-        }
+        return make_record(self.coordinator, session_id, live=True, state=state,
+                           hidden=infrastructure, last_active=last_active)
 
     def _limit(self, value):
         self.coordinator.config = replace(self.coordinator.config,
@@ -409,18 +500,15 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
         self._limit(3)
         for name in ("busy", "also busy", "still busy"):
             self._live(name, last_active="1", state="working")
-        self.coordinator._metadata["waiting"] = {
-            "session_id": "waiting", "name": "waiting", "path": "/tmp",
-            "backend": "echo", "always_allow": True, "ephemeral": False,
-            "state": "stored", "live": False, "created": "1", "last_active": "1",
-        }
+        waiting = make_record(self.coordinator, "waiting", name="waiting")
         await self.coordinator.send("waiting", "do the thing")
-        self.assertEqual(self.coordinator._queued, {"waiting": "do the thing"})
+        self.assertTrue(waiting.queued)
+        self.assertEqual(waiting.queued_text, "do the thing")
 
     async def test_a_queued_session_is_retried_when_one_goes_idle(self):
         self._limit(1)
         self._live("busy", last_active="1", state="working")
-        self.coordinator._queued["waiting"] = None
+        make_record(self.coordinator, "waiting", queued=True)
         drained = []
         self.coordinator._drain_queue = lambda: drained.append(True) or asyncio.sleep(0)
         self.coordinator._emit({"type": "agent_state", "session_id": "busy",
@@ -2076,11 +2164,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
     def _coordinator(self, directory, session, roles=None):
         coordinator = SessionCoordinator(Path(directory))
-        coordinator._metadata[session.session_id] = {
-            "session_id": session.session_id, "name": "fake", "path": directory,
-            "backend": "fake", "roles": list(roles or []), "oriented": False,
-        }
-        coordinator.sessions.add(session)
+        make_record(coordinator, session.session_id, name="fake", path=directory,
+                    backend="fake", roles=list(roles or []), agent=session)
         return coordinator
 
     async def test_the_first_message_carries_orientation_and_the_next_does_not(self):
@@ -2111,12 +2196,12 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 session_id = await coordinator.add_session(
                     path=directory, name="manager", hidden=True,
                     roles=[".manager"])
-            self.assertFalse(coordinator._metadata[session_id]["oriented"])
+            self.assertFalse(coordinator._records[session_id].oriented)
 
             restarted = SessionCoordinator(Path(directory))
             restarted.load_persisted()
-            self.assertFalse(restarted._metadata[session_id].get("oriented"))
-            self.assertEqual(restarted._metadata[session_id]["roles"], [".manager"])
+            self.assertFalse(restarted._records[session_id].oriented)
+            self.assertEqual(restarted._records[session_id].roles, [".manager"])
 
     async def test_a_role_adds_its_own_piece(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2148,10 +2233,11 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             session = self.FakeSession()
             coordinator = self._coordinator(directory, session)
-            coordinator._transcripts[session.session_id] = [
+            record = coordinator._records[session.session_id]
+            record.transcript = [
                 {"type": "message", "role": "user", "text": "earlier"}]
-            coordinator._pending_context[session.session_id] = [
-                PromptPart(text=coordinator._context_prompt(session.session_id),
+            record.pending_context = [
+                PromptPart(text=coordinator._context_prompt(record),
                            system=True, record=False)]
 
             await coordinator.send(session.session_id, "hello")
@@ -2191,12 +2277,12 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_transcript_replay_includes_orientation(self):
         with tempfile.TemporaryDirectory() as directory:
             coordinator = SessionCoordinator(Path(directory))
-            coordinator._transcripts["s"] = [
+            record = make_record(coordinator, "s", transcript=[
                 {"type": "message", "role": "user", "text": "the orientation",
                  "system": True},
                 {"type": "message", "role": "user", "text": "hello"},
-            ]
-            replayed = coordinator._transcript_text("s")
+            ])
+            replayed = coordinator._transcript_text(record)
             self.assertIn("the orientation", replayed)
             self.assertIn("hello", replayed)
 
@@ -2212,7 +2298,7 @@ class AttachmentTests(unittest.IsolatedAsyncioTestCase):
         # how long the agent waits to hear it.
         with tempfile.TemporaryDirectory() as directory:
             coordinator = self._coordinator(directory)
-            coordinator._metadata["abcd1234"] = {"session_id": "abcd1234"}
+            make_record(coordinator, "abcd1234")
             target = Path(directory).joinpath("file.txt")
             target.write_text("x")
             with self.assertRaises(FalconFoxError) as caught:
@@ -2222,7 +2308,7 @@ class AttachmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_client_result_completes_the_call(self):
         with tempfile.TemporaryDirectory() as directory:
             coordinator = self._coordinator(directory)
-            coordinator._metadata["abcd1234"] = {"session_id": "abcd1234"}
+            make_record(coordinator, "abcd1234")
             target = Path(directory).joinpath("file.txt")
             target.write_text("x")
             with coordinator.bus.subscribe() as queue:
@@ -2235,7 +2321,7 @@ class AttachmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_client_failure_is_raised_to_the_caller(self):
         with tempfile.TemporaryDirectory() as directory:
             coordinator = self._coordinator(directory)
-            coordinator._metadata["abcd1234"] = {"session_id": "abcd1234"}
+            make_record(coordinator, "abcd1234")
             target = Path(directory).joinpath("file.txt")
             target.write_text("x")
             with coordinator.bus.subscribe() as queue:
@@ -2249,7 +2335,7 @@ class AttachmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_waiting_gives_up_rather_than_hanging(self):
         with tempfile.TemporaryDirectory() as directory:
             coordinator = self._coordinator(directory)
-            coordinator._metadata["abcd1234"] = {"session_id": "abcd1234"}
+            make_record(coordinator, "abcd1234")
             target = Path(directory).joinpath("file.txt")
             target.write_text("x")
             with coordinator.bus.subscribe():
@@ -2260,7 +2346,7 @@ class AttachmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_ack_returns_without_waiting(self):
         with tempfile.TemporaryDirectory() as directory:
             coordinator = self._coordinator(directory)
-            coordinator._metadata["abcd1234"] = {"session_id": "abcd1234"}
+            make_record(coordinator, "abcd1234")
             target = Path(directory).joinpath("file.txt")
             target.write_text("x")
             with coordinator.bus.subscribe():
@@ -2270,7 +2356,7 @@ class AttachmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_missing_file_never_reaches_a_client(self):
         with tempfile.TemporaryDirectory() as directory:
             coordinator = self._coordinator(directory)
-            coordinator._metadata["abcd1234"] = {"session_id": "abcd1234"}
+            make_record(coordinator, "abcd1234")
             with coordinator.bus.subscribe() as queue:
                 with self.assertRaises(FalconFoxError):
                     await coordinator.attach("abcd1234", f"{directory}/nope.txt")
@@ -2645,13 +2731,8 @@ class SessionTagTests(unittest.IsolatedAsyncioTestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.coordinator = SessionCoordinator(Path(self.temporary.name))
-        self.coordinator._metadata["work"] = {
-            "session_id": "work", "name": "work", "path": "/tmp",
-            "backend": "echo", "always_allow": True, "ephemeral": False,
-            "hidden": False, "tags": [], "state": "idle", "live": True,
-            "created": "1", "last_active": "1",
-        }
-        self.coordinator._auto_named["work"] = False
+        make_record(self.coordinator, "work", name="work", state="idle",
+                    live=True, auto_named=False)
 
     def test_tags_are_folded_but_not_reordered(self):
         tags = self.coordinator.set_tags("work", ["Urgent", "  Archived  ", "urgent", ""])
@@ -2675,7 +2756,7 @@ class SessionTagTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored.get("tags"), ["archived", "slow"])
         restarted = SessionCoordinator(Path(self.temporary.name))
         restarted.load_persisted()
-        self.assertEqual(restarted._metadata["work"]["tags"], ["archived", "slow"])
+        self.assertEqual(restarted._records["work"].tags, ["archived", "slow"])
 
     def test_a_session_updated_event_carries_the_tags(self):
         events = []

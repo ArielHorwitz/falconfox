@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import time
 import uuid
 from pathlib import Path
 from typing import Optional, Sequence
@@ -13,8 +14,9 @@ from . import config, help as ffhelp, logsetup, state, storage
 from .engine import oneshot
 from .engine.client import resolve_config_value
 from .engine.events import EventBus
-from .engine.session import AgentSession, PromptPart, SessionManager
+from .engine.session import AgentSession, PromptPart, new_session_id
 from .errors import FalconFoxError
+from .record import SessionRecord
 
 _REPLAYABLE = {"message", "tool_call", "notice", "plan", "usage"}
 # How long `attach` waits for the client to report back. Generous: the
@@ -75,26 +77,15 @@ class SessionCoordinator:
         self.config = config.load_config()
         self.store = storage.SessionStore(store_root)
         self.bus = EventBus()
-        self.sessions = SessionManager()
-        self._metadata: dict[str, dict] = {}
-        self._transcripts: dict[str, list[dict]] = {}
-        self._acp_ids: dict[str, Optional[str]] = {}
-        self._config_options: dict[str, list[dict]] = {}
-        self._commands: dict[str, list[dict]] = {}
-        self._pending_context: dict[str, list[PromptPart]] = {}
-        # In-flight `attach` calls, keyed by request id. The daemon cannot send
-        # a file itself -- only the client attached to the chat can -- so the
+        # One record per session, holding everything about it -- including the
+        # live `AgentSession`, so "is this live" has one answer. See record.py.
+        self._records: dict[str, SessionRecord] = {}
+        # In-flight `attach` calls, keyed by request id rather than by session:
+        # this is the state of one call, not of a session, and several can be
+        # outstanding for the same session at once. The daemon cannot send a
+        # file itself -- only the client attached to the chat can -- so the
         # HTTP call waits here until that client reports back.
         self._attachments: dict[str, asyncio.Future] = {}
-        self._auto_named: dict[str, bool] = {}
-        self._persisted: set[str] = set()
-        self._usage: dict[str, dict] = {}
-        self._busy_ids: set[str] = set()
-        # Sessions waiting for a live slot, with the message that is waiting
-        # with them (None when only activation was asked for). A session over
-        # the cap is stored, not refused: its transcript, its metadata and --
-        # for the Telegram client -- its topic all already exist.
-        self._queued: dict[str, Optional[str]] = {}
         self._draining = False
 
     # --- persistence and event flow ------------------------------------
@@ -102,85 +93,83 @@ class SessionCoordinator:
     def load_persisted(self) -> None:
         for meta in self.store.load_all_meta():
             session_id = meta["session_id"]
-            named = bool(meta.get("named", False))
-            self._metadata[session_id] = {
-                "session_id": session_id,
-                "name": meta.get("name", session_id),
-                "path": meta.get("path", str(Path.home())),
-                "backend": meta.get("backend", ""),
-                "always_allow": True,
-                "ephemeral": False,
+            created = meta.get("created")
+            self._records[session_id] = SessionRecord(
+                session_id=session_id,
+                name=meta.get("name", session_id),
+                path=meta.get("path", str(Path.home())),
+                backend=meta.get("backend", ""),
+                created=created,
+                last_active=meta.get("last_active") or created,
+                ephemeral=False,
                 # Restored from disk: a client's plumbing must still be
                 # plumbing after a daemon restart, or it reappears in every
                 # listing and starts competing as if it were the user's.
-                "hidden": bool(meta.get("hidden")),
-                "tags": _normalize_tags(meta.get("tags") or []),
-                "roles": list(meta.get("roles") or []),
-                "oriented": bool(meta.get("oriented")),
-                "state": "stored",
-                "live": False,
-                "created": meta.get("created"),
-                "last_active": meta.get("last_active") or meta.get("created"),
-            }
-            self._acp_ids[session_id] = meta.get("acp_session_id")
-            self._auto_named[session_id] = not named
-            self._persisted.add(session_id)
+                hidden=bool(meta.get("hidden")),
+                tags=_normalize_tags(meta.get("tags") or []),
+                roles=list(meta.get("roles") or []),
+                oriented=bool(meta.get("oriented")),
+                acp_id=meta.get("acp_session_id"),
+                auto_named=not bool(meta.get("named", False)),
+                persisted=True,
+            )
 
-    def _ensure_transcript(self, session_id: str) -> list[dict]:
-        transcript = self._transcripts.get(session_id)
-        if transcript is None:
-            transcript = self.store.read_transcript(session_id) if session_id in self._metadata else []
-            self._transcripts[session_id] = transcript
-        return transcript
+    def _ensure_transcript(self, record: SessionRecord) -> list[dict]:
+        if record.transcript is None:
+            record.transcript = self.store.read_transcript(record.session_id)
+        return record.transcript
 
-    def _evict_transcript(self, session_id: str) -> None:
-        self._transcripts.pop(session_id, None)
-
-    def _should_persist(self, session_id: str) -> bool:
-        meta = self._metadata.get(session_id, {})
-        if meta.get("ephemeral"):
+    def _should_persist(self, record: SessionRecord) -> bool:
+        if record.ephemeral:
             return False
-        if not self._auto_named.get(session_id, True):
+        if not record.auto_named:
             return True
-        return any(
-            event.get("type") == "message"
-            for event in self._transcripts.get(session_id, [])
-        )
+        return any(event.get("type") == "message"
+                   for event in (record.transcript or []))
 
     def _emit(self, event: dict) -> None:
         event.setdefault("ts", _now_iso())
         session_id = event.get("session_id")
         event_type = event.get("type")
-        if event_type == "agent_state" and session_id in self._metadata:
-            self._metadata[session_id]["state"] = event.get("state")
-        if event_type == "usage" and session_id in self._metadata:
-            merged = self._usage.setdefault(session_id, {})
-            for key, value in event.items():
-                if key not in ("type", "session_id") and value is not None:
-                    merged[key] = value
-        if event_type == "config_options" and session_id in self._metadata:
-            self._config_options[session_id] = event.get("options", [])
-        if event_type == "commands" and session_id in self._metadata:
-            self._commands[session_id] = event.get("commands", [])
-        if session_id in self._metadata and event_type in _REPLAYABLE:
-            self._metadata[session_id]["last_active"] = _now_iso()
-            self._transcripts.setdefault(session_id, []).append(event)
-            if session_id in self._persisted or self._should_persist(session_id):
-                self._persist_meta(session_id)
-                self.store.append_event(session_id, event)
+        record = self._records.get(session_id)
+        if record is not None:
+            if event_type == "agent_state":
+                record.state = event.get("state")
+            elif event_type == "usage":
+                merged = record.usage if record.usage is not None else {}
+                for key, value in event.items():
+                    if key not in ("type", "session_id") and value is not None:
+                        merged[key] = value
+                record.usage = merged
+            elif event_type == "config_options":
+                record.config_options = event.get("options", [])
+            elif event_type == "commands":
+                record.commands = event.get("commands", [])
+            if event_type in _REPLAYABLE:
+                record.last_active = _now_iso()
+                # Loaded before appending, not appended to whatever happens to
+                # be cached: a session whose transcript was dropped on stop
+                # would otherwise end up holding a one-event history, which a
+                # resume then shows the client and a revert then writes to
+                # disk over the real one.
+                self._ensure_transcript(record).append(event)
+                if record.persisted or self._should_persist(record):
+                    self._persist_meta(record)
+                    self.store.append_event(session_id, event)
         self.bus.publish(event)
         self._log_event(event)
         if event_type in ("agent_state", "session_added", "session_updated", "session_removed"):
             self._report_activity()
         # A session going idle is the only thing that makes an occupied slot
         # evictable, so it is the moment to retry anything waiting for one.
-        if self._queued and event_type == "agent_state" and event.get("state") == "idle":
+        if event_type == "agent_state" and event.get("state") == "idle" and self._anything_queued():
             self._schedule_drain()
 
     def _log_event(self, event: dict) -> None:
         event_type = event.get("type")
         session_id = event.get("session_id")
-        name = self._metadata.get(session_id, {}).get("name") if session_id else None
+        record = self._records.get(session_id) if session_id else None
+        name = record.name if record is not None else None
         if event_type == "agent_state":
             return  # turns log themselves below; idle/working are mere states
         if event_type == "turn_started":
@@ -213,47 +202,28 @@ class SessionCoordinator:
         self.log.log(level, "event=%s session=%s", event_type, session_id)
 
     def _report_activity(self) -> None:
-        busy = {
-            session_id for session_id, meta in self._metadata.items()
-            if meta.get("live") and meta.get("state") in ("starting", "working")
-        }
-        if busy == self._busy_ids:
+        busy = {record.session_id for record in self._records.values()
+                if record.live and record.state in ("starting", "working")}
+        if busy == {record.session_id for record in self._records.values()
+                    if record.reported_busy}:
             return
-        self._busy_ids = busy
+        for record in self._records.values():
+            record.reported_busy = record.session_id in busy
         if not busy:
             self.log.info("all sessions idle")
         else:
             running = ", ".join(
-                f"{self._metadata[s]['name']} ({self._metadata[s]['state']})" for s in busy
+                f"{self._records[s].name} ({self._records[s].state})" for s in busy
             )
             self.log.info("%d session(s) running: %s", len(busy), running)
 
-    def _persist_meta(self, session_id: str) -> None:
-        meta = self._metadata.get(session_id)
-        if meta is None or meta.get("ephemeral"):
+    def _persist_meta(self, record: SessionRecord) -> None:
+        if record.ephemeral:
             return
-        if session_id not in self._persisted and not self._should_persist(session_id):
+        if not record.persisted and not self._should_persist(record):
             return
-        self._persisted.add(session_id)
-        self.store.write_meta({
-            "session_id": session_id,
-            "name": meta["name"],
-            "path": meta["path"],
-            "backend": meta["backend"],
-            "always_allow": True,
-            "named": not self._auto_named.get(session_id, True),
-            "acp_session_id": self._acp_ids.get(session_id),
-            "hidden": bool(meta.get("hidden")),
-            "tags": meta.get("tags") or [],
-            # Roles decide the orientation, and `oriented` decides whether it
-            # is still owed. Both have to survive a restart or a session that
-            # was created and not yet spoken to would come back either
-            # unoriented forever or oriented as something it is not.
-            "roles": list(meta.get("roles") or []),
-            "oriented": bool(meta.get("oriented")),
-            "created": meta.get("created"),
-            "last_active": meta.get("last_active") or _now_iso(),
-        })
+        record.persisted = True
+        self.store.write_meta(record.stored())
 
     # --- metadata/config views -----------------------------------------
 
@@ -266,19 +236,16 @@ class SessionCoordinator:
         so it can be stopped to reclaim memory and resumed with its
         conversation intact.
         """
-        sessions = [
-            dict(meta) for meta in self._metadata.values()
-            if include_hidden or not meta.get("hidden")
-        ]
+        sessions = [record.wire() for record in self._records.values()
+                    if include_hidden or not record.hidden]
         return sorted(sessions, key=lambda item: item.get("created") or "")
 
     def get_session(self, session_id: str) -> dict:
-        meta = self._require(session_id)
-        return {**meta, "usage": self._usage.get(session_id, {})}
+        record = self._require(session_id)
+        return {**record.wire(), "usage": dict(record.usage or {})}
 
     def transcript(self, session_id: str) -> list[dict]:
-        self._require(session_id)
-        return list(self._ensure_transcript(session_id))
+        return list(self._ensure_transcript(self._require(session_id)))
 
     def open_session(self, session_id: str) -> None:
         transcript = self.transcript(session_id)
@@ -298,11 +265,11 @@ class SessionCoordinator:
         self.config = config.load_config()
         self._emit({"type": "config_changed"})
 
-    def _require(self, session_id: str) -> dict:
-        meta = self._metadata.get(session_id)
-        if meta is None:
+    def _require(self, session_id: str) -> SessionRecord:
+        record = self._records.get(session_id)
+        if record is None:
             raise FalconFoxError(f"no such session: {session_id}")
-        return meta
+        return record
 
     # --- session lifecycle ---------------------------------------------
 
@@ -322,80 +289,58 @@ class SessionCoordinator:
             backend = self.config.select_backend(backend_name)
         except KeyError as error:
             raise FalconFoxError(str(error)) from error
-        session_id = self.sessions.new_session_id()
-        auto_named = not bool((name or "").strip())
-        display_name = (name or "").strip() or f"Session {len(self._metadata) + 1}"
+        session_id = new_session_id()
+        now = _now_iso()
         # Decided before the subprocess exists: a new session over the limit
         # is created *stored*, so it has an id, metadata, a transcript and --
         # for the Telegram client -- a topic, and simply is not running yet.
         # Refusing instead would deny the user something the interface invites.
         # A throwaway is hidden by default; infrastructure asks for hidden
         # without asking to be thrown away.
-        hidden = bool(ephemeral) if hidden is None else bool(hidden)
-        has_slot = await self._ensure_slot()
-        now = _now_iso()
-        if not has_slot:
-            self._acp_ids[session_id] = None
-            self._auto_named[session_id] = auto_named
-            self._metadata[session_id] = {
-                "session_id": session_id, "name": display_name,
-                "path": str(working_path), "backend": backend.name,
-                "always_allow": True, "ephemeral": bool(ephemeral),
-                "hidden": hidden,
-                "tags": [],
-                "roles": list(roles or []),
-                "oriented": False,
-                "state": "stored", "live": False, "created": now, "last_active": now,
-            }
-            self._persist_meta(session_id)
-            self._emit({"type": "session_added", **self._metadata[session_id]})
-            self._enqueue(session_id, None)
-            return session_id
-        session = AgentSession(
+        record = SessionRecord(
             session_id=session_id,
-            name=display_name,
+            name=(name or "").strip() or f"Session {len(self._records) + 1}",
+            path=str(working_path),
+            backend=backend.name,
+            created=now,
+            last_active=now,
+            ephemeral=bool(ephemeral),
+            hidden=bool(ephemeral) if hidden is None else bool(hidden),
+            roles=list(roles or []),
+            auto_named=not bool((name or "").strip()),
+        )
+        has_slot = await self._ensure_slot()
+        self._records[session_id] = record
+        if not has_slot:
+            self._persist_meta(record)
+            self._emit({"type": "session_added", **record.wire()})
+            self._enqueue(record, None)
+            return session_id
+        record.agent = AgentSession(
+            session_id=session_id,
+            name=record.name,
             path=working_path,
             backend=backend,
             emit=self._emit,
             request_permission=self._request_permission,
         )
-        self.sessions.add(session)
-        self._acp_ids[session_id] = None
-        self._auto_named[session_id] = auto_named
-        self._metadata[session_id] = {
-            "session_id": session_id,
-            "name": display_name,
-            "path": str(working_path),
-            "backend": backend.name,
-            "always_allow": True,
-            "ephemeral": bool(ephemeral),
-            "hidden": hidden,
-            "tags": [],
-            "roles": list(roles or []),
-            "oriented": False,
-            "state": "starting",
-            "live": True,
-            "created": now,
-            "last_active": now,
-        }
-        self._persist_meta(session_id)
-        self._emit({"type": "session_added", **self._metadata[session_id]})
+        record.state = "starting"
+        self._persist_meta(record)
+        self._emit({"type": "session_added", **record.wire()})
         try:
-            await session.start()
+            await record.agent.start()
         except Exception as error:
-            self.sessions.pop(session_id)
-            self._metadata.pop(session_id, None)
-            self._acp_ids.pop(session_id, None)
-            self._auto_named.pop(session_id, None)
-            self._persisted.discard(session_id)
+            # Discarded whole, rather than field by field: whatever the record
+            # picked up on the way to failing goes with it.
+            self._records.pop(session_id, None)
             self.store.delete(session_id)
             self._emit({"type": "session_removed", "session_id": session_id})
             self._emit({"type": "notice", "session_id": session_id, "level": "error",
                         "message": f"failed to start session: {error}"})
             raise
-        self._acp_ids[session_id] = session.acp_session_id
-        await self._apply_config_options(session_id, session)
-        self._persist_meta(session_id)
+        record.acp_id = record.agent.acp_session_id
+        await self._apply_config_options(record)
+        self._persist_meta(record)
         return session_id
 
     # --- the live-session cap ------------------------------------------
@@ -409,7 +354,7 @@ class SessionCoordinator:
         resumable, so it queues for a slot, and for eviction by recency, like
         everything else -- costing a resume rather than its conversation.
         """
-        return [sid for sid, meta in self._metadata.items() if meta.get("live")]
+        return [record.session_id for record in self._records.values() if record.live]
 
     async def _ensure_slot(self) -> bool:
         """Make room for one more live session. True if there is room now.
@@ -435,15 +380,14 @@ class SessionCoordinator:
         # own, and reach neither the cap nor an agent. So infrastructure waits
         # like anything else, and its wait ends at the next idle session.
         candidates = sorted(
-            (sid for sid in live
-             if self._metadata[sid].get("state") == "idle"),
-            key=lambda sid: self._metadata[sid].get("last_active") or "",
+            (sid for sid in live if self._records[sid].state == "idle"),
+            key=lambda sid: self._records[sid].last_active or "",
         )
         if not candidates:
             return False
         victim = candidates[0]
         self.log.info("session limit %d reached: stopping least-recently-used %s (%s)",
-                      limit, victim, self._metadata[victim].get("name"))
+                      limit, victim, self._records[victim].name)
         # Said before the stop, in the victim's own words, so a topic that
         # closes under the user reads as the system managing memory rather
         # than as their session mysteriously dying. `kind` marks the notices a
@@ -459,17 +403,33 @@ class SessionCoordinator:
         await self.stop_session(victim)
         return True
 
-    def _enqueue(self, session_id: str, text: Optional[str]) -> None:
-        self._queued[session_id] = text or self._queued.get(session_id)
+    def _enqueue(self, record: SessionRecord, text: Optional[str]) -> None:
+        record.queued = True
+        record.queued_text = text or record.queued_text
+        if record.queued_since is None:
+            record.queued_since = time.monotonic()
         live = len(self.live_session_ids())
         self.log.info("session %s queued for a slot (%d live, limit %d)",
-                      session_id, live, self.config.max_live_sessions)
-        self._emit({"type": "notice", "session_id": session_id, "level": "info",
+                      record.session_id, live, self.config.max_live_sessions)
+        self._emit({"type": "notice", "session_id": record.session_id, "level": "info",
                     "kind": "capacity",
                     "message": f"Waiting for a free session slot — {live} of "
                                f"{self.config.max_live_sessions} of your "
                                f"sessions are active and busy. This starts as "
                                f"soon as one goes idle."})
+
+    def _dequeue(self, record: SessionRecord) -> None:
+        """Off the waiting list, keeping whatever is waiting to be said."""
+        record.queued = False
+        record.queued_since = None
+
+    def _anything_queued(self) -> bool:
+        return any(record.queued for record in self._records.values())
+
+    def _waiting_for_a_slot(self) -> list[SessionRecord]:
+        """Queued sessions, in the order they asked for a slot."""
+        return sorted((record for record in self._records.values() if record.queued),
+                      key=lambda record: record.queued_since or 0.0)
 
     def _schedule_drain(self) -> None:
         if self._draining:
@@ -480,52 +440,61 @@ class SessionCoordinator:
     async def _drain_queue(self) -> None:
         """Activate queued sessions while slots can be freed. Never fatal."""
         try:
-            for session_id in list(self._queued):
-                if session_id not in self._metadata:
-                    self._queued.pop(session_id, None)
-                    continue
-                if not await self._ensure_slot():
-                    return
-                text = self._queued.pop(session_id, None)
+            for record in self._waiting_for_a_slot():
+                if self._records.get(record.session_id) is not record:
+                    continue  # deleted while the queue was draining
                 try:
-                    await self.resume_session(session_id)
+                    await self.resume_session(record.session_id)
+                    if record.queued:
+                        return  # no slot came free; the rest are waiting too
+                    # Held until it is actually said, so a resume that has to
+                    # queue again keeps the message it was queued with.
+                    text = record.queued_text
+                    record.queued_text = None
                     if text:
-                        await self.send(session_id, text)
+                        await self.send(record.session_id, text)
                 except Exception as error:
+                    # Off the waiting list: a session that cannot start does
+                    # not get retried at every idle event for the life of the
+                    # daemon, each retry costing another notice.
+                    self._dequeue(record)
+                    record.queued_text = None
                     self.log.warning("could not activate queued session %s: %s",
-                                     session_id, error, exc_info=True)
-                    self._emit({"type": "notice", "session_id": session_id,
+                                     record.session_id, error, exc_info=True)
+                    self._emit({"type": "notice", "session_id": record.session_id,
                                 "level": "error",
                                 "message": f"could not start after waiting: {error}"})
         finally:
             self._draining = False
 
     async def resume_session(self, session_id: str) -> None:
-        meta = self._require(session_id)
-        if meta.get("live"):
+        record = self._require(session_id)
+        if record.live:
+            self._dequeue(record)
             return
         if not await self._ensure_slot():
-            self._enqueue(session_id, None)
+            self._enqueue(record, None)
             return
-        path = Path(meta["path"])
+        path = Path(record.path)
         if not path.is_dir():
             raise FalconFoxError(f"session path is not a directory: {path}")
         try:
-            backend = self.config.select_backend(meta["backend"] or None)
+            backend = self.config.select_backend(record.backend or None)
         except KeyError as error:
             raise FalconFoxError(str(error)) from error
         session = AgentSession(
             session_id=session_id,
-            name=meta["name"],
+            name=record.name,
             path=path,
             backend=backend,
             emit=self._emit,
             request_permission=self._request_permission,
         )
-        self.sessions.add(session)
-        meta.update(state="starting", live=True)
-        self._emit({"type": "session_updated", **meta})
-        stored_acp_id = self._acp_ids.get(session_id)
+        record.agent = session
+        record.state = "starting"
+        self._dequeue(record)
+        self._emit({"type": "session_updated", **record.wire()})
+        stored_acp_id = record.acp_id
         try:
             loaded = await session.resume(stored_acp_id)
         except Exception as error:
@@ -537,24 +506,20 @@ class SessionCoordinator:
             # already exists for: the transcript is ours, so the conversation
             # is replayed as context rather than lost.
             if stored_acp_id is None:
-                self.sessions.pop(session_id)
-                meta.update(state="stored", live=False)
-                self._emit({"type": "session_updated", **meta})
+                self._resume_failed(record)
                 raise
             self.log.warning("could not load backend session for %s (%s); "
                              "starting a fresh one", session_id, error)
-            self._acp_ids[session_id] = None
+            record.acp_id = None
             try:
                 loaded = await session.resume(None)
             except Exception:
-                self.sessions.pop(session_id)
-                meta.update(state="stored", live=False)
-                self._emit({"type": "session_updated", **meta})
+                self._resume_failed(record)
                 raise
-        self._acp_ids[session_id] = session.acp_session_id
-        await self._apply_config_options(session_id, session)
-        self._persist_meta(session_id)
-        transcript = self._ensure_transcript(session_id)
+        record.acp_id = session.acp_session_id
+        await self._apply_config_options(record)
+        self._persist_meta(record)
+        transcript = self._ensure_transcript(record)
         self._emit({"type": "transcript_reset", "session_id": session_id,
                     "transcript": transcript})
         if not loaded and transcript:
@@ -562,14 +527,19 @@ class SessionCoordinator:
             # not received yet is still owed to it, and a transcript cannot
             # stand in for it: `record=False` keeps replays out of the
             # transcript, so a replay never contains one.
-            self._pending_context.setdefault(session_id, []).append(
-                PromptPart(text=self._context_prompt(session_id),
+            record.pending_context.append(
+                PromptPart(text=self._context_prompt(record),
                            system=True, record=False))
             self._emit({"type": "notice", "session_id": session_id,
                         "message": "Context re-sent from saved transcript imperfectly — "
                                    "this backend has no native session loading."})
 
-    def _orientation_parts(self, session_id: str) -> list[PromptPart]:
+    def _resume_failed(self, record: SessionRecord) -> None:
+        record.agent = None
+        record.state = "stored"
+        self._emit({"type": "session_updated", **record.wire()})
+
+    def _orientation_parts(self, record: SessionRecord) -> list[PromptPart]:
         """A session's orientation, once, on the first prompt it ever gets.
 
         Built here rather than queued at spawn, and the difference matters: a
@@ -579,13 +549,12 @@ class SessionCoordinator:
         has been told -- which also means the roles are read back from
         metadata, so a restart rebuilds exactly the same text.
         """
-        meta = self._metadata.get(session_id) or {}
-        if meta.get("oriented"):
+        if record.oriented:
             return []
         parts = [PromptPart(text=piece, system=True)
-                 for piece in self._orientation(meta.get("roles") or [])]
-        meta["oriented"] = True
-        self._persist_meta(session_id)
+                 for piece in self._orientation(record.roles)]
+        record.oriented = True
+        self._persist_meta(record)
         return parts
 
     def _orientation(self, roles: Sequence[str]) -> list[str]:
@@ -690,8 +659,8 @@ class SessionCoordinator:
                              exc_info=True)
             return ""
 
-    def _context_prompt(self, session_id: str) -> str:
-        body = self._transcript_text(session_id, limit=24000)
+    def _context_prompt(self, record: SessionRecord) -> str:
+        body = self._transcript_text(record, limit=24000)
         return (
             "You are resuming a previous session that was interrupted. This backend "
             "cannot restore it natively, so below is the prior conversation. Re-read "
@@ -700,26 +669,26 @@ class SessionCoordinator:
         )
 
     async def send(self, session_id: str, text: str) -> None:
-        self._require(session_id)
+        record = self._require(session_id)
         if not (text or "").strip():
             raise FalconFoxError("message must not be empty")
-        if self.sessions.get(session_id) is None:
+        if not record.live:
             await self.resume_session(session_id)
-        session = self.sessions.get(session_id)
-        if session is None:
-            if session_id in self._queued:
+        if not record.live:
+            if record.queued:
                 # Held, not lost. Blocking here instead would be worse than
                 # useless: `send` is an HTTP call with a 40-second client
                 # timeout, and the slot may not free for many minutes.
-                self._enqueue(session_id, text)
+                self._enqueue(record, text)
                 return
             raise FalconFoxError(f"could not resume session: {session_id}")
         # Orientation first, then anything else pending, then the user's
         # words -- each its own block, so no producer can displace another.
-        parts = self._orientation_parts(session_id)
-        parts += self._pending_context.pop(session_id, [])
+        parts = self._orientation_parts(record)
+        parts += record.pending_context
+        record.pending_context = []
         parts.append(PromptPart(text=text))
-        await session.send(parts)
+        await record.agent.send(parts)
 
     async def attach(self, session_id: str, path: str,
                      caption: Optional[str] = None, ack: bool = True,
@@ -790,8 +759,8 @@ class SessionCoordinator:
         `name` is what to store it under, for a caller holding a download
         whose own filename means nothing.
         """
-        meta = self._require(session_id)
-        if meta.get("ephemeral"):
+        record = self._require(session_id)
+        if record.ephemeral:
             # Ephemeral means nothing on disk, so there is nowhere to put it
             # and nothing that would ever clean it up.
             raise FalconFoxError("an ephemeral session has no file store")
@@ -812,56 +781,49 @@ class SessionCoordinator:
         return {"removed": self.store.clear_files(session_id)}
 
     async def cancel(self, session_id: str) -> None:
-        self._require(session_id)
-        session = self.sessions.get(session_id)
-        if session is not None:
-            await session.cancel()
+        record = self._require(session_id)
+        if record.agent is not None:
+            await record.agent.cancel()
 
     async def stop_session(self, session_id: str) -> None:
-        meta = self._require(session_id)
-        if meta.get("ephemeral") or not self._should_persist(session_id):
+        record = self._require(session_id)
+        if record.ephemeral or not self._should_persist(record):
             await self.delete_session(session_id)
             return
-        session = self.sessions.pop(session_id)
-        if session is not None:
-            await session.stop()
-        meta.update(state="stored", live=False)
-        self._queued.pop(session_id, None)
-        self._config_options.pop(session_id, None)
-        self._commands.pop(session_id, None)
-        self._pending_context.pop(session_id, None)
-        self._evict_transcript(session_id)
-        self._persist_meta(session_id)
-        self._emit({"type": "session_updated", **meta})
+        agent = record.agent
+        # Not live from here on, before any await: the slot this session held
+        # is free the moment its agent is given up, and a second caller
+        # counting live sessions must not still see it.
+        record.release()
+        if agent is not None:
+            await agent.stop()
+        self._persist_meta(record)
+        self._emit({"type": "session_updated", **record.wire()})
 
     async def delete_session(self, session_id: str) -> None:
-        meta = self._require(session_id)
+        record = self._require(session_id)
         self.log.info("deleting session=%s name=%s live=%s", session_id,
-                      meta.get("name"), meta.get("live"))
-        session = self.sessions.pop(session_id)
-        if session is not None:
-            await session.stop()
-        self._metadata.pop(session_id, None)
-        self._transcripts.pop(session_id, None)
-        self._acp_ids.pop(session_id, None)
-        self._config_options.pop(session_id, None)
-        self._commands.pop(session_id, None)
-        self._pending_context.pop(session_id, None)
-        self._auto_named.pop(session_id, None)
-        self._persisted.discard(session_id)
-        self._usage.pop(session_id, None)
+                      record.name, record.live)
+        agent = record.agent
+        # The record is the whole of the session, so discarding it is the
+        # whole of the cleanup. Nothing here lists fields, which is what used
+        # to make the two teardown paths disagree.
+        self._records.pop(session_id, None)
+        record.agent = None
+        if agent is not None:
+            await agent.stop()
         self.store.delete(session_id)
         self._emit({"type": "session_removed", "session_id": session_id})
 
     def rename_session(self, session_id: str, name: str) -> None:
-        meta = self._require(session_id)
+        record = self._require(session_id)
         name = (name or "").strip()
         if not name:
             raise FalconFoxError("session name must not be empty")
-        meta["name"] = name
-        self._auto_named[session_id] = False
-        self._persist_meta(session_id)
-        self._emit({"type": "session_updated", **meta})
+        record.name = name
+        record.auto_named = False
+        self._persist_meta(record)
+        self._emit({"type": "session_updated", **record.wire()})
 
     def set_tags(self, session_id: str, tags: list) -> list[str]:
         """Replace a session's tags, in the order given.
@@ -871,68 +833,70 @@ class SessionCoordinator:
         first tag it recognises, so "which comes first" has to be sayable in
         one call. An empty list clears them.
         """
-        meta = self._require(session_id)
-        meta["tags"] = _normalize_tags(tags)
-        self._persist_meta(session_id)
-        self._emit({"type": "session_updated", **meta})
-        return meta["tags"]
+        record = self._require(session_id)
+        record.tags = _normalize_tags(tags)
+        self._persist_meta(record)
+        self._emit({"type": "session_updated", **record.wire()})
+        return list(record.tags)
 
     # --- transcript utilities retained from the existing daemon --------
 
     async def revert_session(self, session_id: str, event_index: int) -> None:
-        meta = self._require(session_id)
-        transcript = self._ensure_transcript(session_id)
+        record = self._require(session_id)
+        transcript = self._ensure_transcript(record)
         if event_index < 0 or event_index >= len(transcript):
             raise FalconFoxError(f"event_index {event_index} out of range")
         target = transcript[event_index]
         if target.get("type") != "message" or target.get("role") != "user":
             raise FalconFoxError("revert target must be a user message")
-        if meta.get("live"):
-            session = self.sessions.pop(session_id)
-            if session is not None:
-                await session.stop()
-            meta.update(state="stored", live=False)
-        self._acp_ids[session_id] = None
         truncated = transcript[:event_index]
-        self._transcripts[session_id] = truncated
-        if session_id in self._persisted:
+        agent = record.agent
+        if agent is not None:
+            record.agent = None
+            record.state = "stored"
+            await agent.stop()
+        record.acp_id = None
+        record.transcript = truncated
+        if record.persisted:
             self.store.rewrite_transcript(session_id, truncated)
-            self._persist_meta(session_id)
-        self._emit({"type": "session_updated", **meta})
+            self._persist_meta(record)
+        self._emit({"type": "session_updated", **record.wire()})
         self._emit({"type": "transcript_reset", "session_id": session_id,
                     "transcript": truncated})
 
     async def fork_session(self, session_id: str, event_index: Optional[int] = None) -> str:
         source = self._require(session_id)
-        transcript = list(self._ensure_transcript(session_id))
+        transcript = list(self._ensure_transcript(source))
         if event_index is not None:
             if event_index < 0 or event_index > len(transcript):
                 raise FalconFoxError(f"event_index {event_index} out of range")
             transcript = transcript[:event_index]
-        new_id = self.sessions.new_session_id()
+        new_id = new_session_id()
         now = _now_iso()
-        self._metadata[new_id] = {
-            **source,
-            "session_id": new_id,
-            "name": f"{source['name']} (fork)",
-            "ephemeral": False,
-            "state": "stored",
-            "live": False,
-            "created": now,
-            "last_active": now,
-        }
-        self._transcripts[new_id] = transcript
-        self._acp_ids[new_id] = None
-        self._auto_named[new_id] = False
-        self._persisted.add(new_id)
-        self._persist_meta(new_id)
+        fork = SessionRecord(
+            session_id=new_id,
+            name=f"{source.name} (fork)",
+            path=source.path,
+            backend=source.backend,
+            created=now,
+            last_active=now,
+            hidden=source.hidden,
+            tags=list(source.tags),
+            roles=list(source.roles),
+            oriented=source.oriented,
+            transcript=transcript,
+            auto_named=False,
+            persisted=True,
+        )
+        self._records[new_id] = fork
+        self._persist_meta(fork)
         self.store.rewrite_transcript(new_id, transcript)
-        self._emit({"type": "session_added", **self._metadata[new_id]})
+        self._emit({"type": "session_added", **fork.wire()})
         return new_id
 
     async def name_session(self, session_id: str) -> None:
-        meta = self._require(session_id)
-        transcript_text = self._transcript_text(session_id)
+        record = self._require(session_id)
+        transcript_text = self._transcript_text(record)
         if not transcript_text.strip():
             raise FalconFoxError("nothing to name yet — the session has no messages")
         if not self.config.naming_backend:
@@ -942,12 +906,12 @@ class SessionCoordinator:
         except KeyError as error:
             raise FalconFoxError(str(error)) from error
         prompt = f"{self.config.naming_prompt}\n\n--- transcript ---\n{transcript_text}"
-        reply = await oneshot.one_shot(backend, Path(meta["path"]), prompt)
+        reply = await oneshot.one_shot(backend, Path(record.path), prompt)
         name = _clean_name(reply)
         if name:
             self.rename_session(session_id, name)
 
-    def _transcript_text(self, session_id: str, limit: int = 6000) -> str:
+    def _transcript_text(self, record: SessionRecord, limit: int = 6000) -> str:
         """The conversation as text, for a backend that cannot reload it.
 
         System messages are included, which they were not before. They are the
@@ -956,7 +920,7 @@ class SessionCoordinator:
         its history with the explanation of where it is removed.
         """
         lines = []
-        for event in self._ensure_transcript(session_id):
+        for event in self._ensure_transcript(record):
             if event.get("type") != "message":
                 continue
             if event.get("role") in ("user", "agent"):
@@ -965,8 +929,10 @@ class SessionCoordinator:
 
     # --- config options and permissions --------------------------------
 
-    async def _apply_config_options(self, session_id: str, session: AgentSession) -> None:
-        backend = self.config.select_backend(self._metadata[session_id]["backend"] or None)
+    async def _apply_config_options(self, record: SessionRecord) -> None:
+        session_id = record.session_id
+        session = record.agent
+        backend = self.config.select_backend(record.backend or None)
         for config_id, preference in backend.config_options.items():
             option = next((o for o in session.config_options if o["id"] == config_id), None)
             if option is None:
@@ -992,12 +958,11 @@ class SessionCoordinator:
                     "options": session.config_options})
 
     async def set_config_option(self, session_id: str, config_id: str, value) -> None:
-        self._require(session_id)
-        session = self.sessions.get(session_id)
-        if session is None:
+        record = self._require(session_id)
+        if record.agent is None:
             raise FalconFoxError("session must be live to change an option")
-        await session.set_config_option(config_id, value)
-        self._publish_config_options(session_id, session)
+        await record.agent.set_config_option(config_id, value)
+        self._publish_config_options(session_id, record.agent)
 
     async def _request_permission(self, payload: dict) -> Optional[str]:
         """Always allow when possible; empty options are an immediate denial.
@@ -1020,15 +985,26 @@ class SessionCoordinator:
     # --- socket state and lifecycle ------------------------------------
 
     def snapshot(self) -> dict:
+        # Only sessions the backend has actually spoken about carry an entry,
+        # as before: an absent key and an empty one are different answers.
         return {
             "type": "snapshot",
             "sessions": self.list_sessions(),
-            "config_options": dict(self._config_options),
-            "commands": dict(self._commands),
-            "usage": dict(self._usage),
+            "config_options": {record.session_id: record.config_options
+                               for record in self._records.values()
+                               if record.config_options is not None},
+            "commands": {record.session_id: record.commands
+                         for record in self._records.values()
+                         if record.commands is not None},
+            "usage": {record.session_id: record.usage
+                      for record in self._records.values()
+                      if record.usage is not None},
         }
 
     async def shutdown(self) -> None:
-        self.log.info("coordinator shutdown: sessions=%d", len(self.sessions.all()))
-        for session in self.sessions.all():
-            await session.stop()
+        live = [record for record in self._records.values() if record.live]
+        self.log.info("coordinator shutdown: sessions=%d", len(live))
+        for record in live:
+            agent = record.agent
+            record.agent = None
+            await agent.stop()

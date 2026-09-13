@@ -1,0 +1,160 @@
+"""One session, held as one thing.
+
+A session used to be an agreement between a dozen dicts in the coordinator
+that they all carried the same key: `_metadata`, `_transcripts`, `_acp_ids`,
+`_config_options`, `_commands`, `_pending_context`, `_auto_named`, `_usage`,
+`_queued`, `_persisted`, and the live `AgentSession` in a manager of its own.
+Every lifecycle site pushed and popped each of them by hand, so the two
+teardown paths cleared slightly different lists and a forgotten field was a
+leak with nothing to catch it.
+
+The record is that agreement made into an object. Creating a session is
+creating one, and ending it is discarding it (`delete`) or calling
+`release` (`stop`), so no site hand-lists fields any more.
+
+**"Live" is answered here, once.** The record holds the running
+`AgentSession`, and `live` is "there is one". The coordinator no longer keeps
+a second index of live sessions beside this one, which is what let the
+live-session cap be exceeded: the old teardown popped the session from its
+manager and only marked the metadata not-live after an await, so a second
+caller in that window counted a slot that was already being freed. Here the
+two facts cannot disagree, because there is only one.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+from .engine.session import AgentSession, PromptPart
+
+
+@dataclass
+class SessionRecord:
+    """Everything FalconFox knows about one session."""
+
+    # --- what a client sees. `wire` is the whole of the shape.
+    session_id: str
+    name: str
+    path: str
+    backend: str
+    created: str
+    last_active: str
+    ephemeral: bool = False
+    hidden: bool = False
+    tags: list[str] = field(default_factory=list)
+    roles: list[str] = field(default_factory=list)
+    oriented: bool = False
+    state: str = "stored"
+
+    # --- the live agent, and therefore whether this session is live at all.
+    agent: Optional[AgentSession] = None
+    # The backend's own id for its session, which is what a native
+    # `session/load` resumes from. Ours is `session_id`; this one is theirs.
+    acp_id: Optional[str] = None
+
+    # --- what is on disk, and what is only in memory.
+    auto_named: bool = True
+    persisted: bool = False
+    # None means "not read from disk yet", which is not the same as empty:
+    # stopping a session drops the cache to reclaim the memory.
+    transcript: Optional[list[dict]] = None
+
+    # --- what the backend last told us. None means it never said, which is
+    # why these are not plain empty containers: the snapshot carries an entry
+    # only for sessions that have one.
+    config_options: Optional[list[dict]] = None
+    commands: Optional[list[dict]] = None
+    usage: Optional[dict] = None
+
+    # Context owed to the session on its next prompt, ahead of the user's own
+    # words: a transcript replay for a backend that cannot reload one, or the
+    # notice that its last turn was cut off by a restart.
+    pending_context: list[PromptPart] = field(default_factory=list)
+
+    # --- waiting for a live slot, with the message that is waiting with it.
+    queued: bool = False
+    queued_text: Optional[str] = None
+    # Monotonic, and only for ordering the queue: sessions get their slot in
+    # the order they asked for one.
+    queued_since: Optional[float] = None
+
+    # Whether this session was in the last "N sessions running" line the
+    # coordinator logged, so the line is written when it changes and not on
+    # every event.
+    reported_busy: bool = False
+
+    @property
+    def live(self) -> bool:
+        """Whether this session holds a live agent subprocess."""
+        return self.agent is not None
+
+    def wire(self) -> dict:
+        """The session as every client sees it.
+
+        The one place that shape is written. `always_allow` is a constant the
+        PoC has no interactive posture behind, and it stays on the wire
+        because clients read it.
+        """
+        return {
+            "session_id": self.session_id,
+            "name": self.name,
+            "path": self.path,
+            "backend": self.backend,
+            "always_allow": True,
+            "ephemeral": self.ephemeral,
+            "hidden": self.hidden,
+            "tags": list(self.tags),
+            "roles": list(self.roles),
+            "oriented": self.oriented,
+            "state": self.state,
+            "live": self.live,
+            "created": self.created,
+            "last_active": self.last_active,
+        }
+
+    def stored(self) -> dict:
+        """The session as `meta.toml` holds it.
+
+        Deliberately not `wire`: `state` and `live` describe a running
+        process and are always "stored" and false on the way back in, while
+        `named` and the backend's session id matter to a restart and to
+        nobody else.
+        """
+        return {
+            "session_id": self.session_id,
+            "name": self.name,
+            "path": self.path,
+            "backend": self.backend,
+            "always_allow": True,
+            "named": not self.auto_named,
+            "acp_session_id": self.acp_id,
+            "hidden": self.hidden,
+            "tags": list(self.tags),
+            # Roles decide the orientation, and `oriented` decides whether it
+            # is still owed. Both have to survive a restart or a session that
+            # was created and not yet spoken to would come back either
+            # unoriented forever or oriented as something it is not.
+            "roles": list(self.roles),
+            "oriented": self.oriented,
+            "created": self.created,
+            "last_active": self.last_active,
+        }
+
+    def release(self) -> None:
+        """Give up everything that belonged to the running agent.
+
+        What `stop` leaves behind is the session as it exists on disk: its
+        metadata, the backend's session id, whether it was named. Everything
+        that only meant something while a subprocess was running goes, and it
+        goes from one list rather than from each caller's own.
+        """
+        self.agent = None
+        self.state = "stored"
+        self.transcript = None
+        self.config_options = None
+        self.commands = None
+        self.pending_context = []
+        self.queued = False
+        self.queued_text = None
+        self.queued_since = None

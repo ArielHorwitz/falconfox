@@ -331,23 +331,12 @@ class AgentSession:
         )
 
 
-class SessionManager:
-    """Owns all live ACP sessions, keyed by FalconFox session id."""
+def new_session_id() -> str:
+    """A fresh FalconFox session id.
 
-    def __init__(self) -> None:
-        self._sessions: dict[str, AgentSession] = {}
-
-    def new_session_id(self) -> str:
-        return uuid.uuid4().hex[:8]
-
-    def add(self, session: AgentSession) -> None:
-        self._sessions[session.session_id] = session
-
-    def get(self, session_id: str) -> Optional[AgentSession]:
-        return self._sessions.get(session_id)
-
-    def pop(self, session_id: str) -> Optional[AgentSession]:
-        return self._sessions.pop(session_id, None)
-
-    def all(self) -> list[AgentSession]:
-        return list(self._sessions.values())
+    A function rather than a manager's method: the live `AgentSession` lives
+    on the coordinator's record for that session, so there is no second index
+    of live sessions to hang this off, and there is no second answer to "is
+    this session live".
+    """
+    return uuid.uuid4().hex[:8]
