@@ -762,7 +762,10 @@ class LifecycleSerialisationTests(unittest.IsolatedAsyncioTestCase):
         # pending, so the notice was appended to the file it had just
         # rewritten -- a stray line after the revert.
         record = make_record(self.coordinator, "work", name="work",
-                             auto_named=False, persisted=True)
+                             auto_named=False, persisted=True,
+                             config_options=[{"id": "model"}],
+                             commands=[{"name": "review"}],
+                             pending_context=[PromptPart(text="owed")])
         self.coordinator.store.write_meta(record.stored())
         for event in ({"type": "message", "role": "user", "text": "first"},
                       {"type": "message", "role": "agent", "text": "reply"}):
@@ -779,6 +782,15 @@ class LifecycleSerialisationTests(unittest.IsolatedAsyncioTestCase):
                          ["first", "reply"],
                          "nothing may be appended after the rewrite")
         self.assertEqual(self.coordinator.transcript("work"), on_disk)
+        # And the agent that held the rest of this session's state is gone
+        # with it, by the same route a stop gives it up rather than by a
+        # list of fields written out at the revert.
+        self.assertFalse(record.live)
+        self.assertEqual(record.state, "stored")
+        self.assertIsNone(record.acp_id, "what it would load no longer exists")
+        self.assertIsNone(record.config_options)
+        self.assertIsNone(record.commands)
+        self.assertEqual(record.pending_context, [])
 
     async def test_a_second_send_to_a_starting_session_waits(self):
         # Survey F6. The second send reached a session that was in the

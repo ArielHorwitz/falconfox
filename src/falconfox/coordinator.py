@@ -1044,9 +1044,13 @@ class SessionCoordinator:
             await self._settle_turn(record, "the conversation was reverted")
             truncated = self._ensure_transcript(record)[:event_index]
             agent = record.agent
+            # Given up whole, like a stop, rather than by a list of fields
+            # written out here: a revert ends the agent that held them, and
+            # anything it told us about itself is about a conversation that
+            # no longer exists. The backend's own session id goes too, since
+            # what it would load is the history being rewritten.
+            record.release()
             if agent is not None:
-                record.agent = None
-                record.state = "stored"
                 await agent.stop()
             record.acp_id = None
             record.transcript = truncated
