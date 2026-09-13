@@ -382,6 +382,64 @@ class TopicApplyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(getattr(bot.telegram, "icons", []), [(20, "5001")])
 
 
+class TurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
+    """Survey F5: the whole turn map was serialised and written synchronously
+    on every narration block and every thought close, on the loop that carries
+    every session's events."""
+
+    async def test_many_narration_blocks_in_one_tick_write_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = _bot(directory)
+            bot._ws = _EventStream()
+            writes = []
+            written = bot_module._write_atomic
+
+            def counting(path, text):
+                writes.append(path)
+                written(path, text)
+
+            with patch.object(bot_module, "_write_atomic", counting), \
+                    patch.object(bot_module, "PERSIST_TURNS_SECONDS", 0.01):
+                await bot._forward("session", Dest(-1001, 20), "go", prompt_msg=1)
+                writes.clear()
+                for index in range(5):
+                    await bot._handle_event({
+                        "type": "message", "session_id": "session",
+                        "role": "agent", "text": f"narration {index}"})
+                    await bot._handle_event({
+                        "type": "tool_call", "session_id": "session",
+                        "title": "grep", "tool_call_id": str(index)})
+                self.assertEqual(writes, [],
+                                 "the event path does not touch the disk")
+                await asyncio.sleep(0.05)
+                self.assertEqual(len(writes), 1, "one write for the lot")
+
+                # A turn boundary is not debounced: the map has to be right on
+                # disk before the process can be told to stop.
+                writes.clear()
+                await bot._handle_event({
+                    "type": "turn_ended", "session_id": "session",
+                    "turn_id": "t1", "outcome": "completed",
+                    "stop_reason": "end_turn", "output_chars": 9})
+                self.assertTrue(writes, "the end of a turn is written at once")
+                self.assertEqual(json.loads(bot._turns_file.read_text()), {})
+
+    async def test_a_dropped_connection_flushes_what_was_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = _bot(directory)
+            bot._ws = _EventStream()
+            with patch.object(bot_module, "PERSIST_TURNS_SECONDS", 3600):
+                await bot._forward("session", Dest(-1001, 20), "go", prompt_msg=1)
+                await bot._handle_event({"type": "message", "session_id": "session",
+                                         "role": "agent", "text": "narration"})
+                await bot._handle_event({"type": "tool_call",
+                                         "session_id": "session", "title": "grep"})
+                bot._reset_connection_state()
+            record = json.loads(bot._turns_file.read_text())["session"]
+            self.assertEqual(record["progress"], ["narration", "⚙️ grep"],
+                             "what the timer had not reached is on disk anyway")
+
+
 class _NoWatchdog:
     def __init__(self, logger=None) -> None:
         pass

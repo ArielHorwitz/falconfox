@@ -56,6 +56,13 @@ TOPIC_GONE = "message thread not found"
 # reappearing somewhere else is not a mystery.
 TOPIC_REPLACED = ("🧵 The previous topic for this session was gone, so this is "
                   "a new one.")
+# How long the turn map may sit dirty before it reaches disk. Nothing reads
+# the file during a connection: it exists for the *next* one, which settles
+# what it finds there against the daemon. So a write owes only that it happens
+# soon, and a second is soon enough -- a bot restart lands mid-turn rarely, and
+# the worst a stale second costs is a progress line replayed or a few
+# characters of a reply delivered twice.
+PERSIST_TURNS_SECONDS = 1.0
 # Seconds to wait after a reconcile call that actually fired. See the comment
 # in `_reconcile_topics` for why this is paced on work rather than on loops.
 RECONCILE_PACE = 4.0
@@ -761,6 +768,10 @@ class FalconFoxTelegramBot:
         # which refuses a mid-turn prompt on purpose and should keep doing so.
         # Not on the `Turn`: a queue outlives the turn it was typed during.
         self._queues: dict[str, list[dict]] = {}
+        # Whether the turn map on disk is behind the one in memory, and the
+        # timer that catches it up. See `_persist_turns_soon`.
+        self._turns_dirty = False
+        self._persist_task: Optional[asyncio.Task] = None
         self._ws = None
         self._ws_lock = asyncio.Lock()
         # The turn→chat map, persisted so it survives the process. A bot
@@ -912,13 +923,45 @@ class FalconFoxTelegramBot:
         """Clear per-connection state. The persisted turn map is left alone:
         reconciliation on the next connect decides each turn's real fate."""
         self._ws = None
+        # Before the map goes: whatever the debounce timer had not reached is
+        # exactly what the next connection needs to settle.
+        if self._turns_dirty:
+            self._persist_turns()
+        if self._persist_task is not None:
+            self._persist_task.cancel()
+            self._persist_task = None
         for turn in self._turns.values():
             for task in turn.take_loops():
                 task.cancel()
         self._turns.clear()
 
+    def _persist_turns_soon(self) -> None:
+        """Mark the turn map dirty; a short timer writes it.
+
+        For the paths that run many times a second. Every narration block and
+        every thought close used to serialise the *whole* map and write it
+        synchronously, on the one loop that carries every session's events, so
+        a chatty turn stalled every other session's event handling once per
+        block. Nothing needs this on disk at that instant: the file is read by
+        the next connection and by nothing else.
+        """
+        self._turns_dirty = True
+        if self._persist_task is None or self._persist_task.done():
+            self._persist_task = asyncio.create_task(self._persist_turns_later())
+
+    async def _persist_turns_later(self) -> None:
+        await asyncio.sleep(PERSIST_TURNS_SECONDS)
+        if self._turns_dirty:
+            self._persist_turns()
+
     def _persist_turns(self) -> None:
-        """Write the in-flight turn map to disk, atomically. Never fatal."""
+        """Write the in-flight turn map to disk, atomically. Never fatal.
+
+        Called directly at the turn boundaries and before a disconnect, where
+        the cost is paid once and the map has to be right. Everything else
+        goes through `_persist_turns_soon`.
+        """
+        self._turns_dirty = False
         now_wall, now_mono = time.time(), time.monotonic()
         entries = {}
         for session_id, turn in self._turns.items():
@@ -938,9 +981,7 @@ class FalconFoxTelegramBot:
             }
         try:
             self._turns_file.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self._turns_file.with_suffix(".tmp")
-            temporary.write_text(json.dumps(entries))
-            temporary.replace(self._turns_file)
+            _write_atomic(self._turns_file, json.dumps(entries))
         except OSError:
             log.warning("could not persist the turn map", exc_info=True)
 
@@ -2403,7 +2444,7 @@ class FalconFoxTelegramBot:
         if raw.strip():
             turn.progress_lines.append(raw.strip())
             turn.progress_dirty = True
-        self._persist_turns()
+        self._persist_turns_soon()
 
     def _close_thought(self, turn: Turn) -> None:
         """A thought has ended (text or a tool call followed it): show its
@@ -2419,7 +2460,7 @@ class FalconFoxTelegramBot:
             preview = preview[:THOUGHT_PREVIEW_CHARS].rstrip() + " …"
         turn.progress_lines.append(f"💭 {preview}")
         turn.progress_dirty = True
-        self._persist_turns()
+        self._persist_turns_soon()
 
     def _add_tool_marker(self, turn: Turn, title: str) -> None:
         """One compact line per tool call, consecutive repeats collapsed."""
