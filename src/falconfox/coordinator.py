@@ -65,13 +65,13 @@ def _normalize_tags(tags: list) -> list[str]:
     return seen
 
 
-def _interrupted_turn_context(meta: dict) -> str:
+def _interrupted_turn_context(open_turn: OpenTurn) -> str:
     """What to tell a session whose last turn a restart cut off."""
-    last_event = meta.get("turn_last_event") or ""
-    last_at = str(meta.get("turn_last_at") or meta.get("turn_started") or "")
     return config.INTERRUPTED_TURN_CONTEXT.format(
-        last_event=_EVENT_IN_WORDS.get(last_event, f"a {last_event} event"),
-        last_at=last_at.split(".")[0].replace("T", " ") or "an unrecorded time",
+        last_event=_EVENT_IN_WORDS.get(open_turn.last_event,
+                                       f"a {open_turn.last_event} event"),
+        last_at=(open_turn.last_at.split(".")[0].replace("T", " ")
+                 or "an unrecorded time"),
     )
 
 
@@ -203,10 +203,10 @@ class SessionCoordinator:
     def _adopt_interrupted_turn(self, record: SessionRecord, meta: dict) -> None:
         """Owe a session the news that its last turn was cut off.
 
-        Queued through the pending-context channel rather than announced,
-        because there is nothing running to announce it to: the session is
-        stored, and the agent that was mid-turn is gone. It reaches the next
-        one that starts, ahead of the user's own words.
+        Owed rather than announced, because there is nothing running to
+        announce it to: the session is stored, and the agent that was
+        mid-turn is gone. It reaches the next prompt that is built, ahead of
+        the user's own words, in `_interrupted_parts`.
 
         The marker is left standing on disk until a turn actually ends, so a
         second restart before the session is next spoken to says it again,
@@ -217,9 +217,8 @@ class SessionCoordinator:
             started=str(meta.get("turn_started") or ""),
             last_event=str(meta.get("turn_last_event") or ""),
             last_at=str(meta.get("turn_last_at") or meta.get("turn_started") or ""),
+            interrupted=True,
         )
-        record.pending_context.append(
-            PromptPart(text=_interrupted_turn_context(meta), system=True))
         self.log.warning("session=%s (%s) came back with a turn still open "
                          "(turn=%s, last %s at %s); its next prompt will say so",
                          record.session_id, record.name, record.open_turn.turn_id,
@@ -686,6 +685,25 @@ class SessionCoordinator:
         self._persist_meta(record)
         return parts
 
+    def _interrupted_parts(self, record: SessionRecord) -> list[PromptPart]:
+        """The news that the last turn was cut off, once, on the next prompt.
+
+        Derived from the marker here rather than queued when the marker was
+        read, for the same reason orientation is built here: the queue is
+        memory and the marker is disk, so a stop in between would give up the
+        one while the next turn cleared the other, and the session would
+        never be told.
+
+        The marker itself is left alone. `turn_started` replaces it moments
+        from now, and until it does, a restart owes the news again -- since
+        this prompt has not reached anything yet.
+        """
+        open_turn = record.open_turn
+        if open_turn is None or not open_turn.interrupted:
+            return []
+        open_turn.interrupted = False
+        return [PromptPart(text=_interrupted_turn_context(open_turn), system=True)]
+
     def _orientation(self, roles: Sequence[str]) -> list[str]:
         """The pieces a session is told about itself, in reading order.
 
@@ -826,9 +844,11 @@ class SessionCoordinator:
                 self._enqueue(record, text)
                 return None
             raise FalconFoxError(f"could not resume session: {session_id}")
-        # Orientation first, then anything else pending, then the user's
-        # words -- each its own block, so no producer can displace another.
+        # Orientation first, then the news of a turn a restart cut off, then
+        # anything else pending, then the user's words -- each its own block,
+        # so no producer can displace another.
         parts = self._orientation_parts(record)
+        parts += self._interrupted_parts(record)
         parts += record.pending_context
         record.pending_context = []
         parts.append(PromptPart(text=text))

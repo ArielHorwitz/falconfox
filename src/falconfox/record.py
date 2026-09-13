@@ -46,6 +46,11 @@ class OpenTurn:
     started: str
     last_event: str
     last_at: str
+    # Set only on a turn read back from disk, which is a turn some earlier
+    # process was in the middle of: it is owed to the session, and the flag
+    # is cleared when the next prompt carries the news. Not persisted, so a
+    # restart before that prompt lands owes it again, which is right.
+    interrupted: bool = False
 
 
 @dataclass

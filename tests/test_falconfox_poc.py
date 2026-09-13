@@ -2678,6 +2678,22 @@ class InterruptedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse([part for part in record.agent.sent[0]
                           if "cut off" in part.text])
 
+    async def test_a_resume_and_a_stop_in_between_do_not_lose_it(self):
+        # A stop gives up everything the live agent owned, and the notice
+        # used to be part of that, while the marker it came from was cleared
+        # by the next turn: told to nobody and then forgotten. It is owed
+        # until it is said, like the orientation beside it.
+        self._run_a_turn(ending=False)
+        restarted = SessionCoordinator(Path(self.temporary.name))
+        restarted.load_persisted()
+        with patch("falconfox.coordinator.AgentSession", QuietAgentSession):
+            await restarted.resume_session("work")
+            await restarted.stop_session("work")
+            await restarted.send("work", "are you still there?")
+        parts = [part.text for part in restarted._records["work"].agent.sent[0]]
+        self.assertEqual(len([text for text in parts if "cut off" in text]), 1)
+        self.assertEqual(parts[-1], "are you still there?")
+
 
 class SessionContextTests(unittest.IsolatedAsyncioTestCase):
     """What a session is told about itself, and when."""
