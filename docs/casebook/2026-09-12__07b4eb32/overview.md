@@ -192,3 +192,48 @@ These change the work materially and belong to the user:
 - **Shell tests for `deploy/`**, or out of scope?
 - Does the bot re-open every session on reconnect, or rely on live events?
   This decides whether replies during a websocket gap are actually lost.
+
+## Progress
+
+*Updated 2026-09-13.*
+
+Decisions taken with the user: structural work first rather than patches,
+since a separate stable instance covers dogfooding while dev is in flux. A
+hand-deleted topic is replaced silently on the next delivery. Rewind, fork
+and per-session config options stay in the daemon, unreachable, and leave
+together with the dead web UI. The interrupted-turn notice is in scope.
+
+Each package is implemented by an Opus 5 delegate from a written brief,
+reviewed read-only by an Opus 4.8 delegate, and the review's findings go
+back to the same implementer session before the branch is integrated. The
+briefs, reports and reviews are filed beside this overview.
+
+| package | state | tests |
+| --- | --- | --- |
+| Telegram client | integrated onto the case branch, 10 commits | 261 to 280 |
+| Daemon core | reviewed, fixes and rebase in progress, 7 commits so far | 282 on its branch |
+| Wire contract and deploy | not started, waits for the daemon branch | |
+
+Buglist entries closed so far: the stranded session after a hand-deleted
+topic, and the extra "Working..." message after a reply. Bonus fixes found
+by the implementers and confirmed by tests: a resumed session could show a
+one-event history in place of its transcript, and stopping a never-renamed
+session after a restart deleted it from disk (found by the daemon review,
+fix in progress).
+
+## Follow-ups surfaced, not taken up here
+
+- **The bot handles every daemon event on one task**, so any pause while
+  delivering one session's reply stalls event handling for every session.
+  This is why the reply retry is capped at a few seconds rather than
+  honouring a long `retry_after`. Per-session handling tasks would remove
+  the ceiling.
+- **Proactive topic liveness on reconnect.** Editing a topic with unchanged
+  values answers "not modified", which the buglist already measured, and
+  that doubles as a probe. One call per bound session at startup and
+  reconnect would repair dead topics before anything needs them, and would
+  cover renames and tags, which the reactive repair does not. Offered to
+  the user, not yet decided.
+- **Rate-limit handling** in the bot's Telegram client (the wishlist entry)
+  is still open. The reply retry now honours `retry_after` up to a cap, but
+  nothing else does.
