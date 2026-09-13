@@ -61,6 +61,66 @@ class StorageTests(unittest.TestCase):
             self.assertTrue(Path(directory, "0123abcd", "meta.toml").exists())
 
 
+class MetadataWriteTests(unittest.TestCase):
+    """`meta.toml` is the whole session as far as a restart is concerned.
+
+    A session whose metadata will not parse is skipped by the loader, so it
+    vanishes from every listing with its transcript orphaned on disk. The
+    metadata is rewritten on every replayable event, so a write that can tear
+    is a window that is open continuously during use.
+    """
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.store = SessionStore(self.root)
+        self.meta = {"session_id": "0123abcd", "name": "work", "path": "/tmp",
+                     "backend": "echo", "named": True}
+
+    def test_the_live_file_is_replaced_rather_than_written_into(self):
+        # The structural claim: nothing ever writes to `meta.toml` itself, so
+        # there is no moment at which a reader can see half of one.
+        written = []
+        original = Path.write_text
+
+        def remember(path, data, *args, **kwargs):
+            written.append(Path(path))
+            return original(path, data, *args, **kwargs)
+
+        with patch.object(Path, "write_text", remember):
+            self.store.write_meta(self.meta)
+        self.assertNotIn(self.root.joinpath("0123abcd", "meta.toml"), written)
+        self.assertEqual(self.store.load_all_meta(), [self.meta])
+
+    def test_a_write_that_dies_partway_leaves_the_previous_metadata_readable(self):
+        self.store.write_meta(self.meta)
+        original = Path.write_text
+
+        def die_partway(path, data, *args, **kwargs):
+            original(path, data[: len(data) // 2], *args, **kwargs)
+            raise OSError("no space left on device")
+
+        with patch.object(Path, "write_text", die_partway):
+            with self.assertRaises(OSError):
+                self.store.write_meta({**self.meta, "name": "renamed"})
+        self.assertEqual(self.store.load_all_meta(), [self.meta],
+                         "a torn write must not cost the session its metadata")
+
+    def test_a_torn_file_on_disk_names_its_session_and_the_rest_still_load(self):
+        # Belt and braces: a file torn by something other than this process
+        # (an older daemon, a hand edit) is still skipped rather than fatal,
+        # and the log says which session went missing.
+        self.store.write_meta(self.meta)
+        torn = self.root.joinpath("beefcafe")
+        torn.mkdir()
+        torn.joinpath("meta.toml").write_text('name = "half a nam')
+        with self.assertLogs("falconfox.storage", level="WARNING") as captured:
+            metas = self.store.load_all_meta()
+        self.assertEqual([meta["session_id"] for meta in metas], ["0123abcd"])
+        self.assertIn("beefcafe", captured.output[0])
+
+
 class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temporary = tempfile.TemporaryDirectory()

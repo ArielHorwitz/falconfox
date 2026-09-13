@@ -44,9 +44,20 @@ class SessionStore:
         return self.root.joinpath(session_id)
 
     def write_meta(self, meta: dict) -> None:
+        """Replace a session's metadata, atomically.
+
+        The same temp-then-replace the transcript rewrite uses, and for a
+        harder reason: metadata is rewritten on every replayable event, so a
+        write that can tear is a window open continuously during use, and a
+        `meta.toml` that will not parse is a session the loader skips
+        entirely -- gone from every listing, transcript orphaned on disk.
+        """
         session_dir = self._session_dir(meta["session_id"])
         session_dir.mkdir(parents=True, exist_ok=True)
-        session_dir.joinpath(META_FILENAME).write_text(_to_toml(meta))
+        meta_path = session_dir.joinpath(META_FILENAME)
+        tmp = meta_path.with_suffix(".tmp")
+        tmp.write_text(_to_toml(meta))
+        tmp.replace(meta_path)
 
     def append_event(self, session_id: str, event: dict) -> None:
         session_dir = self._session_dir(session_id)
@@ -141,7 +152,11 @@ class SessionStore:
             try:
                 metas.append(tomllib.loads(meta_path.read_text()))
             except (tomllib.TOMLDecodeError, OSError) as error:
-                log.warning("skipping unreadable session meta %s: %s", meta_path, error)
+                # Named by session, not only by path: this line is the single
+                # trace of a session that is about to be missing from every
+                # listing, and the id is what the reader will search for.
+                log.warning("skipping unreadable metadata for session=%s (%s): %s",
+                            session_dir.name, meta_path, error)
         return metas
 
     def read_transcript(self, session_id: str) -> list[dict]:
