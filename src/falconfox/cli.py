@@ -21,6 +21,21 @@ class CliError(Exception):
     pass
 
 
+# How long the CLI waits for the daemon before giving up. It had no timeout
+# at all, so an agent running `falconfox` inside a session against a wedged
+# daemon hung for the rest of its turn with nothing to show for it. These are
+# read timeouts on a loopback socket: anything but a wedged daemon answers at
+# once, so the number is only ever the cost of finding out.
+DEFAULT_TIMEOUT = 30.0
+# `send` waits out the whole turn it starts, which is as long as the agent
+# takes to think.
+TURN_TIMEOUT = 1800.0
+# `attach` waits for a client to take the file and report back. The daemon
+# caps that itself (coordinator.ATTACHMENT_TIMEOUT, 120s), and this sits
+# above it so the daemon's own answer arrives rather than being cut off here.
+ATTACH_TIMEOUT = 150.0
+
+
 def _base_url() -> str:
     explicit = os.environ.get("FALCONFOX_URL")
     if explicit:
@@ -31,14 +46,15 @@ def _base_url() -> str:
     return f"http://127.0.0.1:{info.port}"
 
 
-def _request(method: str, path: str, body: dict | None = None):
+def _request(method: str, path: str, body: dict | None = None,
+             timeout: float = DEFAULT_TIMEOUT):
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(
         f"{_base_url()}{path}", data=data, method=method,
         headers={"Content-Type": "application/json"} if data is not None else {},
     )
     try:
-        with urllib.request.urlopen(request, timeout=None) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = response.read()
             return json.loads(payload) if payload else None
     except urllib.error.HTTPError as error:
@@ -48,7 +64,20 @@ def _request(method: str, path: str, body: dict | None = None):
             detail = str(error)
         raise CliError(detail) from error
     except urllib.error.URLError as error:
+        # A read that times out arrives here wrapped, and a connect that
+        # times out arrives bare below. Both are the same answer to the
+        # caller, and neither is the "nothing is listening" that the
+        # unqualified message would imply.
+        if isinstance(error.reason, TimeoutError):
+            raise CliError(_timed_out(timeout)) from error
         raise CliError(f"could not reach FalconFox daemon: {error.reason}") from error
+    except TimeoutError as error:
+        raise CliError(_timed_out(timeout)) from error
+
+
+def _timed_out(timeout: float) -> str:
+    return (f"the FalconFox daemon did not answer within {timeout:.0f}s. It is "
+            f"running but not responding; check its log.")
 
 
 def _wait_for_server(timeout: float = 5.0) -> state.ServerInfo | None:
@@ -100,7 +129,8 @@ def cmd_attach(args) -> None:
                            f"{MAX_ATTACHMENT_BYTES // 1_000_000}MB limit")
         _request("POST", f"/api/sessions/{session_id}/attach",
                  {"path": str(source.resolve()), "caption": args.caption,
-                  "ack": not args.no_ack, "raw": args.raw})
+                  "ack": not args.no_ack, "raw": args.raw},
+                 timeout=ATTACH_TIMEOUT)
         print(f"sent {source.name}" if not args.no_ack
               else f"handed {source.name} to the client")
 
@@ -227,7 +257,10 @@ def _agent_reply(transcript: list[dict]) -> str:
 
 
 def cmd_send(args) -> None:
-    _request("POST", f"/api/sessions/{args.session_id}/send", {"text": args.message})
+    # This one call is the whole turn: the daemon answers when the agent has
+    # finished, so it is the one place a long wait is the correct behaviour.
+    _request("POST", f"/api/sessions/{args.session_id}/send",
+             {"text": args.message}, timeout=TURN_TIMEOUT)
     detail = _request(
         "GET", f"/api/sessions/{args.session_id}?include_transcript=true")
     reply = _agent_reply(detail["transcript"])

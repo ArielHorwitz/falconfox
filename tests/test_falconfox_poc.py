@@ -17,6 +17,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import urllib.error
+
+from falconfox import cli as falconfox_cli
 from falconfox.cli import CliError, _guard_self_target, build_parser, cmd_daemon
 from falconfox import __version__ as falconfox_version
 from falconfox import config, get_version
@@ -905,6 +908,56 @@ class WatchdogTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any("stall" in line for line in captured.output))
         finally:
             dog.stop()
+
+
+class CliTimeoutTests(unittest.TestCase):
+    """The CLI is what an agent inside a session runs, so a wedged daemon
+    must cost it an error rather than the rest of its turn."""
+
+    def _timeouts_for(self, call):
+        """Every read timeout a command asks for, before it is cut short."""
+        seen = []
+
+        def urlopen(request, timeout=None):
+            seen.append(timeout)
+            raise urllib.error.HTTPError(request.full_url, 500, "no", {}, None)
+
+        with patch("falconfox.cli.urllib.request.urlopen", urlopen), \
+                patch("falconfox.cli._base_url", return_value=UNREACHABLE_DAEMON):
+            with self.assertRaises(CliError):
+                call()
+        return seen
+
+    def test_a_request_has_a_finite_timeout(self):
+        self.assertEqual(
+            self._timeouts_for(lambda: falconfox_cli._request("GET", "/api/sessions")),
+            [falconfox_cli.DEFAULT_TIMEOUT])
+
+    def test_the_two_calls_that_legitimately_block_get_longer(self):
+        # `send` waits out the whole turn it starts and `attach` waits for a
+        # client to take the file, so the default would cut off exactly the
+        # two calls that are supposed to take a while.
+        send = build_parser().parse_args(["send", "abcd1234", "hello"])
+        self.assertEqual(self._timeouts_for(lambda: falconfox_cli.cmd_send(send)),
+                         [falconfox_cli.TURN_TIMEOUT])
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "note.txt")
+            target.write_text("x")
+            attach = build_parser().parse_args(["attach", str(target)])
+            with patch.dict(os.environ, {"FALCONFOX_SESSION_ID": "abcd1234"}):
+                self.assertEqual(
+                    self._timeouts_for(lambda: falconfox_cli.cmd_attach(attach)),
+                    [falconfox_cli.ATTACH_TIMEOUT])
+
+    def test_a_timeout_says_so_rather_than_looking_like_a_dead_daemon(self):
+        def urlopen(_request, timeout=None):
+            raise TimeoutError("timed out")
+
+        with patch("falconfox.cli.urllib.request.urlopen", urlopen), \
+                patch("falconfox.cli._base_url", return_value=UNREACHABLE_DAEMON):
+            with self.assertRaises(CliError) as caught:
+                falconfox_cli._request("GET", "/api/sessions")
+        self.assertIn("did not answer", str(caught.exception))
 
 
 class CliSafetyTests(unittest.TestCase):
