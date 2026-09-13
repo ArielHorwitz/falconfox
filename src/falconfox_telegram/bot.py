@@ -1082,22 +1082,34 @@ class FalconFoxTelegramBot:
         return turn
 
     async def _deliver_recovered_turn(self, session_id: str, record: dict) -> None:
-        """The turn ended while the bot was away; hand over what never arrived."""
+        """The turn ended while the bot was away; hand over what never arrived.
+
+        Through `_send_for_turn`, exactly like a live turn's reply. A topic
+        deleted while the bot was away is the likeliest kind there is -- the
+        bot being away is when a topic gets deleted by hand -- and this path
+        used to send straight at the API client, so the reply the transcript
+        had kept was lost at the last step.
+        """
         text = await self._turn_text_from_transcript(session_id)
         remainder = (text or "")[record.get("consumed", 0):].strip()
         dest = Dest(record["chat"], record["thread"])
         prompt_msg = record.get("prompt_msg")
         if remainder:
             log.info("recovered turn: session=%s chars=%d", session_id, len(remainder))
-            await self._say(dest, RECOVERED_TURN)
-            for index, rendered in enumerate(render_messages(remainder)):
-                await self.telegram.html_message(
-                    dest.chat, rendered.html, rendered.plain,
-                    reply_to=prompt_msg if index == 0 else None, thread=dest.thread)
+
+            async def announce(where: Dest) -> None:
+                await self._say(where, RECOVERED_TURN)
+
+            dest = await self._send_for_turn(session_id, dest, announce)
+            await self._send_rendered(session_id, dest, remainder, prompt_msg)
         elif not record.get("delivered"):
-            await self._say(dest, SILENT_TURN.format(
-                detail="it ended while the bot was away, and nothing had been "
-                       "produced"), reply_to=prompt_msg)
+
+            async def report(where: Dest) -> None:
+                await self._say(where, SILENT_TURN.format(
+                    detail="it ended while the bot was away, and nothing had "
+                           "been produced"), reply_to=prompt_msg)
+
+            await self._send_for_turn(session_id, dest, report)
 
     async def _turn_text_from_transcript(self, session_id: str) -> str | None:
         """Everything the agent has said in the current turn, from the daemon.
@@ -2612,6 +2624,27 @@ class FalconFoxTelegramBot:
         await send(dest)
         return dest
 
+    async def _send_rendered(self, session_id: str, dest: Dest, text: str,
+                             reply_to: Optional[int]) -> Dest:
+        """Render text as one or more messages and send them for a session.
+
+        The one path from agent text to the chat, shared by a live turn's
+        reply and by a reply recovered from the transcript after a restart:
+        both render the same way, both thread to the prompt, and both have to
+        survive the topic having gone.
+        """
+        for index, rendered in enumerate(render_messages(text)):
+
+            async def deliver(where: Dest, rendered=rendered, index=index) -> None:
+                # The prompt lives in the old topic when this is a retry, and
+                # `allow_sending_without_reply` is what makes that harmless.
+                await self.telegram.html_message(
+                    where.chat, rendered.html, rendered.plain,
+                    reply_to=reply_to if index == 0 else None, thread=where.thread)
+
+            dest = await self._send_for_turn(session_id, dest, deliver)
+        return dest
+
     async def _send_reply(self, turn: Turn) -> Dest:
         """Deliver the turn's answer: the text after the last tool call,
         threaded to the prompt that asked for it. Answers with where it
@@ -2631,17 +2664,8 @@ class FalconFoxTelegramBot:
             return turn.dest
         log.info("reply: session=%s dest=%s chars=%d",
                  turn.session_id, turn.dest, len(text))
-        for index, rendered in enumerate(render_messages(text)):
-
-            async def deliver(where: Dest, rendered=rendered, index=index) -> None:
-                # The prompt lives in the old topic when this is a retry, and
-                # `allow_sending_without_reply` is what makes that harmless.
-                await self.telegram.html_message(
-                    where.chat, rendered.html, rendered.plain,
-                    reply_to=turn.prompt_msg if index == 0 else None,
-                    thread=where.thread)
-
-            turn.dest = await self._send_for_turn(turn.session_id, turn.dest, deliver)
+        turn.dest = await self._send_rendered(turn.session_id, turn.dest, text,
+                                              turn.prompt_msg)
         turn.delivered += len(text)
         self._persist_turns()
         return turn.dest

@@ -308,6 +308,34 @@ class DeadTopicTests(unittest.IsolatedAsyncioTestCase):
             persisted = json.loads(Path(directory, "topics.json").read_text())
             self.assertEqual(persisted["topics"], {"session": fresh})
 
+    async def test_a_recovered_reply_makes_a_new_topic_too(self):
+        # The survey's own scenario: a turn that ended while the bot was away,
+        # to a topic deleted in the meantime. The live path recreates the
+        # topic; recovery sent straight through the API client and lost the
+        # reply -- the half of the buglist that the reconnect path kept open.
+        with tempfile.TemporaryDirectory() as directory:
+            old = _bot(directory)
+            old._turns["session"] = Turn("session", Dest(-1001, 20))
+            old._persist_turns()
+
+            bot = _bot(directory)
+            bot.telegram = DeletedTopicTelegram(gone=20)
+            bot.daemon = _RecoveryDaemon(["session"])
+            bot._bind("session", 20)
+            await bot._reconcile_persisted_turns()
+
+            self.assertEqual(len(getattr(bot.telegram, "topics", [])), 1)
+            fresh = bot._topics["session"]
+            self.assertNotEqual(fresh, 20)
+            self.assertEqual(bot.telegram.html_messages[-1][0], fresh)
+            self.assertEqual(bot.telegram.html_messages[-1][2], "answer for session")
+            said = [text for thread, text in bot.telegram.messages if thread == fresh]
+            self.assertEqual(len(said), 2, f"the note, then the recovery line: {said}")
+            self.assertIn("new one", said[0])
+            self.assertIn("recovered", said[1].lower())
+            persisted = json.loads(Path(directory, "topics.json").read_text())
+            self.assertEqual(persisted["topics"], {"session": fresh})
+
     async def test_an_ordinary_send_failure_never_unbinds_the_topic(self):
         # A rate limit or a read timeout says nothing about the topic. Reading
         # one as "the topic is gone" would throw away a live topic and leave a
