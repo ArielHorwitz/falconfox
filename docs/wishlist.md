@@ -264,6 +264,13 @@ only per-message record that it delivered, was cancelled, or failed. Dropping
 the mechanism means either leaving those unsaid or paying messages to say
 them.
 
+## Telegram forum desync reconciliation
+
+*From the phone, 2026-09-11. Recorded as stated, not worked out.*
+
+Reconcile the forum against the sessions it is meant to reflect: fix topic
+names and icons, handle deleted topics, and the rest of what drifts.
+
 ## Deliberately not planned
 
 **Off-loopback remote access + bearer token.** Listed in the pivot case as the
