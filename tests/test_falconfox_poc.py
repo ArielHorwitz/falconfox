@@ -24,9 +24,11 @@ from falconfox import help as ffhelp
 from falconfox import state as falconfox_state
 from falconfox.coordinator import SessionCoordinator
 from falconfox.errors import FalconFoxError
+from falconfox.engine.events import CLOSED, EventBus
 from falconfox.engine.session import AgentSession, PromptPart
 from falconfox.record import SessionRecord
 from falconfox.storage import SessionStore
+from falconfox.web.server import _send_events
 from falconfox.watchdog import StallWatchdog
 from falconfox_telegram import bot as bot_module
 from falconfox_telegram.api import ApiError, DaemonApi, _json_request
@@ -126,6 +128,18 @@ class HangingConn:
 
     async def close(self):
         self.closed.set()
+
+
+class FakeWebSocket:
+    def __init__(self):
+        self.sent = []
+        self.closed = None
+
+    async def send_json(self, payload):
+        self.sent.append(payload)
+
+    async def close(self, code=1000):
+        self.closed = code
 
 
 class ReadyConn:
@@ -839,6 +853,44 @@ class EngineTurnTests(unittest.IsolatedAsyncioTestCase):
         ended = next(event for event in events if event["type"] == "turn_ended")
         self.assertEqual(ended["outcome"], "error")
         self.assertEqual(ended["output_chars"], 0)
+
+
+class EventBusBoundTests(unittest.IsolatedAsyncioTestCase):
+    """A subscriber's queue is bounded, because the alternative is the daemon.
+
+    The queues are per-subscriber and grew without limit, so one client that
+    stopped reading cost memory without end on the same 951 MB host the
+    live-session cap exists to protect.
+    """
+
+    async def test_a_subscriber_that_stops_reading_is_dropped_alone(self):
+        bus = EventBus(bound=2)
+        with bus.subscribe("slow") as slow, bus.subscribe("quick") as quick:
+            with self.assertLogs("falconfox.engine.events", level="WARNING") as logged:
+                for number in range(4):
+                    bus.publish({"type": "message", "n": number})
+                    quick.get_nowait()
+            self.assertIn("slow", logged.output[0])
+            self.assertEqual(bus.subscribers, 1, "only the slow one goes")
+            # What is left for the dropped subscriber is the end of its
+            # stream, which is what closes its socket.
+            self.assertIs(slow.get_nowait(), CLOSED)
+            bus.publish({"type": "message", "n": 99})
+            self.assertEqual(quick.get_nowait()["n"], 99,
+                             "the others never noticed")
+            self.assertTrue(slow.empty())
+
+    async def test_a_closed_stream_closes_the_socket_it_was_feeding(self):
+        # Which is the whole point of dropping rather than discarding: the
+        # client's reconnect re-subscribes and re-snapshots, so it recovers.
+        queue = asyncio.Queue()
+        queue.put_nowait({"type": "message", "text": "the last one through"})
+        queue.put_nowait(CLOSED)
+        websocket = FakeWebSocket()
+        await asyncio.wait_for(_send_events(websocket, queue), 2)
+        self.assertEqual([event["text"] for event in websocket.sent],
+                         ["the last one through"])
+        self.assertIsNotNone(websocket.closed)
 
 
 class WatchdogTests(unittest.IsolatedAsyncioTestCase):

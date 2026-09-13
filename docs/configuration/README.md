@@ -41,6 +41,8 @@ reasoning_effort = "high"
 | `naming_backend` | unset | Backend used by automatic session naming. |
 | `naming_prompt` | built in | Prompt for automatic session naming. |
 | `log_level` | `INFO` | Daemon logging level; `FALCONFOX_LOG_LEVEL` overrides it. |
+| `max_live_sessions` | `5` | How many sessions may hold a live agent subprocess at once. A session over the limit is stored and activates when a slot frees. `0` disables the cap. |
+| `event_queue_limit` | `4096` | How many events a connected client may fall behind by before it is dropped and its connection closed, so that one wedged client cannot grow the daemon's memory without limit. Its reconnect takes a fresh snapshot. `0` disables the bound. |
 | `[backends.<name>]` | `echo` only | ACP subprocess command, environment, and config-option defaults. |
 | `default_topic_icon` | unset | The icon put on every forum topic. Must be a Telegram forum icon. |
 | `[telegram.tag_icons]` | unset | Maps a session tag to the glyph drawn at the front of its topic title. |

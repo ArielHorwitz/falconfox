@@ -52,6 +52,17 @@ DEFAULT_LOG_LEVEL = "INFO"
 # Override with a top-level `max_live_sessions = N` in config.toml.
 DEFAULT_MAX_LIVE_SESSIONS = 5
 
+# How far behind a client may fall before the daemon stops keeping its
+# events. Each subscriber has a queue of its own, and an unbounded one turns
+# a wedged client into unbounded daemon memory, on the same host the session
+# cap above exists to protect. Generous on purpose: a chatty turn is a few
+# hundred events, so this is a client that has been silent for many turns
+# rather than one that paused. Being dropped closes the connection, which is
+# what makes a client reconnect and take a fresh snapshot.
+# Override with a top-level `event_queue_limit = N` in config.toml. 0
+# disables the bound.
+DEFAULT_EVENT_QUEUE_LIMIT = 4096
+
 
 # The instructions handed to the model when asked to name a session. Override it
 # in config.toml with a top-level `naming_prompt = "..."`.
@@ -265,6 +276,8 @@ class Config:
     default_always_allow: bool = False
     # Ceiling on sessions holding a live agent subprocess. See the constant.
     max_live_sessions: int = DEFAULT_MAX_LIVE_SESSIONS
+    # How many events a subscriber may fall behind by. See the constant.
+    event_queue_limit: int = DEFAULT_EVENT_QUEUE_LIMIT
     # Action -> key, or a list of keys (the browser binds each to that action).
     hotkeys: dict = field(default_factory=lambda: dict(DEFAULT_HOTKEYS))
     ui: dict = field(default_factory=lambda: dict(DEFAULT_UI))
@@ -345,6 +358,8 @@ def load_config() -> Config:
         default_always_allow=bool(data.get("default_always_allow", False)),
         max_live_sessions=max(0, int(
             data.get("max_live_sessions", DEFAULT_MAX_LIVE_SESSIONS))),
+        event_queue_limit=max(0, int(
+            data.get("event_queue_limit", DEFAULT_EVENT_QUEUE_LIMIT))),
         hotkeys={**DEFAULT_HOTKEYS, **data.get("hotkeys", {})},
         ui=_merge_ui(data.get("ui", {})),
     )

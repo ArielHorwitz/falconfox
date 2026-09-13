@@ -95,7 +95,7 @@ class SessionCoordinator:
         self.log = logsetup.get_logger("coordinator")
         self.config = config.load_config()
         self.store = storage.SessionStore(store_root)
-        self.bus = EventBus()
+        self.bus = EventBus(self.config.event_queue_limit)
         # One record per session, holding everything about it -- including the
         # live `AgentSession`, so "is this live" has one answer. See record.py.
         self._records: dict[str, SessionRecord] = {}

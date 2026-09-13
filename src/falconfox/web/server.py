@@ -17,6 +17,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from .. import config, get_version, logsetup, state
 from ..coordinator import SessionCoordinator
+from ..engine.events import CLOSED
 from ..errors import FalconFoxError
 from ..watchdog import StallWatchdog
 
@@ -189,7 +190,7 @@ def create_app(
         peer = f"{client.host}:{client.port}" if client else "?"
         log.info("ws connect: client=%s", peer)
         await websocket.accept()
-        await _run_socket(websocket, coordinator)
+        await _run_socket(websocket, coordinator, peer)
 
     return Starlette(
         lifespan=lifespan,
@@ -215,8 +216,9 @@ def create_app(
     )
 
 
-async def _run_socket(websocket: WebSocket, coordinator: SessionCoordinator) -> None:
-    with coordinator.bus.subscribe() as queue:
+async def _run_socket(websocket: WebSocket, coordinator: SessionCoordinator,
+                      peer: str = "?") -> None:
+    with coordinator.bus.subscribe(peer) as queue:
         await websocket.send_json(coordinator.snapshot())
         sender = asyncio.create_task(_send_events(websocket, queue))
         try:
@@ -234,7 +236,16 @@ async def _run_socket(websocket: WebSocket, coordinator: SessionCoordinator) -> 
 async def _send_events(websocket: WebSocket, queue: asyncio.Queue) -> None:
     try:
         while True:
-            await websocket.send_json(await queue.get())
+            event = await queue.get()
+            if event is CLOSED:
+                # The bus gave up on this subscriber for falling too far
+                # behind. Closing the socket is how the client is told, and
+                # its reconnect re-subscribes and re-snapshots, which is the
+                # recovery: nothing new had to be built for this.
+                log.warning("closing a socket that was not reading its events")
+                await websocket.close(code=1011)
+                return
+            await websocket.send_json(event)
     except asyncio.CancelledError:
         raise
     except Exception:
