@@ -20,7 +20,8 @@ from websockets.exceptions import ConnectionClosed
 
 from falconfox_telegram import bot as bot_module
 from falconfox_telegram.api import ApiError
-from falconfox_telegram.bot import BotConfig, DAEMON_DOWN, Dest, FalconFoxTelegramBot
+from falconfox_telegram.bot import (BotConfig, DAEMON_DOWN, Dest,
+                                    FalconFoxTelegramBot, Turn)
 
 from test_falconfox_poc import UNREACHABLE_DAEMON, FakeTelegram
 
@@ -94,9 +95,9 @@ class TelegramFailureIsNotDaemonFailureTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             bot = _bot(directory)
             bot.telegram = RefusingTelegram()
-            bot._turn_dest["session"] = Dest(-1001, 20)
-            bot._reply_parts["session"] = ["the answer nobody will see"]
-            bot._turn_working.add("session")
+            bot._turns["session"] = Turn(
+                "session", Dest(-1001, 20),
+                reply_parts=["the answer nobody will see"], working=True)
             bot._ws = _EventStream(
                 {"type": "turn_ended", "session_id": "session", "turn_id": "t1",
                  "outcome": "completed", "stop_reason": "end_turn",
@@ -195,9 +196,8 @@ class DeadTopicTests(unittest.IsolatedAsyncioTestCase):
         bot.telegram = telegram
         bot.daemon = _Daemon()
         bot._bind("session", 20)
-        bot._turn_dest["session"] = Dest(-1001, 20)
-        bot._reply_parts["session"] = ["the answer"]
-        bot._turn_working.add("session")
+        bot._turns["session"] = Turn("session", Dest(-1001, 20),
+                                     reply_parts=["the answer"], working=True)
         return bot
 
     async def _end_turn(self, bot):
@@ -234,6 +234,106 @@ class DeadTopicTests(unittest.IsolatedAsyncioTestCase):
                 await self._end_turn(bot)
             self.assertEqual(bot._topics["session"], 20, "the binding stands")
             self.assertEqual(getattr(bot.telegram, "topics", []), [])
+
+
+class BlockingReplyTelegram(FakeTelegram):
+    """Telegram with a reply send that can be held open, which is the whole of
+    the F2 race: `_finish_turn` is inside this await while a new message for
+    the same session arrives."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def html_message(self, chat_id, html_text, plain_fallback, reply_to=None,
+                           thread=None):
+        self.entered.set()
+        await self.release.wait()
+        await super().html_message(chat_id, html_text, plain_fallback,
+                                   reply_to=reply_to, thread=thread)
+
+
+class TurnRecordTests(unittest.IsolatedAsyncioTestCase):
+    """Survey F2 and F3: per-turn state was twenty loose dicts, so the teardown
+    of a finished turn erased the state of the turn that replaced it, and
+    figures from one turn were still there to be reported by the next."""
+
+    def _bot(self, directory, telegram=None):
+        bot = _bot(directory)
+        if telegram is not None:
+            bot.telegram = telegram
+        bot._ws = _EventStream()
+        return bot
+
+    async def _stream(self, bot, text):
+        await bot._handle_event({"type": "message", "session_id": "session",
+                                 "role": "agent", "text": text})
+
+    async def _end_turn(self, bot):
+        await bot._handle_event({"type": "turn_ended", "session_id": "session",
+                                 "turn_id": "t1", "outcome": "completed",
+                                 "stop_reason": "end_turn", "output_chars": 10})
+
+    async def test_a_new_turn_during_the_reply_send_keeps_its_own_progress_message(self):
+        # The buglist's extra "Working…" after the reply, as an interleaving:
+        # `_finish_turn` awaits the reply send, a fresh message for the same
+        # session starts a new turn in that window, and the teardown that
+        # follows erases the new turn's state -- including the id of the
+        # progress message it had just created, which is then orphaned and a
+        # second one made beside it.
+        with tempfile.TemporaryDirectory() as directory:
+            telegram = BlockingReplyTelegram()
+            bot = self._bot(directory, telegram)
+            with patch.object(bot_module, "ACTION_REFRESH_SECONDS", 0.005):
+                await bot._forward("session", Dest(-1001, 20), "first", prompt_msg=1)
+                await self._stream(bot, "the answer")
+                ending = asyncio.create_task(self._end_turn(bot))
+                await asyncio.wait_for(telegram.entered.wait(), timeout=1)
+
+                # The race: a second message, while the first turn's reply is
+                # still in flight.
+                await bot._forward("session", Dest(-1001, 20), "second", prompt_msg=2)
+                telegram.release.set()
+                await asyncio.wait_for(ending, timeout=1)
+
+                # The new turn narrates, so its progress message has something
+                # to say and its loop has a reason to speak.
+                await self._stream(bot, "working on it")
+                await bot._handle_event({"type": "tool_call", "session_id": "session",
+                                         "title": "grep"})
+                await asyncio.sleep(0.05)
+
+            working = [text for _thread, text in telegram.messages
+                       if "Working" in text]
+            self.assertEqual(len(working), 2,
+                             f"one progress message per turn, not one orphaned "
+                             f"and one live: {telegram.messages}")
+            stamped = [text for _chat, message_id, text in telegram.edits
+                       if message_id == 101]
+            self.assertTrue(any("Turn finished" in text for text in stamped),
+                            "the first turn is still finalised")
+            live = {message_id for _chat, message_id, text in telegram.edits
+                    if "working on it" in text}
+            self.assertEqual(live, {102},
+                             "the second turn edits the message it created")
+            await self._end_turn(bot)
+
+    async def test_a_turn_without_usage_does_not_report_the_last_one_s_numbers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            await bot._forward("session", Dest(-1001, 20), "first", prompt_msg=1)
+            await bot._handle_event({"type": "usage", "session_id": "session",
+                                     "used": 217034, "size": 1000000})
+            await self._stream(bot, "the answer")
+            await self._end_turn(bot)
+            self.assertIn("ctx 217k/1M", bot.telegram.edits[-1][2])
+
+            await bot._forward("session", Dest(-1001, 20), "second", prompt_msg=2)
+            await self._stream(bot, "another answer")
+            await self._end_turn(bot)
+            self.assertNotIn("ctx", bot.telegram.edits[-1][2],
+                             "a turn that emitted no usage has no figures to give")
 
 
 class _NoWatchdog:

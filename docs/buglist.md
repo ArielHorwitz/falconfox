@@ -77,13 +77,6 @@ leaves a trace. None of that explains why the calls hang. If the WARNING lines
 show a pattern (one method, one time of day, one IPv6 route — the bot reaches
 Telegram over v6 here), that is the thread to pull.
 
-## An extra "Working..." message appears after the reply
-
-*Reported from use, 2026-09-08. Not investigated.*
-
-Every so often an *extra* "Working..." message appears after the final
-response has already arrived, and then never resolves to anything.
-
 ## A lost topic icon cannot be repaired by setting the same tag again
 
 `_apply_icon` skips the API call when the icon it remembers for a session
