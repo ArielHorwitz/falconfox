@@ -17,9 +17,17 @@ from .engine.client import resolve_config_value
 from .engine.events import EventBus
 from .engine.session import AgentSession, PromptPart, new_session_id
 from .errors import FalconFoxError
-from .record import SessionRecord
+from .record import OpenTurn, SessionRecord
 
 _REPLAYABLE = {"message", "tool_call", "notice", "plan", "usage"}
+# How the last thing a cut-off turn recorded is named to the agent that was
+# in the middle of it. Plain words rather than the event type, since the
+# reader is being told where it got to, not read a log.
+_EVENT_IN_WORDS = {
+    "message": "a message", "tool_call": "a tool call", "notice": "a notice",
+    "plan": "a plan", "usage": "a token count",
+    "turn_started": "the start of the turn itself",
+}
 # How long `attach` waits for the client to report back. Generous: the
 # client is uploading a file of unknown size over a network.
 ATTACHMENT_TIMEOUT = 120.0
@@ -55,6 +63,16 @@ def _normalize_tags(tags: list) -> list[str]:
         if folded not in seen:
             seen.append(folded)
     return seen
+
+
+def _interrupted_turn_context(meta: dict) -> str:
+    """What to tell a session whose last turn a restart cut off."""
+    last_event = meta.get("turn_last_event") or ""
+    last_at = str(meta.get("turn_last_at") or meta.get("turn_started") or "")
+    return config.INTERRUPTED_TURN_CONTEXT.format(
+        last_event=_EVENT_IN_WORDS.get(last_event, f"a {last_event} event"),
+        last_at=last_at.split(".")[0].replace("T", " ") or "an unrecorded time",
+    )
 
 
 def _clean_name(reply: str) -> str:
@@ -179,6 +197,33 @@ class SessionCoordinator:
                 auto_named=not bool(meta.get("named", False)),
                 persisted=True,
             )
+            if meta.get("turn_open"):
+                self._adopt_interrupted_turn(self._records[session_id], meta)
+
+    def _adopt_interrupted_turn(self, record: SessionRecord, meta: dict) -> None:
+        """Owe a session the news that its last turn was cut off.
+
+        Queued through the pending-context channel rather than announced,
+        because there is nothing running to announce it to: the session is
+        stored, and the agent that was mid-turn is gone. It reaches the next
+        one that starts, ahead of the user's own words.
+
+        The marker is left standing on disk until a turn actually ends, so a
+        second restart before the session is next spoken to says it again,
+        which is right: it still has not been told.
+        """
+        record.open_turn = OpenTurn(
+            turn_id=meta.get("turn_id"),
+            started=str(meta.get("turn_started") or ""),
+            last_event=str(meta.get("turn_last_event") or ""),
+            last_at=str(meta.get("turn_last_at") or meta.get("turn_started") or ""),
+        )
+        record.pending_context.append(
+            PromptPart(text=_interrupted_turn_context(meta), system=True))
+        self.log.warning("session=%s (%s) came back with a turn still open "
+                         "(turn=%s, last %s at %s); its next prompt will say so",
+                         record.session_id, record.name, record.open_turn.turn_id,
+                         record.open_turn.last_event, record.open_turn.last_at)
 
     def _ensure_transcript(self, record: SessionRecord) -> list[dict]:
         if record.transcript is None:
@@ -211,6 +256,22 @@ class SessionCoordinator:
                 record.config_options = event.get("options", [])
             elif event_type == "commands":
                 record.commands = event.get("commands", [])
+            # A turn's boundaries are persisted as one fact in the metadata
+            # rather than as two replayable events, so a restart mid-turn
+            # leaves a marker where it used to leave nothing at all.
+            if event_type == "turn_started":
+                record.open_turn = OpenTurn(
+                    turn_id=event.get("turn_id"), started=event["ts"],
+                    last_event="turn_started", last_at=event["ts"])
+                self._persist_meta(record)
+            elif event_type == "turn_ended":
+                record.open_turn = None
+                self._persist_meta(record)
+            elif record.open_turn is not None and event_type in _REPLAYABLE:
+                # Roughly where the turn got to, for free: the metadata is
+                # rewritten on every replayable event as it is.
+                record.open_turn.last_event = event_type
+                record.open_turn.last_at = event["ts"]
             if event_type in _REPLAYABLE:
                 record.last_active = _now_iso()
                 # Loaded before appending, not appended to whatever happens to

@@ -96,6 +96,22 @@ SESSION_CONTEXT = (
 )
 
 
+# Handed to a session whose last turn was still open when the daemon went
+# down, ahead of the next message it gets. An agent has no way to tell that
+# from a turn it finished: the transcript it is replayed ends mid-thought
+# either way, and left to guess it assumes the work landed.
+INTERRUPTED_TURN_CONTEXT = (
+    "# Your last turn was cut off\n"
+    "\n"
+    "FalconFox restarted while you were working on the previous message "
+    "here, so that turn ended where it stood: anything you had not already "
+    "sent or written to disk is gone, and the user may have seen only part "
+    "of your answer. The last thing recorded was {last_event}, at "
+    "{last_at}. Take that as how far you got, check rather than assume, and "
+    "carry on from there."
+)
+
+
 # The manager is the daemon's own role, not a client's: running the session
 # lifecycle through an agent is useful to every client, so nothing here names
 # a forum, a topic or a command. Where a client has a faster way to do

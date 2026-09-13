@@ -2386,6 +2386,85 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bot.telegram.messages, [])
 
 
+class InterruptedTurnTests(unittest.IsolatedAsyncioTestCase):
+    """A turn that was open when the daemon went down leaves a trace.
+
+    The prompt is persisted and the chunks up to the crash are persisted,
+    but the fact that a turn was *open* was not, so a restart mid-turn left
+    a user message with half an answer and nothing saying why.
+    """
+
+    async def asyncSetUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.config_home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.config_home.cleanup)
+        self.env = patch.dict(os.environ, {"XDG_CONFIG_HOME": self.config_home.name})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.coordinator = SessionCoordinator(Path(self.temporary.name))
+        record = make_record(self.coordinator, "work", name="work",
+                             auto_named=False, persisted=True)
+        self.coordinator._persist_meta(record)
+
+    def _stored(self):
+        return tomllib.loads(
+            Path(self.temporary.name, "work", "meta.toml").read_text())
+
+    def _run_a_turn(self, *, ending: bool):
+        emit = self.coordinator._emit
+        emit({"type": "message", "session_id": "work", "role": "user",
+              "text": "read the failing test"})
+        emit({"type": "turn_started", "session_id": "work", "turn_id": "t1",
+              "prompt_chars": 24})
+        emit({"type": "tool_call", "session_id": "work", "tool_call_id": "c1",
+              "title": "read"})
+        if ending:
+            emit({"type": "turn_ended", "session_id": "work", "turn_id": "t1",
+                  "outcome": "completed", "stop_reason": "end_turn",
+                  "duration": 1.0, "message_chunks": 1, "output_chars": 9,
+                  "thought_chunks": 0, "tool_calls": 1})
+
+    def _restarted(self):
+        restarted = SessionCoordinator(Path(self.temporary.name))
+        restarted.load_persisted()
+        record = restarted._records["work"]
+        record.agent = FakeAgent("work")
+        return restarted, record
+
+    async def test_an_open_turn_is_on_disk_and_a_closed_one_is_not(self):
+        self._run_a_turn(ending=False)
+        stored = self._stored()
+        self.assertIs(stored.get("turn_open"), True)
+        self.assertEqual(stored.get("turn_last_event"), "tool_call")
+        self._run_a_turn(ending=True)
+        self.assertNotIn("turn_open", self._stored())
+
+    async def test_the_next_prompt_says_the_last_turn_was_cut_off_once(self):
+        self._run_a_turn(ending=False)
+        restarted, record = self._restarted()
+
+        await restarted.send("work", "are you still there?")
+        first = [part.text for part in record.agent.sent[0]]
+        interrupted = [text for text in first if "cut off" in text]
+        self.assertEqual(len(interrupted), 1)
+        self.assertIn("a tool call", interrupted[0], "roughly where it stopped")
+        self.assertEqual(first[-1], "are you still there?",
+                         "ahead of the user's own words, in its own block")
+
+        await restarted.send("work", "and again")
+        self.assertFalse([part for part in record.agent.sent[1]
+                          if "cut off" in part.text],
+                         "told once, not on every message from here on")
+
+    async def test_a_turn_that_ended_leaves_nothing_to_say(self):
+        self._run_a_turn(ending=True)
+        restarted, record = self._restarted()
+        await restarted.send("work", "next thing")
+        self.assertFalse([part for part in record.agent.sent[0]
+                          if "cut off" in part.text])
+
+
 class SessionContextTests(unittest.IsolatedAsyncioTestCase):
     """What a session is told about itself, and when."""
 

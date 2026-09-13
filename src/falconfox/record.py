@@ -31,6 +31,24 @@ from .engine.session import AgentSession, PromptPart
 
 
 @dataclass
+class OpenTurn:
+    """A turn that is open as far as the disk is concerned.
+
+    Persisted in the metadata rather than as replayable `turn_started` and
+    `turn_ended` events, because it is one fact rather than a pair of events
+    to reconcile: the transcript stays a conversation, which is what a
+    backend without native session loading is replayed, and what a client
+    reads back is unchanged. Metadata is rewritten on every replayable event
+    anyway, so carrying it costs two extra writes per turn.
+    """
+
+    turn_id: Optional[str]
+    started: str
+    last_event: str
+    last_at: str
+
+
+@dataclass
 class SessionRecord:
     """Everything FalconFox knows about one session."""
 
@@ -92,6 +110,11 @@ class SessionRecord:
     # because a transition that cannot run beside a turn has to be able to
     # end that turn and wait for it to be over.
     turn: Optional[asyncio.Task] = field(default=None, repr=False)
+    # The turn that is open on disk, which is not the same thing: `turn` is
+    # this process's handle on a running one, and this is the fact that
+    # outlives the process. Set on `turn_started`, cleared on `turn_ended`,
+    # and read back on startup to notice a turn a restart cut off.
+    open_turn: Optional[OpenTurn] = None
 
     @property
     def live(self) -> bool:
@@ -130,6 +153,15 @@ class SessionRecord:
         `named` and the backend's session id matter to a restart and to
         nobody else.
         """
+        # An open turn is written out; a closed one leaves no keys at all,
+        # since the file is replaced rather than edited.
+        turn = {} if self.open_turn is None else {
+            "turn_open": True,
+            "turn_id": self.open_turn.turn_id,
+            "turn_started": self.open_turn.started,
+            "turn_last_event": self.open_turn.last_event,
+            "turn_last_at": self.open_turn.last_at,
+        }
         return {
             "session_id": self.session_id,
             "name": self.name,
@@ -140,6 +172,7 @@ class SessionRecord:
             "acp_session_id": self.acp_id,
             "hidden": self.hidden,
             "tags": list(self.tags),
+            **turn,
             # Roles decide the orientation, and `oriented` decides whether it
             # is still owed. Both have to survive a restart or a session that
             # was created and not yet spoken to would come back either
