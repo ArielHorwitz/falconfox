@@ -675,6 +675,65 @@ class WebsocketSendTests(unittest.IsolatedAsyncioTestCase):
                              ["send", "attachment_result"])
 
 
+class _SnapshotSocket:
+    """A daemon socket that delivers one snapshot and then ends."""
+
+    def __init__(self, snapshot: dict) -> None:
+        self._snapshot = snapshot
+
+    async def recv(self) -> str:
+        return json.dumps(self._snapshot)
+
+    def __aiter__(self) -> "_SnapshotSocket":
+        return self
+
+    async def __anext__(self) -> str:
+        raise StopAsyncIteration
+
+    async def send(self, _payload: str) -> None:
+        pass
+
+
+async def _nothing(*_args, **_kwargs) -> None:
+    pass
+
+
+async def _forever(*_args, **_kwargs) -> None:
+    await asyncio.sleep(3600)
+
+
+class ProtocolVersionTests(unittest.IsolatedAsyncioTestCase):
+    """The daemon announces the wire version it speaks in its snapshot. It was
+    produced and never checked, so a client left behind by a wire change would
+    have found out as an action that did nothing."""
+
+    async def _connect(self, directory: str, protocol) -> None:
+        bot = _bot(directory)
+        # Everything a connection does besides read the snapshot has a test of
+        # its own; what is under test here is the first thing it reads.
+        bot._register_orientation = lambda: None
+        for step in ("_announce_daemon_up", "_reconcile_persisted_turns",
+                     "_ensure_manager", "_load_icons",
+                     "_reconcile_topics_guarded"):
+            setattr(bot, step, _nothing)
+        bot._poll_telegram = _forever
+        await bot._run_connected(
+            _SnapshotSocket({"type": "snapshot", "sessions": [],
+                             "protocol": protocol}))
+
+    async def test_a_mismatch_is_said_and_carried_on_from(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertLogs("falconfox.telegram", "WARNING") as logs:
+                await self._connect(directory, bot_module.DAEMON_PROTOCOL + 1)
+            self.assertTrue(any("protocol" in line for line in logs.output),
+                            f"the skew is named: {logs.output}")
+
+    async def test_the_version_it_was_built_for_says_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertNoLogs("falconfox.telegram", "WARNING"):
+                await self._connect(directory, bot_module.DAEMON_PROTOCOL)
+
+
 class RefusedActionTests(unittest.IsolatedAsyncioTestCase):
     """The daemon answers an action it will not run with an event, which used
     to be a log line in the daemon and silence here."""

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import io
 import json
 import logging
 import os
@@ -28,7 +29,8 @@ from falconfox import cli as falconfox_cli
 from falconfox.coordinator import SessionCoordinator
 from falconfox.engine.events import EventBus
 from falconfox.errors import FalconFoxError
-from falconfox.web.actions import (ACKNOWLEDGED, ACTIONS, CREATED, RESULT,
+from falconfox.web.actions import (ACKNOWLEDGED, ACTIONS, CREATED,
+                                   PROTOCOL_HEADER, PROTOCOL_VERSION, RESULT,
                                    Action, lookup)
 from falconfox.web.server import create_app
 
@@ -68,6 +70,9 @@ class RecordingCoordinator:
 
     def load_persisted(self) -> None:
         pass
+
+    def list_sessions(self, include_hidden: bool = False) -> list:
+        return []
 
     def snapshot(self) -> dict:
         return {"type": "snapshot", "sessions": [], "config_options": {},
@@ -377,6 +382,49 @@ class TwoSendSemanticsTests(unittest.IsolatedAsyncioTestCase):
             await settle(lambda: any(name == "cancel"
                                      for name, _ in self.coordinator.calls))
             self.coordinator.release.set()
+
+
+class ProtocolVersionTests(unittest.IsolatedAsyncioTestCase):
+    """The version was produced and announced and never checked, so a wire
+    change between a long-lived client and a restarted daemon would have shown
+    up as an action that did nothing."""
+
+    async def test_the_snapshot_carries_it(self):
+        coordinator = RecordingCoordinator()
+        async with Socket(create_app(coordinator=coordinator)) as socket:
+            snapshot = await socket.receive()
+        self.assertEqual(snapshot["type"], "snapshot")
+        self.assertEqual(snapshot["protocol"], PROTOCOL_VERSION)
+
+    async def test_every_http_answer_carries_it(self):
+        client = Client(create_app(coordinator=RecordingCoordinator()))
+        for method, target in (("GET", "/api/version"),
+                               ("GET", "/api/sessions"),
+                               ("GET", "/api/sessions/nosuch00")):
+            _status, _body, headers = await client.request(method, target)
+            self.assertEqual(headers.get(PROTOCOL_HEADER.lower()),
+                             str(PROTOCOL_VERSION), target)
+
+    def test_the_cli_says_so_once_and_keeps_going(self):
+        with patch.object(falconfox_cli, "_protocol_said", False), \
+                patch("sys.stderr", io.StringIO()) as complaint:
+            falconfox_cli._check_protocol(str(PROTOCOL_VERSION + 1))
+            falconfox_cli._check_protocol(str(PROTOCOL_VERSION + 1))
+        said = complaint.getvalue()
+        self.assertEqual(said.count("falconfox:"), 1, "once per invocation")
+        self.assertIn(str(PROTOCOL_VERSION + 1), said)
+
+    def test_the_cli_says_nothing_when_the_wire_matches(self):
+        with patch.object(falconfox_cli, "_protocol_said", False), \
+                patch("sys.stderr", io.StringIO()) as complaint:
+            falconfox_cli._check_protocol(str(PROTOCOL_VERSION))
+        self.assertEqual(complaint.getvalue(), "")
+
+    def test_a_daemon_too_old_to_say_is_a_mismatch(self):
+        with patch.object(falconfox_cli, "_protocol_said", False), \
+                patch("sys.stderr", io.StringIO()) as complaint:
+            falconfox_cli._check_protocol(None)
+        self.assertIn("falconfox:", complaint.getvalue())
 
 
 class RouteTests(unittest.IsolatedAsyncioTestCase):

@@ -31,6 +31,23 @@ from typing import Callable, Optional
 
 from ..errors import FalconFoxError
 
+# The wire version. Bumped when a change here, to the events or to the
+# snapshot stops a client built against the previous one from working
+# correctly. Adding an action or an event type does not qualify: a client that
+# has never heard of an action does not send it, and both clients ignore event
+# types they do not know. Renaming or removing one does, and so does changing
+# what a field means.
+#
+# The websocket carries it in the snapshot and HTTP carries it in a response
+# header, so a client learns it from a message it was already going to read.
+# Nothing is refused over a mismatch and nobody is asked to upgrade: the client
+# says what it sees, at WARNING, and carries on. A daemon and a client in this
+# repository are restarted together, so a mismatch means two checkouts are in
+# play -- the dev CLI against the deployment's daemon, say -- and that is worth
+# a line in a log rather than an outage.
+PROTOCOL_VERSION = 1
+PROTOCOL_HEADER = "X-FalconFox-Protocol"
+
 # What HTTP answers with once the action has run. The websocket answers with
 # events and so ignores this entirely.
 SESSION = "session"        # the session that was acted on

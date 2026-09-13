@@ -39,6 +39,11 @@ log = logging.getLogger("falconfox.telegram")
 # -updating from inside a session makes restarts routine, so they get announced.
 DAEMON_DOWN = "\u26a0\ufe0f Daemon connection lost \u2014 reconnecting."
 DAEMON_UP = "\u2705 FalconFox is up"
+# The daemon's wire version this client was written against, held as a literal
+# rather than imported from the daemon package: the point of the check is a
+# client and a daemon from two different checkouts, and an import would make
+# them agree by construction. See falconfox/web/actions.py.
+DAEMON_PROTOCOL = 1
 # Telegram's answer when an edit would change nothing. It is a 400, but it
 # means the topic is already how it was asked to be -- which is success for
 # anything that sets a state rather than performs an action. Read as failure
@@ -868,6 +873,14 @@ class FalconFoxTelegramBot:
         snapshot = json.loads(await websocket.recv())
         if snapshot.get("type") != "snapshot":
             raise RuntimeError("FalconFox did not send an initial snapshot")
+        protocol = snapshot.get("protocol")
+        if protocol != DAEMON_PROTOCOL:
+            # Said and then ignored, on purpose: refusing here would turn a
+            # skew between two checkouts into an outage, and the bot has no
+            # way to fix the daemon anyway. What it buys is that the next
+            # inexplicable no-op has a line above it saying why.
+            log.warning("daemon speaks protocol %s, this client was built for "
+                        "%s; carrying on", protocol, DAEMON_PROTOCOL)
         # On every connection, because the client directory is named after the
         # daemon's process: a daemon we have just (re)connected to may be a
         # different one, reading a directory this bot has never written to.

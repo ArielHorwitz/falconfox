@@ -11,6 +11,8 @@ from typing import Optional
 
 import uvicorn
 from starlette.applications import Starlette
+from starlette.datastructures import MutableHeaders
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route, WebSocketRoute
@@ -22,7 +24,8 @@ from ..coordinator import SessionCoordinator
 from ..engine.events import CLOSED
 from ..errors import FalconFoxError
 from ..watchdog import StallWatchdog
-from .actions import ACKNOWLEDGED, ACTIONS, CREATED, RESULT, Action, lookup
+from .actions import (ACKNOWLEDGED, ACTIONS, CREATED, PROTOCOL_HEADER,
+                      PROTOCOL_VERSION, RESULT, Action, lookup)
 
 STATIC_DIR = Path(__file__).parent.joinpath("static")
 log = logsetup.get_logger("server")
@@ -166,6 +169,7 @@ def create_app(
 
     return Starlette(
         lifespan=lifespan,
+        middleware=[Middleware(ProtocolHeader)],
         routes=[
             Route("/api/version", version_endpoint),
             Route("/api/sessions", sessions_endpoint, methods=["GET", "POST"]),
@@ -187,6 +191,30 @@ def create_app(
             Route("/", index),
         ],
     )
+
+
+class ProtocolHeader:
+    """Stamp the wire version onto every HTTP answer.
+
+    A header rather than a field in a body, so a client reads it off the first
+    request it was going to make anyway and no call exists only to ask. The
+    websocket says the same thing in its snapshot. See actions.PROTOCOL_VERSION.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def stamped(message) -> None:
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)[PROTOCOL_HEADER] = str(PROTOCOL_VERSION)
+            await send(message)
+
+        await self.app(scope, receive, stamped)
 
 
 async def _body(request: Request) -> dict:
@@ -296,7 +324,8 @@ def _run_socket_action(coordinator: SessionCoordinator,
 async def _run_socket(websocket: WebSocket, coordinator: SessionCoordinator,
                       peer: str = "?") -> None:
     with coordinator.bus.subscribe(peer) as queue:
-        await websocket.send_json(coordinator.snapshot())
+        await websocket.send_json({**coordinator.snapshot(),
+                                   "protocol": PROTOCOL_VERSION})
         sender = asyncio.create_task(_send_events(websocket, queue))
         try:
             while True:

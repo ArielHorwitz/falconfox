@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import help as ffhelp, state
+from .web.actions import PROTOCOL_HEADER, PROTOCOL_VERSION
 
 
 class CliError(Exception):
@@ -55,6 +56,7 @@ def _request(method: str, path: str, body: dict | None = None,
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
+            _check_protocol(response.headers.get(PROTOCOL_HEADER))
             payload = response.read()
             return json.loads(payload) if payload else None
     except urllib.error.HTTPError as error:
@@ -73,6 +75,27 @@ def _request(method: str, path: str, body: dict | None = None,
         raise CliError(f"could not reach FalconFox daemon: {error.reason}") from error
     except TimeoutError as error:
         raise CliError(_timed_out(timeout)) from error
+
+
+_protocol_said = False
+
+
+def _check_protocol(reported: Optional[str]) -> None:
+    """Say once per invocation if the daemon does not speak this CLI's wire.
+
+    Free to do: every answer carries the version in a header, so there is no
+    call to spend on asking. It happens at all because `falconfox` on PATH and
+    the daemon it reaches can be different checkouts -- a dev session's CLI
+    against the deployment's daemon is the case that has already happened -- and
+    the alternative to a line on stderr is a command that quietly does nothing.
+    """
+    global _protocol_said
+    if _protocol_said or reported == str(PROTOCOL_VERSION):
+        return
+    _protocol_said = True
+    print(f"falconfox: this CLI speaks protocol {PROTOCOL_VERSION} and the "
+          f"daemon speaks {reported or 'none that it names'}. Continuing "
+          f"anyway; a command that does nothing may be this.", file=sys.stderr)
 
 
 def _timed_out(timeout: float) -> str:
