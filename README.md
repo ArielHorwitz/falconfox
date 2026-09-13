@@ -57,22 +57,33 @@ Configuration is daemon-global. There are no per-project overrides.
 ## Daemon and CLI
 
 ```bash
-falconfox daemon
+falconfox daemon                     # also --stop, --restart, --foreground
 falconfox spawn --path ~/projects/example --name "example work"
-falconfox list
+falconfox list                       # --all includes hidden, --json for a script
 falconfox send <session-id> "Inspect the failing tests"
-falconfox read <session-id>
+falconfox read <session-id>          # --json for the raw transcript
 falconfox stop <session-id>
 falconfox resume <session-id>
 falconfox rename <session-id> "better name"
+falconfox tag <session-id> urgent    # no tags clears them
 falconfox delete <session-id>
-falconfox daemon --stop
+falconfox attach report.pdf          # from inside a session, to its chat
+falconfox help [topic]
 ```
 
-`send` resumes a stored session automatically. `spawn --ephemeral` creates a
-live session that is never persisted and is hidden from the default listing.
+`send` resumes a stored session automatically, waits out the whole turn, and
+prints the reply. `spawn --ephemeral` creates a live session that is never
+persisted and is hidden from the default listing, and `spawn --role` is
+repeatable. `attach` only works from inside a session, since what it sends to
+is that session's chat: it hands the file to whichever client is showing the
+session and waits for that client to confirm delivery, which is why a missing
+client is an error rather than a silent drop. `help` reads what the running
+clients have registered with the daemon, so it needs the daemon up.
+
 Each backend subprocess receives its own id as `FALCONFOX_SESSION_ID`; the CLI
-rejects self-stop, self-delete, and stopping the containing daemon.
+rejects self-stop, self-delete, and stopping the containing daemon. Every
+request has a finite timeout, so an agent that runs `falconfox` against a
+wedged daemon is told so instead of hanging for the rest of its turn.
 
 Session state lives at
 `$XDG_STATE_HOME/falconfox/sessions/<session-id>/` (falling back to
@@ -108,8 +119,21 @@ topic you are writing in, so it belongs to a topic rather than to General.
 on: FalconFox and its sessions, one particular session, or the host. Where a
 command is refused is said on its own line rather than by hiding it.
 There is no focus pointer and no `/switch`: a topic *is* the address, so there
-is nothing left to switch. During turns the bot refreshes Telegram's typing
-indicator, suppresses tool calls, and sends the final reply as one message.
+is nothing left to switch.
+
+A turn is **two messages**. The first is posted as the turn starts and is
+edited in place while the work proceeds. Its header carries a clock and a count
+of anything queued behind the turn. Under it goes the work: the agent's remarks
+between tool calls, the opening of each thinking block behind a `💭`, and one
+compact line per tool call behind a `⚙️`. When the turn ends that message is
+stamped with the outcome, the elapsed time, the number of tool calls and the
+tokens it cost, and left standing as the record of how the answer was reached.
+The second message is the answer itself, meaning the text after the last tool
+call, sent on its own and threaded to the prompt it answers. A tool call never
+gets a message of its own, which is the part of "tool calls are suppressed"
+that still holds. Telegram's typing indicator runs for the whole turn, because
+editing a message never notifies and being alive is the one thing the progress
+message cannot say by itself.
 
 Every session is told what it is running inside, once, on the first message it
 ever receives. That **orientation** is composed rather than written in one
