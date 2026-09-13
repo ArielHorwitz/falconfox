@@ -211,15 +211,15 @@ briefs, reports and reviews are filed beside this overview.
 | package | state | tests |
 | --- | --- | --- |
 | Telegram client | integrated onto the case branch, 10 commits | 261 to 280 |
-| Daemon core | reviewed, fixes and rebase in progress, 7 commits so far | 282 on its branch |
-| Wire contract and deploy | not started, waits for the daemon branch | |
+| Daemon core | integrated onto the case branch, 10 commits | 280 to 305 |
+| Wire contract and deploy | in progress on its own branch | |
 
 Buglist entries closed so far: the stranded session after a hand-deleted
 topic, and the extra "Working..." message after a reply. Bonus fixes found
 by the implementers and confirmed by tests: a resumed session could show a
 one-event history in place of its transcript, and stopping a never-renamed
 session after a restart deleted it from disk (found by the daemon review,
-fix in progress).
+fixed).
 
 ## Follow-ups surfaced, not taken up here
 
