@@ -244,6 +244,24 @@ after this lands is the one that exercises it.
 Delegated cost for the whole case, all models: about 103 USD. Surveys 6,
 implementations 68, reviews 10, fix rounds 19.
 
+## Rolling the dev instance back
+
+Merged to `dev` on 2026-09-13. The commit `dev` was at before the merge is
+**`9b43889`**. If the dev instance is unusable after the restart, this brings
+it back, from any session on this host:
+
+```
+cd /home/ariel/projects/falconfox && git reset --hard 9b43889
+systemd-run --user --collect --unit "falconfox-dev-restart-$(date +%s)" \
+    --on-active=15 systemctl --user restart \
+    falconfox-dev-daemon.service falconfox-dev-telegram.service
+```
+
+The state on disk is forward-compatible: the open-turn marker is plain
+extra keys in a session's metadata, which the old writer round-trips, and
+the bot's persisted turn file keeps the fields the old bot reads. The merge
+commits stay reachable through `git reflog` in that checkout.
+
 ## Follow-ups surfaced, not taken up here
 
 - **The bot handles every daemon event on one task**, so any pause while
