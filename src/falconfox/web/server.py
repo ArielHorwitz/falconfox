@@ -116,9 +116,9 @@ def create_app(
             elif action == "stop":
                 await coordinator.stop_session(session_id)
             elif action == "rename":
-                coordinator.rename_session(session_id, body.get("name", ""))
+                await coordinator.rename_session(session_id, body.get("name", ""))
             elif action == "tag":
-                coordinator.set_tags(session_id, body.get("tags") or [])
+                await coordinator.set_tags(session_id, body.get("tags") or [])
             elif action == "name":
                 await coordinator.name_session(session_id)
             elif action == "cancel":
@@ -253,7 +253,7 @@ def _dispatch(coordinator: SessionCoordinator, action: dict) -> None:
     elif name == "resume":
         _spawn(coordinator.resume_session(session_id))
     elif name == "rename":
-        coordinator.rename_session(session_id, action.get("name", ""))
+        _spawn(coordinator.rename_session(session_id, action.get("name", "")))
     elif name == "name":
         _spawn(coordinator.name_session(session_id))
     elif name == "set_config_option":

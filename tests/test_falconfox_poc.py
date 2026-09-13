@@ -14,6 +14,7 @@ import tomllib
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from falconfox.cli import CliError, _guard_self_target, build_parser, cmd_daemon
@@ -63,9 +64,84 @@ class FakeAgent:
 
     async def stop(self):
         self.stopped += 1
+        await asyncio.sleep(0)
 
     async def cancel(self):
         self.cancelled += 1
+
+
+class QuietAgentSession:
+    """An `AgentSession` that spawns nothing, for driving the coordinator's
+    own lifecycle. Every step yields, so concurrent activations interleave."""
+
+    def __init__(self, session_id, name, path, backend, emit, request_permission):
+        self.session_id = session_id
+        self.name = name
+        self.emit = emit
+        self.acp_session_id = f"acp-{session_id}"
+        self.config_options = []
+        self.sent = []
+        self.stopped = 0
+
+    def _idle(self):
+        self.emit({"session_id": self.session_id, "type": "agent_state",
+                   "state": "idle"})
+
+    async def start(self):
+        await asyncio.sleep(0)
+        self._idle()
+
+    async def resume(self, acp_session_id):
+        await asyncio.sleep(0)
+        self._idle()
+        return True
+
+    async def send(self, parts):
+        await asyncio.sleep(0)
+        self.sent.append(list(parts))
+
+    async def cancel(self):
+        await asyncio.sleep(0)
+
+    async def stop(self):
+        self.stopped += 1
+        await asyncio.sleep(0)
+
+
+class HangingConn:
+    """A connection whose prompt hangs until the connection closes, and then
+    fails the way a real one does when its subprocess goes."""
+
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    async def prompt(self, **_kwargs):
+        self.started.set()
+        await self.closed.wait()
+        raise ConnectionError("connection closed")
+
+    async def cancel(self, **_kwargs):
+        self.closed.set()
+
+    async def close(self):
+        self.closed.set()
+
+
+class ReadyConn:
+    """A connection that answers, holding each prompt until it is released."""
+
+    def __init__(self):
+        self.prompts = []
+        self.release = asyncio.Event()
+
+    async def load_session(self, **_kwargs):
+        return SimpleNamespace()
+
+    async def prompt(self, prompt, **_kwargs):
+        self.prompts.append(prompt)
+        await self.release.wait()
+        return SimpleNamespace(stop_reason="end_turn", usage=None)
 
 
 def make_record(coordinator, session_id, *, live=False, **fields):
@@ -515,6 +591,165 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
                                 "state": "idle"})
         await asyncio.sleep(0)
         self.assertEqual(drained, [True])
+
+
+class LifecycleSerialisationTests(unittest.IsolatedAsyncioTestCase):
+    """One transition at a time per session, one slot handed out at a time.
+
+    Every test here drives real concurrent tasks, because that is how the
+    daemon is driven: the websocket dispatches each action as a detached
+    task, so overlapping transitions are the ordinary case. A test that
+    awaited its calls in order would pass over every race described here.
+    """
+
+    async def asyncSetUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.config_home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.config_home.cleanup)
+        self.env = patch.dict(os.environ, {"XDG_CONFIG_HOME": self.config_home.name})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.coordinator = SessionCoordinator(Path(self.temporary.name))
+        self.subscription = self.coordinator.bus.subscribe()
+        self.queue = self.subscription.__enter__()
+        self.addCleanup(self.subscription.__exit__, None, None, None)
+
+    def _limit(self, value):
+        self.coordinator.config = replace(self.coordinator.config,
+                                          max_live_sessions=value)
+
+    def _emitted(self):
+        events = []
+        while not self.queue.empty():
+            events.append(self.queue.get_nowait())
+        return events
+
+    def _hanging_agent(self, record):
+        """Give a record a live agent whose turn hangs until its connection
+        is closed, which is what a real backend's prompt does."""
+        conn = HangingConn()
+        agent = AgentSession(
+            session_id=record.session_id, name=record.name,
+            path=Path(self.temporary.name), backend=None,
+            emit=self.coordinator._emit, request_permission=None,
+        )
+        agent._conn = conn
+        agent._acp_session_id = "acp"
+        agent._stack.push_async_callback(conn.close)
+        record.agent = agent
+        return conn
+
+    async def test_two_actions_needing_the_last_slot_do_not_both_take_it(self):
+        # Survey F1. Both read the live count, both pick the same idle
+        # victim, and both proceed, because freeing a slot spans an await.
+        # The cap is there because this daemon has been OOM-killed carrying
+        # ten sessions, so exceeding it is the one thing it must not do.
+        self._limit(1)
+        make_record(self.coordinator, "victim", state="idle", live=True,
+                    auto_named=False)
+        make_record(self.coordinator, "stored", auto_named=False)
+        with patch("falconfox.coordinator.AgentSession", QuietAgentSession):
+            await asyncio.gather(
+                self.coordinator.add_session(path=self.temporary.name, name="fresh"),
+                self.coordinator.resume_session("stored"),
+            )
+        self.assertEqual(len(self.coordinator.live_session_ids()), 1,
+                         "the limit is a number the daemon must not exceed")
+
+    async def test_deleting_during_a_turn_ends_the_turn_out_loud(self):
+        # The turn used to be dropped in silence: its reply landed after the
+        # metadata was popped and was discarded with nothing logged, so the
+        # user's answer vanished and no line said so.
+        record = make_record(self.coordinator, "work", name="work",
+                             state="working", auto_named=False)
+        conn = self._hanging_agent(record)
+        turn = asyncio.create_task(self.coordinator.send("work", "think about it"))
+        await asyncio.wait_for(conn.started.wait(), 2)
+        with self.assertLogs("falconfox.coordinator", level="WARNING") as logged:
+            await self.coordinator.delete_session("work")
+        await asyncio.wait_for(turn, 2)
+        self.assertIn("work", "".join(logged.output))
+        events = self._emitted()
+        cut = [event for event in events if event.get("type") == "notice"
+               and "cut short" in (event.get("message") or "")]
+        self.assertEqual(len(cut), 1, "the outcome is said, not just logged")
+        ended = [event for event in events if event.get("type") == "turn_ended"]
+        self.assertEqual([event["stop_reason"] for event in ended], ["cancelled"])
+        # And it is said before the turn is closed, or a client that
+        # finalizes on turn_ended has nowhere left to put it.
+        self.assertLess(events.index(cut[0]), events.index(ended[0]))
+
+    async def test_a_running_turn_does_not_lock_the_session_out(self):
+        # `send` gives both locks up before waiting for the turn. Holding
+        # them across it would put `cancel`, `stop` and `delete` out of reach
+        # for as long as the agent worked, which is exactly when they are
+        # wanted, and `/stop` would hang on the turn it exists to end.
+        record = make_record(self.coordinator, "work", name="work",
+                             state="working", auto_named=False)
+        conn = self._hanging_agent(record)
+        turn = asyncio.create_task(self.coordinator.send("work", "a long one"))
+        await asyncio.wait_for(conn.started.wait(), 2)
+        await asyncio.wait_for(self.coordinator.cancel("work"), 2)
+        await asyncio.wait_for(turn, 2)
+
+    async def test_a_revert_cannot_land_the_dying_turns_events_after_the_rewrite(self):
+        # Survey F2. Revert stopped the session mid-turn and rewrote the
+        # transcript while the dying prompt's error notice was still
+        # pending, so the notice was appended to the file it had just
+        # rewritten -- a stray line after the revert.
+        record = make_record(self.coordinator, "work", name="work",
+                             auto_named=False, persisted=True)
+        self.coordinator.store.write_meta(record.stored())
+        for event in ({"type": "message", "role": "user", "text": "first"},
+                      {"type": "message", "role": "agent", "text": "reply"}):
+            self.coordinator.store.append_event("work", event)
+        conn = self._hanging_agent(record)
+        turn = asyncio.create_task(self.coordinator.send("work", "second"))
+        await asyncio.wait_for(conn.started.wait(), 2)
+        # Index 2 is the message this turn is answering, which is the whole
+        # point of reverting mid-turn.
+        await self.coordinator.revert_session("work", 2)
+        await asyncio.wait_for(turn, 2)
+        on_disk = self.coordinator.store.read_transcript("work")
+        self.assertEqual([event.get("text") for event in on_disk],
+                         ["first", "reply"],
+                         "nothing may be appended after the rewrite")
+        self.assertEqual(self.coordinator.transcript("work"), on_disk)
+
+    async def test_a_second_send_to_a_starting_session_waits(self):
+        # Survey F6. The second send reached a session that was in the
+        # manager but whose connection was not up, raising an AttributeError
+        # that the engine reported to the user as "agent error".
+        record = make_record(self.coordinator, "work", name="work",
+                             auto_named=False, acp_id="acp")
+        gate = asyncio.Event()
+        conn = ReadyConn()
+
+        async def slow_spawn(agent):
+            await gate.wait()
+            agent._conn = conn
+            agent._supports_load = True
+
+        with patch.object(AgentSession, "_spawn", slow_spawn):
+            first = asyncio.create_task(self.coordinator.send("work", "one"))
+            second = asyncio.create_task(self.coordinator.send("work", "two"))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            self.assertFalse(second.done(), "nothing to answer with yet")
+            gate.set()
+            # The second send returns once it has been through the same door
+            # the first went through, which is what "waits" means here.
+            await asyncio.wait_for(second, 2)
+            self.assertEqual(len(conn.prompts), 1,
+                             "and it does not open a second turn on the same "
+                             "connection while the first is still running")
+            conn.release.set()
+            await asyncio.wait_for(first, 2)
+        failures = [event for event in self._emitted()
+                    if event.get("type") == "notice"
+                    and "agent error" in (event.get("message") or "")]
+        self.assertEqual(failures, [])
 
 
 class LiveSessionLimitConfigTests(unittest.TestCase):
@@ -2734,23 +2969,24 @@ class SessionTagTests(unittest.IsolatedAsyncioTestCase):
         make_record(self.coordinator, "work", name="work", state="idle",
                     live=True, auto_named=False)
 
-    def test_tags_are_folded_but_not_reordered(self):
-        tags = self.coordinator.set_tags("work", ["Urgent", "  Archived  ", "urgent", ""])
+    async def test_tags_are_folded_but_not_reordered(self):
+        tags = await self.coordinator.set_tags(
+            "work", ["Urgent", "  Archived  ", "urgent", ""])
         self.assertEqual(tags, ["urgent", "archived"],
                          "case folds and duplicates drop, but the order is the payload")
 
-    def test_whitespace_inside_a_tag_is_refused(self):
+    async def test_whitespace_inside_a_tag_is_refused(self):
         # The map matches by string, so a tag has to be one word or the
         # lookup silently never fires.
         with self.assertRaises(FalconFoxError):
-            self.coordinator.set_tags("work", ["needs review"])
+            await self.coordinator.set_tags("work", ["needs review"])
 
-    def test_clearing_is_an_empty_list(self):
-        self.coordinator.set_tags("work", ["archived"])
-        self.assertEqual(self.coordinator.set_tags("work", []), [])
+    async def test_clearing_is_an_empty_list(self):
+        await self.coordinator.set_tags("work", ["archived"])
+        self.assertEqual(await self.coordinator.set_tags("work", []), [])
 
-    def test_tags_survive_a_daemon_restart(self):
-        self.coordinator.set_tags("work", ["archived", "slow"])
+    async def test_tags_survive_a_daemon_restart(self):
+        await self.coordinator.set_tags("work", ["archived", "slow"])
         stored = tomllib.loads(
             Path(self.temporary.name, "work", "meta.toml").read_text())
         self.assertEqual(stored.get("tags"), ["archived", "slow"])
@@ -2758,10 +2994,10 @@ class SessionTagTests(unittest.IsolatedAsyncioTestCase):
         restarted.load_persisted()
         self.assertEqual(restarted._records["work"].tags, ["archived", "slow"])
 
-    def test_a_session_updated_event_carries_the_tags(self):
+    async def test_a_session_updated_event_carries_the_tags(self):
         events = []
         self.coordinator._emit = lambda event: events.append(event)
-        self.coordinator.set_tags("work", ["archived"])
+        await self.coordinator.set_tags("work", ["archived"])
         self.assertEqual([event["tags"] for event in events
                           if event["type"] == "session_updated"], [["archived"]])
 

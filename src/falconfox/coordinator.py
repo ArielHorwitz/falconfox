@@ -7,6 +7,7 @@ import datetime
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -86,7 +87,72 @@ class SessionCoordinator:
         # file itself -- only the client attached to the chat can -- so the
         # HTTP call waits here until that client reports back.
         self._attachments: dict[str, asyncio.Future] = {}
+        # Slot accounting: see the lock ordering below.
+        self._slot_lock = asyncio.Lock()
         self._draining = False
+
+    # --- serialising transitions ---------------------------------------
+    #
+    # Two locks, always taken in this order and never the other way round:
+    #
+    #   1. `_slot_lock`, by anything that may need a live slot (`add_session`,
+    #      `resume_session`, `send`). It is held across `_ensure_slot` *and*
+    #      the activation that follows it, because a slot that is checked in
+    #      one step and filled in another can be handed to two callers -- the
+    #      cap being exceeded is the OOM it exists to prevent.
+    #   2. the session's own `record.lock`, by every method that changes that
+    #      session.
+    #
+    # The only thing that ever holds two session locks at once is the holder
+    # of the slot lock, evicting a victim, and nothing holding a session lock
+    # ever asks for the slot lock. So there is no cycle, and nothing to
+    # deadlock on. What keeps it that way: a method holding a session lock
+    # must never await another public method that takes the same one. The
+    # `_locked` helpers below exist for exactly that and assume it is held.
+    #
+    # Deliberately *not* under any lock: the turn itself. `send` holds the
+    # locks while it starts a turn and gives them up before waiting for it,
+    # or `cancel`, `stop` and `delete` could never reach a session that was
+    # busy -- which is exactly when they are wanted. What stops a transition
+    # racing a turn is `_settle_turn`, not the lock.
+
+    @asynccontextmanager
+    async def _locked(self, session_id: str):
+        """Yield a session's record, held against every other transition."""
+        record = self._require(session_id)
+        async with record.lock:
+            # It can be deleted while we wait for the lock, and acting on a
+            # discarded record would resurrect what the delete threw away.
+            if self._records.get(session_id) is not record:
+                raise FalconFoxError(f"no such session: {session_id}")
+            yield record
+
+    async def _settle_turn(self, record: SessionRecord, reason: str) -> None:
+        """End an in-flight turn before a transition that cannot run beside it.
+
+        Cancelled rather than waited for, and said out loud. Waiting would
+        hold a delete behind a turn the user has already decided to discard,
+        for as long as that turn runs. Dropping it in silence is what used to
+        happen and is worse: the reply landed after the session was gone and
+        was discarded with no line to show for it.
+
+        The turn ends the way a backend-side cancel ends one -- `turn_ended`
+        with `stop_reason: cancelled` -- so no client learns a second shape.
+        """
+        turn = record.turn
+        record.turn = None
+        if turn is None or turn.done():
+            return
+        self.log.warning("session=%s (%s): %s while a turn was in flight; "
+                         "the turn is cancelled", record.session_id, record.name,
+                         reason)
+        # Said before the cancellation, not after: a client that finalizes a
+        # turn on `turn_ended` has nowhere to put a notice arriving behind it.
+        self._emit({"type": "notice", "session_id": record.session_id,
+                    "level": "error",
+                    "message": f"The turn running here was cut short: {reason}."})
+        turn.cancel()
+        await asyncio.wait({turn})
 
     # --- persistence and event flow ------------------------------------
 
@@ -290,57 +356,65 @@ class SessionCoordinator:
         except KeyError as error:
             raise FalconFoxError(str(error)) from error
         session_id = new_session_id()
-        now = _now_iso()
-        # Decided before the subprocess exists: a new session over the limit
-        # is created *stored*, so it has an id, metadata, a transcript and --
-        # for the Telegram client -- a topic, and simply is not running yet.
-        # Refusing instead would deny the user something the interface invites.
-        # A throwaway is hidden by default; infrastructure asks for hidden
-        # without asking to be thrown away.
-        record = SessionRecord(
-            session_id=session_id,
-            name=(name or "").strip() or f"Session {len(self._records) + 1}",
-            path=str(working_path),
-            backend=backend.name,
-            created=now,
-            last_active=now,
-            ephemeral=bool(ephemeral),
-            hidden=bool(ephemeral) if hidden is None else bool(hidden),
-            roles=list(roles or []),
-            auto_named=not bool((name or "").strip()),
-        )
-        has_slot = await self._ensure_slot()
-        self._records[session_id] = record
-        if not has_slot:
-            self._persist_meta(record)
-            self._emit({"type": "session_added", **record.wire()})
-            self._enqueue(record, None)
-            return session_id
-        record.agent = AgentSession(
-            session_id=session_id,
-            name=record.name,
-            path=working_path,
-            backend=backend,
-            emit=self._emit,
-            request_permission=self._request_permission,
-        )
-        record.state = "starting"
-        self._persist_meta(record)
-        self._emit({"type": "session_added", **record.wire()})
-        try:
-            await record.agent.start()
-        except Exception as error:
-            # Discarded whole, rather than field by field: whatever the record
-            # picked up on the way to failing goes with it.
-            self._records.pop(session_id, None)
-            self.store.delete(session_id)
-            self._emit({"type": "session_removed", "session_id": session_id})
-            self._emit({"type": "notice", "session_id": session_id, "level": "error",
-                        "message": f"failed to start session: {error}"})
-            raise
-        record.acp_id = record.agent.acp_session_id
-        await self._apply_config_options(record)
-        self._persist_meta(record)
+        # The slot lock spans the whole of making this session live, so that
+        # the room `_ensure_slot` makes is the room this session takes.
+        async with self._slot_lock:
+            now = _now_iso()
+            # Decided before the subprocess exists: a new session over the
+            # limit is created *stored*, so it has an id, metadata, a
+            # transcript and -- for the Telegram client -- a topic, and simply
+            # is not running yet. Refusing instead would deny the user
+            # something the interface invites. A throwaway is hidden by
+            # default; infrastructure asks for hidden without asking to be
+            # thrown away.
+            record = SessionRecord(
+                session_id=session_id,
+                name=(name or "").strip() or f"Session {len(self._records) + 1}",
+                path=str(working_path),
+                backend=backend.name,
+                created=now,
+                last_active=now,
+                ephemeral=bool(ephemeral),
+                hidden=bool(ephemeral) if hidden is None else bool(hidden),
+                roles=list(roles or []),
+                auto_named=not bool((name or "").strip()),
+            )
+            has_slot = await self._ensure_slot()
+            self._records[session_id] = record
+            # Uncontended, since nobody else has the id yet -- but the id is
+            # public from `session_added` on, and starting is a long await.
+            async with record.lock:
+                if not has_slot:
+                    self._persist_meta(record)
+                    self._emit({"type": "session_added", **record.wire()})
+                    self._enqueue(record, None)
+                    return session_id
+                record.agent = AgentSession(
+                    session_id=session_id,
+                    name=record.name,
+                    path=working_path,
+                    backend=backend,
+                    emit=self._emit,
+                    request_permission=self._request_permission,
+                )
+                record.state = "starting"
+                self._persist_meta(record)
+                self._emit({"type": "session_added", **record.wire()})
+                try:
+                    await record.agent.start()
+                except Exception as error:
+                    # Discarded whole, rather than field by field: whatever
+                    # the record picked up on the way to failing goes with it.
+                    self._records.pop(session_id, None)
+                    self.store.delete(session_id)
+                    self._emit({"type": "session_removed", "session_id": session_id})
+                    self._emit({"type": "notice", "session_id": session_id,
+                                "level": "error",
+                                "message": f"failed to start session: {error}"})
+                    raise
+                record.acp_id = record.agent.acp_session_id
+                await self._apply_config_options(record)
+                self._persist_meta(record)
         return session_id
 
     # --- the live-session cap ------------------------------------------
@@ -468,7 +542,11 @@ class SessionCoordinator:
             self._draining = False
 
     async def resume_session(self, session_id: str) -> None:
-        record = self._require(session_id)
+        async with self._slot_lock, self._locked(session_id) as record:
+            await self._resume_locked(record)
+
+    async def _resume_locked(self, record: SessionRecord) -> None:
+        session_id = record.session_id
         if record.live:
             self._dequeue(record)
             return
@@ -669,18 +747,33 @@ class SessionCoordinator:
         )
 
     async def send(self, session_id: str, text: str) -> None:
-        record = self._require(session_id)
+        self._require(session_id)
         if not (text or "").strip():
             raise FalconFoxError("message must not be empty")
+        async with self._slot_lock, self._locked(session_id) as record:
+            turn = await self._begin_turn(record, text)
+        if turn is None:
+            return
+        # Waited for with both locks given up. A turn runs for as long as the
+        # agent takes, and `cancel`, `stop` and `delete` have to be able to
+        # reach the session while it does.
+        await asyncio.wait({turn})
+        if not turn.cancelled() and turn.exception() is not None:
+            raise turn.exception()
+
+    async def _begin_turn(self, record: SessionRecord,
+                          text: str) -> Optional[asyncio.Task]:
+        """Start a turn and return it, or None if the session had to queue."""
+        session_id = record.session_id
         if not record.live:
-            await self.resume_session(session_id)
+            await self._resume_locked(record)
         if not record.live:
             if record.queued:
                 # Held, not lost. Blocking here instead would be worse than
                 # useless: `send` is an HTTP call with a 40-second client
                 # timeout, and the slot may not free for many minutes.
                 self._enqueue(record, text)
-                return
+                return None
             raise FalconFoxError(f"could not resume session: {session_id}")
         # Orientation first, then anything else pending, then the user's
         # words -- each its own block, so no producer can displace another.
@@ -688,7 +781,16 @@ class SessionCoordinator:
         parts += record.pending_context
         record.pending_context = []
         parts.append(PromptPart(text=text))
-        await record.agent.send(parts)
+        running = record.turn is not None and not record.turn.done()
+        turn = asyncio.create_task(record.agent.send(parts))
+        # Stepped once before the lock is given up: the engine marks itself
+        # busy and emits the turn start without awaiting anything, so a
+        # second send waiting on this lock finds a turn in progress rather
+        # than opening another one on the same connection.
+        await asyncio.sleep(0)
+        if not running:
+            record.turn = turn
+        return turn
 
     async def attach(self, session_id: str, path: str,
                      caption: Optional[str] = None, ack: bool = True,
@@ -781,15 +883,19 @@ class SessionCoordinator:
         return {"removed": self.store.clear_files(session_id)}
 
     async def cancel(self, session_id: str) -> None:
-        record = self._require(session_id)
-        if record.agent is not None:
-            await record.agent.cancel()
+        async with self._locked(session_id) as record:
+            if record.agent is not None:
+                await record.agent.cancel()
 
     async def stop_session(self, session_id: str) -> None:
-        record = self._require(session_id)
+        async with self._locked(session_id) as record:
+            await self._stop_locked(record)
+
+    async def _stop_locked(self, record: SessionRecord) -> None:
         if record.ephemeral or not self._should_persist(record):
-            await self.delete_session(session_id)
+            await self._delete_locked(record)
             return
+        await self._settle_turn(record, "the session was stopped")
         agent = record.agent
         # Not live from here on, before any await: the slot this session held
         # is free the moment its agent is given up, and a second caller
@@ -801,9 +907,14 @@ class SessionCoordinator:
         self._emit({"type": "session_updated", **record.wire()})
 
     async def delete_session(self, session_id: str) -> None:
-        record = self._require(session_id)
+        async with self._locked(session_id) as record:
+            await self._delete_locked(record)
+
+    async def _delete_locked(self, record: SessionRecord) -> None:
+        session_id = record.session_id
         self.log.info("deleting session=%s name=%s live=%s", session_id,
                       record.name, record.live)
+        await self._settle_turn(record, "the session was deleted")
         agent = record.agent
         # The record is the whole of the session, so discarding it is the
         # whole of the cleanup. Nothing here lists fields, which is what used
@@ -815,8 +926,11 @@ class SessionCoordinator:
         self.store.delete(session_id)
         self._emit({"type": "session_removed", "session_id": session_id})
 
-    def rename_session(self, session_id: str, name: str) -> None:
-        record = self._require(session_id)
+    async def rename_session(self, session_id: str, name: str) -> None:
+        async with self._locked(session_id) as record:
+            self._rename_locked(record, name)
+
+    def _rename_locked(self, record: SessionRecord, name: str) -> None:
         name = (name or "").strip()
         if not name:
             raise FalconFoxError("session name must not be empty")
@@ -825,7 +939,7 @@ class SessionCoordinator:
         self._persist_meta(record)
         self._emit({"type": "session_updated", **record.wire()})
 
-    def set_tags(self, session_id: str, tags: list) -> list[str]:
+    async def set_tags(self, session_id: str, tags: list) -> list[str]:
         """Replace a session's tags, in the order given.
 
         Replace rather than add/remove, because the order is the payload as
@@ -833,39 +947,48 @@ class SessionCoordinator:
         first tag it recognises, so "which comes first" has to be sayable in
         one call. An empty list clears them.
         """
-        record = self._require(session_id)
-        record.tags = _normalize_tags(tags)
-        self._persist_meta(record)
-        self._emit({"type": "session_updated", **record.wire()})
-        return list(record.tags)
+        async with self._locked(session_id) as record:
+            record.tags = _normalize_tags(tags)
+            self._persist_meta(record)
+            self._emit({"type": "session_updated", **record.wire()})
+            return list(record.tags)
 
     # --- transcript utilities retained from the existing daemon --------
 
     async def revert_session(self, session_id: str, event_index: int) -> None:
-        record = self._require(session_id)
-        transcript = self._ensure_transcript(record)
-        if event_index < 0 or event_index >= len(transcript):
-            raise FalconFoxError(f"event_index {event_index} out of range")
-        target = transcript[event_index]
-        if target.get("type") != "message" or target.get("role") != "user":
-            raise FalconFoxError("revert target must be a user message")
-        truncated = transcript[:event_index]
-        agent = record.agent
-        if agent is not None:
-            record.agent = None
-            record.state = "stored"
-            await agent.stop()
-        record.acp_id = None
-        record.transcript = truncated
-        if record.persisted:
-            self.store.rewrite_transcript(session_id, truncated)
-            self._persist_meta(record)
-        self._emit({"type": "session_updated", **record.wire()})
-        self._emit({"type": "transcript_reset", "session_id": session_id,
-                    "transcript": truncated})
+        async with self._locked(session_id) as record:
+            transcript = self._ensure_transcript(record)
+            if event_index < 0 or event_index >= len(transcript):
+                raise FalconFoxError(f"event_index {event_index} out of range")
+            target = transcript[event_index]
+            if target.get("type") != "message" or target.get("role") != "user":
+                raise FalconFoxError("revert target must be a user message")
+            # Settled first, and the truncation read only afterwards: a turn
+            # still in flight has events to emit, and they belong on the
+            # transcript this rewrites rather than appended to the file after
+            # it has been rewritten.
+            await self._settle_turn(record, "the conversation was reverted")
+            truncated = self._ensure_transcript(record)[:event_index]
+            agent = record.agent
+            if agent is not None:
+                record.agent = None
+                record.state = "stored"
+                await agent.stop()
+            record.acp_id = None
+            record.transcript = truncated
+            if record.persisted:
+                self.store.rewrite_transcript(session_id, truncated)
+                self._persist_meta(record)
+            self._emit({"type": "session_updated", **record.wire()})
+            self._emit({"type": "transcript_reset", "session_id": session_id,
+                        "transcript": truncated})
 
     async def fork_session(self, session_id: str, event_index: Optional[int] = None) -> str:
-        source = self._require(session_id)
+        async with self._locked(session_id) as source:
+            return self._fork_locked(source, event_index)
+
+    def _fork_locked(self, source: SessionRecord,
+                     event_index: Optional[int]) -> str:
         transcript = list(self._ensure_transcript(source))
         if event_index is not None:
             if event_index < 0 or event_index > len(transcript):
@@ -906,10 +1029,13 @@ class SessionCoordinator:
         except KeyError as error:
             raise FalconFoxError(str(error)) from error
         prompt = f"{self.config.naming_prompt}\n\n--- transcript ---\n{transcript_text}"
+        # Named outside any lock: this is a whole model call, and holding the
+        # session against every other transition for its duration would be a
+        # worse bargain than the rename is worth.
         reply = await oneshot.one_shot(backend, Path(record.path), prompt)
         name = _clean_name(reply)
         if name:
-            self.rename_session(session_id, name)
+            await self.rename_session(session_id, name)
 
     def _transcript_text(self, record: SessionRecord, limit: int = 6000) -> str:
         """The conversation as text, for a backend that cannot reload it.
@@ -958,11 +1084,11 @@ class SessionCoordinator:
                     "options": session.config_options})
 
     async def set_config_option(self, session_id: str, config_id: str, value) -> None:
-        record = self._require(session_id)
-        if record.agent is None:
-            raise FalconFoxError("session must be live to change an option")
-        await record.agent.set_config_option(config_id, value)
-        self._publish_config_options(session_id, record.agent)
+        async with self._locked(session_id) as record:
+            if record.agent is None:
+                raise FalconFoxError("session must be live to change an option")
+            await record.agent.set_config_option(config_id, value)
+            self._publish_config_options(session_id, record.agent)
 
     async def _request_permission(self, payload: dict) -> Optional[str]:
         """Always allow when possible; empty options are an immediate denial.

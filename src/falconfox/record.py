@@ -23,6 +23,7 @@ two facts cannot disagree, because there is only one.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -83,6 +84,14 @@ class SessionRecord:
     # coordinator logged, so the line is written when it changes and not on
     # every event.
     reported_busy: bool = False
+
+    # Held by every method that changes this session, so two transitions
+    # cannot interleave. See the lock ordering in coordinator.py.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    # The turn in flight, if there is one. A handle rather than a flag,
+    # because a transition that cannot run beside a turn has to be able to
+    # end that turn and wait for it to be over.
+    turn: Optional[asyncio.Task] = field(default=None, repr=False)
 
     @property
     def live(self) -> bool:
@@ -150,6 +159,7 @@ class SessionRecord:
         goes from one list rather than from each caller's own.
         """
         self.agent = None
+        self.turn = None
         self.state = "stored"
         self.transcript = None
         self.config_options = None

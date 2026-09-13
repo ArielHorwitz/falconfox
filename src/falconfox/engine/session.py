@@ -10,6 +10,7 @@ agent; acceptable, and swappable later for shared-connection multiplexing.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
@@ -269,6 +270,13 @@ class AgentSession:
             )
             stop_reason = getattr(response, "stop_reason", None)
             self._report_usage(getattr(response, "usage", None))
+        except asyncio.CancelledError:
+            # The turn was taken away rather than finished: the coordinator
+            # does this when a transition cannot run beside it (a delete, a
+            # revert). Reported in the same shape a backend-side cancel
+            # produces, so no client has to learn a second one.
+            stop_reason = "cancelled"
+            raise
         except Exception as error:  # surface, don't crash the engine
             # The user sees the summary as a notice; keep the traceback for DEBUG
             # so a backend/protocol failure mid-turn is diagnosable.
