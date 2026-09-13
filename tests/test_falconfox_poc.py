@@ -571,10 +571,6 @@ class FakeTelegram:
         return [{"emoji": "📁", "custom_emoji_id": "5001"},
                 {"emoji": "❗️", "custom_emoji_id": "5002"}]
 
-    async def set_reaction(self, chat_id, message_id, emoji):
-        self.reactions = getattr(self, "reactions", [])
-        self.reactions.append((message_id, emoji))
-
     async def rename_topic(self, chat_id, thread, name):
         self.renamed = getattr(self, "renamed", [])
         self.renamed.append((thread, name))

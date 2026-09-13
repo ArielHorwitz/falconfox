@@ -20,7 +20,7 @@ from unittest.mock import patch
 from websockets.exceptions import ConnectionClosed
 
 from falconfox_telegram import bot as bot_module
-from falconfox_telegram.api import ApiError
+from falconfox_telegram.api import ApiError, TelegramApi
 from falconfox_telegram.bot import (BotConfig, DAEMON_DOWN, Dest,
                                     FalconFoxTelegramBot, Turn)
 
@@ -462,6 +462,20 @@ class WebsocketSendTests(unittest.IsolatedAsyncioTestCase):
                 bot._report_attachment("request-1", None))
             self.assertEqual([action["action"] for action in bot._ws.sent],
                              ["send", "attachment_result"])
+
+
+class FakeDriftTests(unittest.TestCase):
+    """`FakeTelegram` stands in for `TelegramApi` in most of the suite, so a
+    method it has and the real one does not is a test passing against a client
+    that does not exist. It kept `set_reaction` for months after reactions were
+    removed."""
+
+    def test_every_fake_method_exists_on_the_real_client(self):
+        fake = {name for name, value in vars(FakeTelegram).items()
+                if not name.startswith("_") and callable(value)}
+        missing = sorted(name for name in fake if not hasattr(TelegramApi, name))
+        self.assertEqual(missing, [],
+                         "the fake answers calls the Bot API client cannot make")
 
 
 class _NoWatchdog:

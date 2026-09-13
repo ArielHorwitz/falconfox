@@ -111,11 +111,6 @@ There is no focus pointer and no `/switch`: a topic *is* the address, so there
 is nothing left to switch. During turns the bot refreshes Telegram's typing
 indicator, suppresses tool calls, and sends the final reply as one message.
 
-Your own message carries what became of it, as a reaction: 👀 queued, 🫡 handed
-to the daemon, ✍ being worked on, 👌 finished, 💔 cancelled or dropped, 😱 failed.
-A reaction costs no message, which is the point in a chat where every line is
-clutter on a phone screen.
-
 Every session is told what it is running inside, once, on the first message it
 ever receives. That **orientation** is composed rather than written in one
 place: a global piece about being a FalconFox session, then one piece per
