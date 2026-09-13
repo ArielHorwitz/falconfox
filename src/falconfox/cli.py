@@ -300,6 +300,12 @@ def cmd_tag(args) -> None:
     print(" ".join(tags) if tags else "(no tags)")
 
 
+# Commands that are a session id and nothing else. Each posts the daemon action
+# of its own name, so the names here and the daemon's action table (see
+# falconfox/web/actions.py) have to agree; a test holds them to it.
+SIMPLE_COMMANDS = ("resume", "stop", "delete")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="falconfox",
                                      description="Remote ACP session daemon and control plane.")
@@ -360,7 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
     read.add_argument("--json", action="store_true")
     read.set_defaults(func=cmd_read)
 
-    for command in ("resume", "stop", "delete"):
+    for command in SIMPLE_COMMANDS:
         action = sub.add_parser(command)
         action.add_argument("session_id")
         action.set_defaults(func=cmd_simple)

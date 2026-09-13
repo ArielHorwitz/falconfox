@@ -2885,6 +2885,17 @@ class FalconFoxTelegramBot:
                             event.get("type"), exc_info=True)
 
     async def _handle_event(self, event: dict) -> None:
+        if event.get("type") == "action_error":
+            # The daemon refusing an action this client sent: an unknown name,
+            # or a frame missing an argument. Nothing to recover, since the
+            # action never ran, but a refusal that only the daemon's own log
+            # knows about is how wire drift stays invisible. Handled above the
+            # session guard below, because a refused action need not have named
+            # a session.
+            log.warning("the daemon refused an action: action=%s session=%s: %s",
+                        event.get("action"), event.get("session_id"),
+                        event.get("error"))
+            return
         session_id = event.get("session_id")
         if not session_id:
             return

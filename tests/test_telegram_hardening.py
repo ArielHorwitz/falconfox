@@ -675,6 +675,31 @@ class WebsocketSendTests(unittest.IsolatedAsyncioTestCase):
                              ["send", "attachment_result"])
 
 
+class RefusedActionTests(unittest.IsolatedAsyncioTestCase):
+    """The daemon answers an action it will not run with an event, which used
+    to be a log line in the daemon and silence here."""
+
+    async def test_a_refusal_is_logged_and_nothing_else_happens(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = _bot(directory)
+            with self.assertLogs("falconfox.telegram", "WARNING") as logs:
+                # No session id, because a refused action need not have named
+                # one -- and an event without one is dropped unread.
+                await bot._handle_event({"type": "action_error",
+                                         "action": "wibble",
+                                         "error": "unknown action: wibble"})
+            self.assertIn("refused", logs.output[0])
+            self.assertIn("wibble", logs.output[0])
+
+    async def test_an_event_type_this_client_does_not_know_is_ignored(self):
+        # What the daemon relies on when it adds an event type: a client built
+        # before it carries on working.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = _bot(directory)
+            await bot._handle_event({"type": "invented_later",
+                                     "session_id": "abcd1234"})
+
+
 class FakeDriftTests(unittest.TestCase):
     """`FakeTelegram` stands in for `TelegramApi` in most of the suite, so a
     method it has and the real one does not is a test passing against a client
