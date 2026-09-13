@@ -9,6 +9,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import shlex
 import tempfile
 import time
@@ -56,6 +57,31 @@ TOPIC_GONE = "message thread not found"
 # reappearing somewhere else is not a mystery.
 TOPIC_REPLACED = ("🧵 The previous topic for this session was gone, so this is "
                   "a new one.")
+# What a refused send for a turn is worth waiting out. The reply is the one
+# message of a turn that cannot be read off the screen some other way, so a
+# refusal that may pass -- a 429, one of this host's read timeouts -- deserves
+# another go rather than a debug line.
+#
+# The ceiling is what keeps it honest. This runs on the event pipeline, so
+# every second spent waiting is a second in which no session's events are
+# handled; a 429 asking for half a minute is better answered by telling the
+# user the reply did not arrive. Three attempts, and at worst about ten
+# seconds of pause between them.
+SEND_ATTEMPTS = 3
+SEND_BACKOFF_SECONDS = (1.0, 3.0)
+SEND_PAUSE_CEILING = 5.0
+# Telegram states the wait in the description ("Too Many Requests: retry after
+# 30"), which is all an ApiError carries: `_json_request` reads `description`
+# and drops the `parameters` object that also holds it.
+_RETRY_AFTER = re.compile(r"retry after (\d+)", re.IGNORECASE)
+
+
+def _retry_pause(error: Exception, attempt: int) -> float:
+    """How long to wait before trying a refused send again."""
+    asked = _RETRY_AFTER.search(str(error))
+    if asked:
+        return min(float(asked.group(1)), SEND_PAUSE_CEILING)
+    return SEND_BACKOFF_SECONDS[min(attempt, len(SEND_BACKOFF_SECONDS)) - 1]
 # How long the turn map may sit dirty before it reaches disk. Nothing reads
 # the file during a connection: it exists for the *next* one, which settles
 # what it finds there against the daemon. So a write owes only that it happens
@@ -155,6 +181,9 @@ class Turn:
     reply_parts: list[str] = field(default_factory=list)
     consumed: int = 0
     delivered: int = 0
+    # Characters Telegram would not take, after the retries gave up. The turn
+    # is over by then, so this exists to be reported rather than to be acted on.
+    undelivered: int = 0
     # The progress message: its id, the narration under it, and what the
     # header said the last time an edit went out, with when that was.
     progress_msg: Optional[int] = None
@@ -2593,24 +2622,40 @@ class FalconFoxTelegramBot:
         return await self._ensure_topic({**session, "session_id": session_id})
 
     async def _send_for_turn(self, session_id: str, dest: Dest, send) -> Dest:
-        """Send on a session's behalf, replacing a topic that has gone.
+        """Send on a session's behalf, against the two ways Telegram refuses.
 
-        `send` takes the destination rather than closing over it, because the
-        retry goes somewhere else: a new topic, made here, and answered with
-        for the rest of the turn.
+        "Thread not found" is permanent, and it is about the topic: unbind,
+        make a new one, deliver there, and answer with the new destination so
+        the rest of the turn follows the session to it. `send` takes the
+        destination rather than closing over it precisely because the retry
+        goes somewhere else.
 
-        Only the "thread not found" class unbinds. A rate limit or a read
-        timeout says nothing about the topic, and acting on one would throw a
-        live topic away and start a second beside it.
+        Anything else -- a rate limit, a read timeout -- says nothing about
+        the topic and may well pass, so it is waited out and tried again a
+        couple of times before it is raised. Acting on one as though the topic
+        were gone would throw a live topic away and start a second beside it.
+
+        Each `send` is retried on its own, so a reply that spans several
+        messages can never deliver one of them twice.
         """
-        try:
-            await send(dest)
-            return dest
-        except ApiError as error:
-            if (dest.thread is None or self._topics.get(session_id) != dest.thread
-                    or TOPIC_GONE not in str(error).lower()):
-                raise
-            gone = error
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await send(dest)
+                return dest
+            except ApiError as error:
+                if (dest.thread is not None
+                        and self._topics.get(session_id) == dest.thread
+                        and TOPIC_GONE in str(error).lower()):
+                    gone = error
+                    break
+                if attempt >= SEND_ATTEMPTS:
+                    raise
+                pause = _retry_pause(error, attempt)
+                log.warning("send for session=%s refused (%s); trying again "
+                            "in %.0fs", session_id, error, pause)
+                await asyncio.sleep(pause)
         log.warning("topic %s for session %s is gone (%s); replacing it",
                     dest.thread, session_id, gone)
         thread = await self._replace_topic(session_id)
@@ -2648,7 +2693,14 @@ class FalconFoxTelegramBot:
     async def _send_reply(self, turn: Turn) -> Dest:
         """Deliver the turn's answer: the text after the last tool call,
         threaded to the prompt that asked for it. Answers with where it
-        actually landed, which is a new topic when the old one had gone."""
+        actually landed, which is a new topic when the old one had gone.
+
+        A refusal that outlives the retries ends here rather than propagating.
+        The buffer is already drained and the turn is already off the map, so
+        there is nobody left to try again: what is owed is an account of it,
+        which is the WARNING below and -- since `delivered` stays 0 -- the
+        silent-turn notice in the chat.
+        """
         raw = "".join(turn.reply_parts)
         turn.reply_parts = []
         turn.consumed += len(raw)
@@ -2664,8 +2716,14 @@ class FalconFoxTelegramBot:
             return turn.dest
         log.info("reply: session=%s dest=%s chars=%d",
                  turn.session_id, turn.dest, len(text))
-        turn.dest = await self._send_rendered(turn.session_id, turn.dest, text,
-                                              turn.prompt_msg)
+        try:
+            turn.dest = await self._send_rendered(turn.session_id, turn.dest,
+                                                  text, turn.prompt_msg)
+        except ApiError as error:
+            turn.undelivered = len(text)
+            log.warning("reply not delivered: session=%s chars=%d (%s)",
+                        turn.session_id, len(text), error)
+            return turn.dest
         turn.delivered += len(text)
         self._persist_turns()
         return turn.dest
@@ -3101,15 +3159,29 @@ class FalconFoxTelegramBot:
                 # with nothing delivered is the silent failure this client
                 # kept producing -- so it stops being silent, in both places.
                 streamed = (event or {}).get("output_chars")
-                if streamed:
+                if turn.undelivered:
+                    # There was an answer, and this chat is the only place it
+                    # was ever going to appear. Naming Telegram matters: it is
+                    # the difference between an agent that said nothing and a
+                    # reply that was written and could not be handed over.
+                    detail = (f"Telegram refused the {turn.undelivered}-character "
+                              f"reply {SEND_ATTEMPTS} times")
+                elif streamed:
                     detail = (f"the agent wrote {streamed} characters "
                               "that were lost on the way to this chat")
                 else:
                     detail = f"the agent produced no output; stop reason: {stop or 'unknown'}"
                 log.warning("turn delivered nothing: session=%s turn=%s %s",
                             session_id, turn_id, detail)
-                await self._say(dest, SILENT_TURN.format(detail=detail),
-                                reply_to=turn.prompt_msg)
+                try:
+                    await self._say(dest, SILENT_TURN.format(detail=detail),
+                                    reply_to=turn.prompt_msg)
+                except ApiError:
+                    # The report on a failed send failing is not worth a
+                    # second failure: the log line above is the account of
+                    # last resort, and the queue still has to be flushed.
+                    log.warning("could not report the silent turn for session=%s",
+                                session_id, exc_info=True)
         # Last, and outside the branch above: a queue drains whenever a turn
         # ends, however it ended. /stop does not flush anything itself -- it
         # ends the turn, and this is what ending a turn does.

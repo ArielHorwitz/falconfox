@@ -36,6 +36,13 @@ def _bot(directory: str) -> FalconFoxTelegramBot:
     return bot
 
 
+def _instant_retries():
+    """The send-retry policy with the waiting taken out of it. What is under
+    test is what happens across the attempts, never how long they take."""
+    return patch.multiple(bot_module, SEND_BACKOFF_SECONDS=(0.0, 0.0),
+                          SEND_PAUSE_CEILING=0.0)
+
+
 class _EventStream:
     """The daemon's websocket: a fixed list of events, then the socket ends."""
 
@@ -86,23 +93,31 @@ class RefusingTelegram(FakeTelegram):
         raise ApiError("Too Many Requests: retry after 30")
 
 
+class RefusingNoticeTelegram(FakeTelegram):
+    """Telegram that will not take a plain message."""
+
+    async def message(self, chat_id, text, reply_to=None, silent=False, thread=None):
+        raise ApiError("Too Many Requests: retry after 30")
+
+
 class TelegramFailureIsNotDaemonFailureTests(unittest.IsolatedAsyncioTestCase):
     """Survey F1: a send that fails propagated out of the event loop, and the
     reconnect handler read it as the daemon being gone -- announcing an outage
     of a healthy daemon, then resending the recovered turn to the same dead
     destination, forever."""
 
-    async def test_a_failing_reply_send_does_not_end_the_event_loop(self):
+    async def test_an_event_that_cannot_be_handled_does_not_end_the_loop(self):
+        # The capacity notice is the shortest real path to an event that
+        # raises: it has nowhere of its own to put a send failure. The reply
+        # send used to be that path, and is now absorbed further down (see
+        # `RefusedReplyTests`), which is why this drives a different event.
         with tempfile.TemporaryDirectory() as directory:
             bot = _bot(directory)
-            bot.telegram = RefusingTelegram()
-            bot._turns["session"] = Turn(
-                "session", Dest(-1001, 20),
-                reply_parts=["the answer nobody will see"], working=True)
+            bot.telegram = RefusingNoticeTelegram()
+            bot._bind("session", 20)
             bot._ws = _EventStream(
-                {"type": "turn_ended", "session_id": "session", "turn_id": "t1",
-                 "outcome": "completed", "stop_reason": "end_turn",
-                 "output_chars": 25},
+                {"type": "notice", "kind": "capacity", "session_id": "session",
+                 "message": "paused for capacity"},
                 {"type": "session_added", "session_id": "later", "name": "later"},
             )
             with self.assertLogs("falconfox.telegram", "WARNING") as logs:
@@ -111,7 +126,7 @@ class TelegramFailureIsNotDaemonFailureTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("later", bot._topics,
                           "the event after the failure is still handled")
             self.assertTrue(
-                any("session" in line and "turn_ended" in line
+                any("session" in line and "notice" in line
                     for line in logs.output),
                 f"the dropped event must name the session and its type: {logs.output}")
 
@@ -187,6 +202,90 @@ class _Daemon:
         return {"session_id": session_id, "name": self._name, "path": "/tmp"}
 
 
+class FlakyReplyTelegram(FakeTelegram):
+    """A reply send that refuses a few times and then works, which is what a
+    rate limit or one of this host's read timeouts actually looks like."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.attempts = 0
+        self._left = failures
+
+    async def html_message(self, chat_id, html_text, plain_fallback, reply_to=None,
+                           thread=None):
+        self.attempts += 1
+        if self._left:
+            self._left -= 1
+            raise ApiError("Too Many Requests: retry after 1")
+        await super().html_message(chat_id, html_text, plain_fallback,
+                                   reply_to=reply_to, thread=thread)
+
+
+class RefusedReplyTests(unittest.IsolatedAsyncioTestCase):
+    """The reply is the one message of a turn that cannot be read off the
+    screen some other way, so a refusal that may pass is waited out -- and one
+    that does not pass is said out loud rather than dropped in a debug log."""
+
+    def _bot_mid_turn(self, directory, telegram):
+        bot = _bot(directory)
+        bot.telegram = telegram
+        bot.daemon = _Daemon()
+        bot._bind("session", 20)
+        bot._turns["session"] = Turn("session", Dest(-1001, 20),
+                                     reply_parts=["the answer"], working=True)
+        return bot
+
+    async def _end_turn(self, bot):
+        await bot._handle_event({"type": "turn_ended", "session_id": "session",
+                                 "turn_id": "t1", "outcome": "completed",
+                                 "stop_reason": "end_turn", "output_chars": 10})
+
+    async def test_a_reply_refused_twice_is_still_delivered_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            telegram = FlakyReplyTelegram(failures=2)
+            bot = self._bot_mid_turn(directory, telegram)
+            with _instant_retries():
+                await self._end_turn(bot)
+            self.assertEqual(telegram.attempts, 3)
+            self.assertEqual([entry[2] for entry in telegram.html_messages],
+                             ["the answer"], "delivered once, not once per attempt")
+            self.assertEqual([text for _thread, text in telegram.messages
+                              if "without delivering" in text], [],
+                             "a reply that arrived is not a silent turn")
+
+    async def test_a_reply_that_never_lands_says_so_rather_than_vanishing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory, RefusingTelegram())
+            with _instant_retries():
+                with self.assertLogs("falconfox.telegram", "WARNING") as logs:
+                    # Must not raise: the turn is already torn down, so an
+                    # exception here is a turn nobody ever reports on.
+                    await self._end_turn(bot)
+            self.assertTrue(
+                any("session" in line and "10" in line for line in logs.output),
+                f"the session and the size of what was lost: {logs.output}")
+            notice = [text for _thread, text in bot.telegram.messages
+                      if "without delivering" in text]
+            self.assertEqual(len(notice), 1, f"the chat is told: {bot.telegram.messages}")
+            self.assertIn("refused", notice[0])
+            self.assertIn("10-character", notice[0])
+
+    def test_the_pause_honours_telegrams_own_retry_after_within_reason(self):
+        # Telegram puts the number in the description, which is all `ApiError`
+        # carries. Honoured, but capped: this runs on the event pipeline, so a
+        # 429 that wants half a minute is better answered with the notice.
+        self.assertEqual(
+            bot_module._retry_pause(ApiError("Too Many Requests: retry after 2"), 1),
+            2.0)
+        self.assertEqual(
+            bot_module._retry_pause(ApiError("Too Many Requests: retry after 30"), 1),
+            bot_module.SEND_PAUSE_CEILING)
+        self.assertEqual(bot_module._retry_pause(ApiError("TimeoutError"), 1),
+                         bot_module.SEND_BACKOFF_SECONDS[0])
+        self.assertEqual(bot_module._retry_pause(ApiError("TimeoutError"), 2),
+                         bot_module.SEND_BACKOFF_SECONDS[1])
+
+
 class ThreadRefusingTelegram(FakeTelegram):
     """Telegram that refuses every send to one thread, with a rate limit --
     nothing to do with the topic, and permanent for as long as it lasts."""
@@ -253,7 +352,8 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
 
             names = [session_id for session_id, _thread in persisted]
             bot = self._bot(directory, names, refused=22)
-            with self.assertLogs("falconfox.telegram", "WARNING") as logs:
+            with _instant_retries(), \
+                    self.assertLogs("falconfox.telegram", "WARNING") as logs:
                 await bot._reconcile_persisted_turns()
             self.assertEqual([entry[0] for entry in bot.telegram.html_messages],
                              [21, 23],
@@ -339,10 +439,10 @@ class DeadTopicTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_ordinary_send_failure_never_unbinds_the_topic(self):
         # A rate limit or a read timeout says nothing about the topic. Reading
         # one as "the topic is gone" would throw away a live topic and leave a
-        # second one beside it.
+        # second one beside it. It is retried and then reported instead.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot_mid_turn(directory, RefusingTelegram())
-            with self.assertRaises(ApiError):
+            with _instant_retries():
                 await self._end_turn(bot)
             self.assertEqual(bot._topics["session"], 20, "the binding stands")
             self.assertEqual(getattr(bot.telegram, "topics", []), [])
