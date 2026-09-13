@@ -12,9 +12,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from websockets.exceptions import ConnectionClosed
@@ -673,6 +675,44 @@ class WebsocketSendTests(unittest.IsolatedAsyncioTestCase):
                 bot._report_attachment("request-1", None))
             self.assertEqual([action["action"] for action in bot._ws.sent],
                              ["send", "attachment_result"])
+
+
+class OrientationWaitTests(unittest.TestCase):
+    """Buglist: the bot warned about orientation it went on to register.
+
+    Both units restart together, so on an ordinary restart the bot looks for
+    the daemon's client directory before the daemon has published it. That
+    warned, at a level that says something needs attention, about a consequence
+    that did not happen: the next connection registered a few seconds later.
+    """
+
+    def test_the_first_miss_says_it_is_waiting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = _bot(directory)
+            with patch.object(bot_module.falconfox_state, "read_server_info",
+                              return_value=None):
+                with self.assertLogs("falconfox.telegram", "INFO") as logs:
+                    bot._register_orientation()
+            self.assertEqual([record.levelno for record in logs.records],
+                             [logging.INFO])
+            self.assertIn("waiting for the daemon", logs.output[0])
+
+    def test_a_miss_after_it_worked_is_a_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = _bot(directory)
+            published = Path(directory).joinpath("run-1/clients")
+            published.mkdir(parents=True)
+            with patch.object(bot_module.falconfox_state, "read_server_info",
+                              return_value=SimpleNamespace(
+                                  pid=1, port=9725, started="now",
+                                  clients_dir=str(published))):
+                bot._register_orientation()
+            self.assertTrue(published.joinpath("telegram/orientation.md").is_file())
+            with patch.object(bot_module.falconfox_state, "read_server_info",
+                              return_value=None):
+                with self.assertLogs("falconfox.telegram", "WARNING") as logs:
+                    bot._register_orientation()
+            self.assertIn("without Telegram orientation", logs.output[0])
 
 
 class _SnapshotSocket:

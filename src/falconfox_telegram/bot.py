@@ -832,6 +832,11 @@ class FalconFoxTelegramBot:
         # what is still pending is this file.
         self._trays: dict[str, list[dict]] = {}
         self._tray_file = self.state_dir.joinpath("tray.json")
+        # Whether orientation has ever been written where the daemon reads it.
+        # It is what separates "the daemon is not up yet", which every restart
+        # goes through, from "the daemon's directory has gone", which is worth
+        # a warning. See `_clients_dir`.
+        self._orientation_registered = False
         self._learned_forum: int | None = None
         self._bot_username: str | None = None
         # Directories for the two infrastructure sessions to run in. Nothing
@@ -1204,6 +1209,7 @@ class FalconFoxTelegramBot:
             log.warning("could not write orientation to %s -- sessions will "
                         "spawn without it", mine, exc_info=True)
             return
+        self._orientation_registered = True
         log.info("orientation registered at %s", mine)
 
     def _clients_dir(self) -> Optional[Path]:
@@ -1211,8 +1217,20 @@ class FalconFoxTelegramBot:
         info = falconfox_state.read_server_info()
         directory = getattr(info, "clients_dir", None) if info else None
         if not directory:
-            log.warning("the daemon published no client directory; sessions "
-                        "will spawn without Telegram orientation")
+            if self._orientation_registered:
+                # The directory was there and is not any more, which is not a
+                # race and will not fix itself: the sessions spawned from here
+                # on really do go without orientation.
+                log.warning("the daemon published no client directory; sessions "
+                            "will spawn without Telegram orientation")
+            else:
+                # The ordinary restart. Both units come up together and the bot
+                # is usually running before the daemon has written server.json,
+                # so the first miss is expected and the next connection
+                # registers. It used to be a WARNING that named a consequence
+                # that then did not happen, on every restart.
+                log.info("waiting for the daemon to publish its client "
+                         "directory before registering orientation")
             return None
         return Path(directory)
 

@@ -8,21 +8,6 @@ Record what fails, under what conditions, and how bad it is — enough that
 whoever picks it up does not have to rediscover it. Delete the entry when the
 fix lands.
 
-## The bot warns about orientation it goes on to register
-
-*Seen on every restart, 2026-09-10. Cosmetic.*
-
-Restarting both units starts the bot before the daemon has published
-`server.json`, so the bot logs `the daemon published no client directory;
-sessions will spawn without Telegram orientation` at WARNING. It then
-reconnects on its normal retry and logs `orientation registered at ...` a few
-seconds later.
-
-The race is expected and self-correcting. The warning is not: it states a
-consequence that does not happen, at a level that says something needs
-attention, on an ordinary restart. Either say it is waiting for the daemon,
-or say nothing until a retry has actually failed.
-
 ## Telegram calls from this host intermittently hang until the read timeout
 
 *Diagnosed while dogfooding the turn-feedback simplification, 2026-09-12.
