@@ -1001,39 +1001,57 @@ class FalconFoxTelegramBot:
             return
         states = {item["session_id"]: item["state"] for item in await self.daemon.sessions()}
         for session_id, record in entries.items():
-            if "chat" not in record or "thread" not in record:
-                # Written by a pre-forum build, whose "chat" ids mean nothing
-                # here. Dropping is right: the cutover changed the config, so
-                # such a record cannot be delivered anywhere sensible.
-                log.info("dropping pre-forum persisted turn for %s", session_id)
-                continue
-            dest = Dest(record["chat"], record["thread"])
-            if dest.thread is None and dest.chat == self.forum_chat_id:
-                # Manager turns are session-management chatter, and the
-                # manager session is ephemeral and respawned on every connect.
-                log.info("dropping persisted manager turn for %s", session_id)
-                continue
-            state = states.get(session_id)
-            if state is None:
-                log.warning("persisted turn lost: session=%s no longer exists", session_id)
-                await self._say(dest, LOST_TURN.format(session_id=session_id))
-                if record.get("queued"):
-                    # The turn's own reply is gone with the session; say the
-                    # queued messages went with it rather than dropping them
-                    # silently, since the user is still expecting them to send.
-                    await self._say(dest, LOST_QUEUE.format(
-                        count=len(record["queued"])))
-            elif state in ("working", "starting"):
-                self._adopt_turn(session_id, record)
-                await self._set_activity(session_id, "working")
-            else:
-                await self._deliver_recovered_turn(session_id, record)
-                # The turn ended while the bot was away, so nothing will call
-                # the flush from _finish_turn. This is that moment, late.
-                if record.get("queued"):
-                    self._queues[session_id] = list(record["queued"])
-                    await self._flush_queue(session_id, dest)
+            try:
+                await self._settle_persisted_turn(session_id, record, states)
+            except Exception:
+                # One entry at a time, for the same reason `_receive_events`
+                # takes one event at a time. Without this a single refused
+                # send skipped every entry after it *and* the cleanup below,
+                # so the offending record stayed on disk and aborted the next
+                # connection in the same place -- stranding the turns behind
+                # it not for one reconnect but for good.
+                log.warning("could not settle the persisted turn for session=%s",
+                            session_id, exc_info=True)
+        # Unconditional, and that is the point: an entry nobody could settle is
+        # an entry nobody will ever settle, so it goes rather than poisoning
+        # every future connection. What survives here is what was adopted.
         self._persist_turns()
+
+    async def _settle_persisted_turn(self, session_id: str, record: dict,
+                                     states: dict) -> None:
+        """One persisted turn, against what the daemon says of its session."""
+        if "chat" not in record or "thread" not in record:
+            # Written by a pre-forum build, whose "chat" ids mean nothing
+            # here. Dropping is right: the cutover changed the config, so
+            # such a record cannot be delivered anywhere sensible.
+            log.info("dropping pre-forum persisted turn for %s", session_id)
+            return
+        dest = Dest(record["chat"], record["thread"])
+        if dest.thread is None and dest.chat == self.forum_chat_id:
+            # Manager turns are session-management chatter, and the
+            # manager session is ephemeral and respawned on every connect.
+            log.info("dropping persisted manager turn for %s", session_id)
+            return
+        state = states.get(session_id)
+        if state is None:
+            log.warning("persisted turn lost: session=%s no longer exists", session_id)
+            await self._say(dest, LOST_TURN.format(session_id=session_id))
+            if record.get("queued"):
+                # The turn's own reply is gone with the session; say the
+                # queued messages went with it rather than dropping them
+                # silently, since the user is still expecting them to send.
+                await self._say(dest, LOST_QUEUE.format(
+                    count=len(record["queued"])))
+        elif state in ("working", "starting"):
+            self._adopt_turn(session_id, record)
+            await self._set_activity(session_id, "working")
+        else:
+            await self._deliver_recovered_turn(session_id, record)
+            # The turn ended while the bot was away, so nothing will call
+            # the flush from _finish_turn. This is that moment, late.
+            if record.get("queued"):
+                self._queues[session_id] = list(record["queued"])
+                await self._flush_queue(session_id, dest)
 
     def _adopt_turn(self, session_id: str, record: dict) -> Turn:
         log.info("adopting in-flight turn: session=%s turn=%s consumed=%d",

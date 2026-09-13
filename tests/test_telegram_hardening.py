@@ -187,6 +187,89 @@ class _Daemon:
         return {"session_id": session_id, "name": self._name, "path": "/tmp"}
 
 
+class ThreadRefusingTelegram(FakeTelegram):
+    """Telegram that refuses every send to one thread, with a rate limit --
+    nothing to do with the topic, and permanent for as long as it lasts."""
+
+    def __init__(self, refused: int) -> None:
+        super().__init__()
+        self._refused = refused
+
+    def _check(self, thread) -> None:
+        if thread == self._refused:
+            raise ApiError("Too Many Requests: retry after 30")
+
+    async def message(self, chat_id, text, reply_to=None, silent=False, thread=None):
+        self._check(thread)
+        return await super().message(chat_id, text, reply_to=reply_to,
+                                     silent=silent, thread=thread)
+
+    async def html_message(self, chat_id, html_text, plain_fallback, reply_to=None,
+                           thread=None):
+        self._check(thread)
+        await super().html_message(chat_id, html_text, plain_fallback,
+                                   reply_to=reply_to, thread=thread)
+
+
+class _RecoveryDaemon:
+    """Sessions that all went idle while the bot was away, each with a
+    transcript holding the reply nobody delivered."""
+
+    def __init__(self, session_ids) -> None:
+        self._session_ids = list(session_ids)
+
+    async def sessions(self):
+        return [{"session_id": session_id, "name": session_id,
+                 "state": "idle", "path": "/tmp"}
+                for session_id in self._session_ids]
+
+    async def session(self, session_id, include_transcript=False):
+        return {"session_id": session_id, "name": session_id, "path": "/tmp",
+                "transcript": [
+                    {"type": "message", "role": "user", "text": "ask"},
+                    {"type": "message", "role": "agent",
+                     "text": f"answer for {session_id}"}]}
+
+
+class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
+    """Settling the persisted turn map is a batch, and one entry's Telegram
+    failure used to end it: everything after it in iteration order was skipped
+    and the cleanup never ran, so the offending entry stayed on disk and
+    aborted the next reconnect too, and the one after that."""
+
+    def _bot(self, directory, session_ids, refused):
+        bot = _bot(directory)
+        bot.telegram = ThreadRefusingTelegram(refused=refused)
+        bot.daemon = _RecoveryDaemon(session_ids)
+        return bot
+
+    async def test_one_poisoned_entry_does_not_strand_the_others(self):
+        with tempfile.TemporaryDirectory() as directory:
+            persisted = (("one", 21), ("two", 22), ("three", 23))
+            old = _bot(directory)
+            for session_id, thread in persisted:
+                old._turns[session_id] = Turn(session_id, Dest(-1001, thread))
+            old._persist_turns()
+
+            names = [session_id for session_id, _thread in persisted]
+            bot = self._bot(directory, names, refused=22)
+            with self.assertLogs("falconfox.telegram", "WARNING") as logs:
+                await bot._reconcile_persisted_turns()
+            self.assertEqual([entry[0] for entry in bot.telegram.html_messages],
+                             [21, 23],
+                             "the entries after the failing one are still settled")
+            self.assertTrue(any("two" in line for line in logs.output),
+                            f"the entry that failed is named: {logs.output}")
+            self.assertEqual(json.loads(bot._turns_file.read_text()), {},
+                             "nothing is left on disk to abort the next connection")
+
+            # And the next connection has nothing left to re-abort on.
+            again = self._bot(directory, names, refused=22)
+            await again._reconcile_persisted_turns()
+            self.assertEqual(again.telegram.html_messages, [])
+            self.assertEqual(again.telegram.messages, [])
+
+
 class DeadTopicTests(unittest.IsolatedAsyncioTestCase):
     """Buglist: deleting a topic by hand stranded its session. There is no
     `forum_topic_deleted` service message and the Bot API cannot enumerate
