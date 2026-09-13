@@ -44,6 +44,18 @@ DAEMON_UP = "\u2705 FalconFox is up"
 # it is worse than noise: the caller never records what it wanted, so it asks
 # again on the next event, forever.
 TOPIC_UNCHANGED = "TOPIC_NOT_MODIFIED"
+# Telegram's answer when a message is addressed to a thread that is not there
+# any more, which is what a topic deleted by hand leaves behind. Matched as a
+# substring of the description, since it arrives prefixed ("Bad Request: ...")
+# and the Bot API has no numeric code for it. There is no service message for
+# a deleted topic and no way to enumerate topics, so a refused send is the
+# only notice the bot will ever get.
+TOPIC_GONE = "message thread not found"
+# Said once, in the new topic. The old one and everything in it is gone, so
+# there is nothing to point at -- only the fact, so that a conversation
+# reappearing somewhere else is not a mystery.
+TOPIC_REPLACED = ("🧵 The previous topic for this session was gone, so this is "
+                  "a new one.")
 # Seconds to wait after a reconcile call that actually fired. See the comment
 # in `_reconcile_topics` for why this is paced on work rather than on loops.
 RECONCILE_PACE = 4.0
@@ -2481,9 +2493,63 @@ class FalconFoxTelegramBot:
             self._progress_sent.pop(session_id, None)
             log.debug("progress update failed for %s: %s", session_id, error)
 
-    async def _send_reply(self, session_id: str, dest: Dest) -> None:
+    async def _replace_topic(self, session_id: str) -> Optional[int]:
+        """The session's topic is gone: unbind it and make a fresh one.
+
+        The reactive fix the buglist sketched and deferred. It cannot be
+        proactive -- `getForumTopic` and `getForumTopics` do not exist, so
+        there is nothing to reconcile a binding against -- and it cannot be
+        reported by Telegram either, since a deleted topic sends no service
+        message. A send that comes back "thread not found" is the whole of
+        the evidence available.
+        """
+        self._unbind(session_id)
+        try:
+            session = await self.daemon.session(session_id)
+        except ApiError:
+            # Only the title suffers: a topic named after the id is worse than
+            # one named after the session, and far better than no topic.
+            log.warning("could not read session %s while replacing its topic",
+                        session_id, exc_info=True)
+            session = {}
+        return await self._ensure_topic({**session, "session_id": session_id})
+
+    async def _send_for_turn(self, session_id: str, dest: Dest, send) -> Dest:
+        """Send on a session's behalf, replacing a topic that has gone.
+
+        `send` takes the destination rather than closing over it, because the
+        retry goes somewhere else: a new topic, made here, and answered with
+        for the rest of the turn.
+
+        Only the "thread not found" class unbinds. A rate limit or a read
+        timeout says nothing about the topic, and acting on one would throw a
+        live topic away and start a second beside it.
+        """
+        try:
+            await send(dest)
+            return dest
+        except ApiError as error:
+            if (dest.thread is None or self._topics.get(session_id) != dest.thread
+                    or TOPIC_GONE not in str(error).lower()):
+                raise
+            gone = error
+        log.warning("topic %s for session %s is gone (%s); replacing it",
+                    dest.thread, session_id, gone)
+        thread = await self._replace_topic(session_id)
+        if thread is None:
+            # `_create_topic` has already told the owner in the private chat
+            # that the forum is unusable. The original failure is still the
+            # caller's to hear about.
+            raise gone
+        dest = Dest(self.forum_chat_id, thread)
+        await self._say(dest, TOPIC_REPLACED)
+        await send(dest)
+        return dest
+
+    async def _send_reply(self, session_id: str, dest: Dest) -> Dest:
         """Deliver the turn's answer: the text after the last tool call,
-        threaded to the prompt that asked for it."""
+        threaded to the prompt that asked for it. Answers with where it
+        actually landed, which is a new topic when the old one had gone."""
         raw = "".join(self._reply_parts.get(session_id, []))
         self._reply_parts[session_id] = []
         self._consumed[session_id] = self._consumed.get(session_id, 0) + len(raw)
@@ -2497,15 +2563,22 @@ class FalconFoxTelegramBot:
                 self._progress_lines.get(session_id, []))
                 if not line.startswith("⚙️")), "")
         if not text:
-            return
+            return dest
         log.info("reply: session=%s dest=%s chars=%d", session_id, dest, len(text))
         prompt_msg = self._prompt_msg.get(session_id)
         for index, rendered in enumerate(render_messages(text)):
-            await self.telegram.html_message(
-                dest.chat, rendered.html, rendered.plain,
-                reply_to=prompt_msg if index == 0 else None, thread=dest.thread)
+
+            async def deliver(where: Dest, rendered=rendered, index=index) -> None:
+                # The prompt lives in the old topic when this is a retry, and
+                # `allow_sending_without_reply` is what makes that harmless.
+                await self.telegram.html_message(
+                    where.chat, rendered.html, rendered.plain,
+                    reply_to=prompt_msg if index == 0 else None, thread=where.thread)
+
+            dest = await self._send_for_turn(session_id, dest, deliver)
         self._delivered[session_id] = self._delivered.get(session_id, 0) + len(text)
         self._persist_turns()
+        return dest
 
     async def _send_action(self, session_id: str, dest: Dest) -> None:
         if session_id not in self._turn_dest:
@@ -2891,7 +2964,10 @@ class FalconFoxTelegramBot:
                 note += (f" · ctx {_format_count(usage['used'])}"
                          f"/{_format_count(usage['size'])}")
             await self._update_progress(session_id, dest, final_note=note)
-            await self._send_reply(session_id, dest)
+            # The reply may have had to make a new topic on the way out; what
+            # follows it -- the silent-turn notice, the queue flush -- belongs
+            # in the topic that exists rather than the one that did.
+            dest = await self._send_reply(session_id, dest)
         delivered = self._delivered.pop(session_id, 0)
         self._consumed.pop(session_id, None)
         self._adopted.discard(session_id)

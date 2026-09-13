@@ -151,6 +151,91 @@ class TelegramFailureIsNotDaemonFailureTests(unittest.IsolatedAsyncioTestCase):
                              [DAEMON_DOWN, DAEMON_DOWN])
 
 
+class DeletedTopicTelegram(FakeTelegram):
+    """A forum with one topic deleted by hand: sends there are refused with the
+    Bot API's answer for a thread that is not there, and everything else works."""
+
+    def __init__(self, gone: int) -> None:
+        super().__init__()
+        self._gone = gone
+
+    def _check(self, thread) -> None:
+        if thread == self._gone:
+            raise ApiError("Bad Request: message thread not found")
+
+    async def message(self, chat_id, text, reply_to=None, silent=False, thread=None):
+        self._check(thread)
+        return await super().message(chat_id, text, reply_to=reply_to,
+                                     silent=silent, thread=thread)
+
+    async def html_message(self, chat_id, html_text, plain_fallback, reply_to=None,
+                           thread=None):
+        self._check(thread)
+        await super().html_message(chat_id, html_text, plain_fallback,
+                                   reply_to=reply_to, thread=thread)
+
+
+class _Daemon:
+    """Enough of the daemon for a session to be looked up by id."""
+
+    def __init__(self, name: str = "work thing") -> None:
+        self._name = name
+
+    async def session(self, session_id, include_transcript=False):
+        return {"session_id": session_id, "name": self._name, "path": "/tmp"}
+
+
+class DeadTopicTests(unittest.IsolatedAsyncioTestCase):
+    """Buglist: deleting a topic by hand stranded its session. There is no
+    `forum_topic_deleted` service message and the Bot API cannot enumerate
+    topics, so the first refused send is the only notice the bot ever gets."""
+
+    def _bot_mid_turn(self, directory, telegram):
+        bot = _bot(directory)
+        bot.telegram = telegram
+        bot.daemon = _Daemon()
+        bot._bind("session", 20)
+        bot._turn_dest["session"] = Dest(-1001, 20)
+        bot._reply_parts["session"] = ["the answer"]
+        bot._turn_working.add("session")
+        return bot
+
+    async def _end_turn(self, bot):
+        await bot._handle_event({"type": "turn_ended", "session_id": "session",
+                                 "turn_id": "t1", "outcome": "completed",
+                                 "stop_reason": "end_turn", "output_chars": 10})
+
+    async def test_a_send_to_a_deleted_topic_makes_exactly_one_new_topic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory, DeletedTopicTelegram(gone=20))
+            await self._end_turn(bot)
+
+            self.assertEqual(len(getattr(bot.telegram, "topics", [])), 1,
+                             "one topic replaces the dead one, not one per send")
+            fresh = bot._topics["session"]
+            self.assertNotEqual(fresh, 20)
+            self.assertEqual(bot._threads[fresh], "session")
+            self.assertEqual(bot.telegram.html_messages[-1][0], fresh,
+                             "the reply lands in the topic that exists")
+            self.assertEqual(bot.telegram.html_messages[-1][2], "the answer")
+            said = [text for thread, text in bot.telegram.messages if thread == fresh]
+            self.assertEqual(len(said), 1, f"one line about it, not several: {said}")
+            self.assertIn("new one", said[0])
+            persisted = json.loads(Path(directory, "topics.json").read_text())
+            self.assertEqual(persisted["topics"], {"session": fresh})
+
+    async def test_an_ordinary_send_failure_never_unbinds_the_topic(self):
+        # A rate limit or a read timeout says nothing about the topic. Reading
+        # one as "the topic is gone" would throw away a live topic and leave a
+        # second one beside it.
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot_mid_turn(directory, RefusingTelegram())
+            with self.assertRaises(ApiError):
+                await self._end_turn(bot)
+            self.assertEqual(bot._topics["session"], 20, "the binding stands")
+            self.assertEqual(getattr(bot.telegram, "topics", []), [])
+
+
 class _NoWatchdog:
     def __init__(self, logger=None) -> None:
         pass
