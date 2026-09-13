@@ -17,15 +17,22 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from falconfox import cli as falconfox_cli
 from falconfox.coordinator import SessionCoordinator
 from falconfox.engine.events import EventBus
+from falconfox.errors import FalconFoxError
 from falconfox.web.actions import (ACKNOWLEDGED, ACTIONS, CREATED, RESULT,
                                    Action, lookup)
 from falconfox.web.server import create_app
+
+from test_falconfox_poc import make_record
 
 SESSION_ID = "abcd1234"
 # Every argument any action in the table asks for, in one request. Each
@@ -297,9 +304,9 @@ class ActionTableTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(action.answer, ("session", CREATED, RESULT, ACKNOWLEDGED))
 
     def test_an_unknown_name_is_refused_by_the_table_itself(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(FalconFoxError):
             lookup("wibble")
-        with self.assertRaises(Exception):
+        with self.assertRaises(FalconFoxError):
             lookup(None)
 
 
@@ -370,3 +377,185 @@ class TwoSendSemanticsTests(unittest.IsolatedAsyncioTestCase):
             await settle(lambda: any(name == "cancel"
                                      for name, _ in self.coordinator.calls))
             self.coordinator.release.set()
+
+
+class RouteTests(unittest.IsolatedAsyncioTestCase):
+    """One pass per HTTP route: the shape a client gets when the call works,
+    and the shape it gets when it does not.
+
+    A real coordinator, with its sessions put in by hand. These tests are about
+    the transport, and a session that spawns nothing is still something to
+    address. The statuses matter as much as the bodies: the CLI and the bot
+    both read `{"error": ...}` out of a failure, and a 404 and a 400 are
+    different answers to a client deciding what to do next.
+    """
+
+    async def asyncSetUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        config_home = tempfile.TemporaryDirectory()
+        self.addCleanup(config_home.cleanup)
+        environment = patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home.name})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.root = Path(self.temporary.name)
+        self.coordinator = SessionCoordinator(self.root)
+        make_record(self.coordinator, SESSION_ID, name="work", path=str(self.root),
+                    auto_named=False, persisted=True)
+        self.client = Client(create_app(coordinator=self.coordinator))
+
+    async def test_the_version_route(self):
+        status, body, _headers = await self.client.request("GET", "/api/version")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["version"])
+
+    async def test_listing_sessions_and_the_hidden_ones(self):
+        make_record(self.coordinator, "hidden00", hidden=True, auto_named=False)
+        status, body, _headers = await self.client.request("GET", "/api/sessions")
+        self.assertEqual(status, 200)
+        self.assertEqual([item["session_id"] for item in body], [SESSION_ID])
+        _status, body, _headers = await self.client.request(
+            "GET", "/api/sessions?include_hidden=true")
+        self.assertEqual({item["session_id"] for item in body},
+                         {SESSION_ID, "hidden00"})
+
+    async def test_spawning_a_session(self):
+        # Stored rather than live, so nothing is started: what is under test is
+        # the route, not the backend.
+        with patch.object(self.coordinator, "_ensure_slot", return_value=False):
+            status, body, _headers = await self.client.request(
+                "POST", "/api/sessions", {"path": str(self.root), "name": "new"})
+        self.assertEqual(status, 201)
+        self.assertEqual(body["name"], "new")
+        self.assertIn(body["session_id"], self.coordinator._records)
+
+    async def test_spawning_somewhere_that_is_not_a_directory(self):
+        status, body, _headers = await self.client.request(
+            "POST", "/api/sessions", {"path": str(self.root.joinpath("nowhere"))})
+        self.assertEqual(status, 400)
+        self.assertIn("not a directory", body["error"])
+
+    async def test_reading_one_session_and_its_transcript(self):
+        self.coordinator._records[SESSION_ID].transcript = [
+            {"type": "message", "role": "user", "text": "hello"}]
+        status, body, _headers = await self.client.request(
+            "GET", f"/api/sessions/{SESSION_ID}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["name"], "work")
+        self.assertNotIn("transcript", body, "a transcript is asked for, not sent")
+        _status, body, _headers = await self.client.request(
+            "GET", f"/api/sessions/{SESSION_ID}?include_transcript=true")
+        self.assertEqual([event["text"] for event in body["transcript"]], ["hello"])
+
+    async def test_reading_a_session_that_is_not_there(self):
+        status, body, _headers = await self.client.request(
+            "GET", "/api/sessions/nosuch00")
+        self.assertEqual(status, 404)
+        self.assertIn("no such session", body["error"])
+
+    async def test_deleting_a_session(self):
+        status, body, _headers = await self.client.request(
+            "DELETE", f"/api/sessions/{SESSION_ID}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"deleted": SESSION_ID})
+        self.assertNotIn(SESSION_ID, self.coordinator._records)
+        status, _body, _headers = await self.client.request(
+            "DELETE", f"/api/sessions/{SESSION_ID}")
+        self.assertEqual(status, 404, "deleting it again is a 404, not a 400")
+
+    async def test_an_action_answers_with_the_session_it_acted_on(self):
+        status, body, _headers = await self.client.request(
+            "POST", f"/api/sessions/{SESSION_ID}/rename", {"name": "renamed"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["name"], "renamed")
+        status, body, _headers = await self.client.request(
+            "POST", f"/api/sessions/{SESSION_ID}/tag", {"tags": ["urgent"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["tags"], ["urgent"])
+
+    async def test_a_refused_action_is_a_bad_request_not_a_crash(self):
+        status, body, _headers = await self.client.request(
+            "POST", f"/api/sessions/{SESSION_ID}/rename", {"name": "  "})
+        self.assertEqual(status, 400)
+        self.assertIn("must not be empty", body["error"])
+
+    async def test_an_action_on_a_session_that_is_not_there(self):
+        status, body, _headers = await self.client.request(
+            "POST", "/api/sessions/nosuch00/cancel", {})
+        self.assertEqual(status, 400)
+        self.assertIn("no such session", body["error"])
+
+    async def test_the_file_store(self):
+        source = self.root.joinpath("notes.txt")
+        source.write_text("notes")
+        added = []
+        for _twice in (1, 2):
+            status, body, _headers = await self.client.request(
+                "POST", f"/api/sessions/{SESSION_ID}/files", {"path": str(source)})
+            self.assertEqual(status, 201)
+            self.assertEqual(body["name"], "notes.txt")
+            added.append(body["file_id"])
+        status, removed, _headers = await self.client.request(
+            "DELETE", f"/api/sessions/{SESSION_ID}/files/{added[0]}")
+        self.assertEqual((status, removed), (200, {"removed": 1}))
+        status, cleared, _headers = await self.client.request(
+            "DELETE", f"/api/sessions/{SESSION_ID}/files")
+        self.assertEqual((status, cleared), (200, {"removed": 1}))
+
+    async def test_storing_a_file_that_is_not_there(self):
+        status, body, _headers = await self.client.request(
+            "POST", f"/api/sessions/{SESSION_ID}/files",
+            {"path": str(self.root.joinpath("absent"))})
+        self.assertEqual(status, 400)
+        self.assertIn("not a file", body["error"])
+
+    async def test_an_attachment_result_can_arrive_over_http(self):
+        status, body, _headers = await self.client.request(
+            "POST", "/api/attachments", {"request_id": "req00001", "ok": True})
+        self.assertEqual((status, body), (200, {"ok": True}))
+        status, body, _headers = await self.client.request(
+            "POST", "/api/attachments", {"ok": True})
+        self.assertEqual(status, 400)
+        self.assertIn("request_id", body["error"])
+
+    async def test_the_config_views(self):
+        status, backends, _headers = await self.client.request("GET", "/api/backends")
+        self.assertEqual(status, 200)
+        self.assertIn("echo", backends["backends"])
+        self.assertTrue(backends["default"])
+        for path in ("/api/hotkeys", "/api/ui"):
+            status, body, _headers = await self.client.request("GET", path)
+            self.assertEqual((status, type(body)), (200, dict), path)
+
+    async def test_reloading_the_config(self):
+        status, body, _headers = await self.client.request("POST", "/api/reload", {})
+        self.assertEqual((status, body), (200, {"reloaded": True}))
+
+
+class SocketTests(unittest.IsolatedAsyncioTestCase):
+    """A client's whole life on the socket: connect, take the snapshot, send an
+    action, watch the event it caused come back."""
+
+    async def asyncSetUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        config_home = tempfile.TemporaryDirectory()
+        self.addCleanup(config_home.cleanup)
+        environment = patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home.name})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.coordinator = SessionCoordinator(Path(self.temporary.name))
+        make_record(self.coordinator, SESSION_ID, name="work", auto_named=False)
+        self.app = create_app(coordinator=self.coordinator)
+
+    async def test_the_snapshot_comes_first_and_then_the_events(self):
+        async with Socket(self.app) as socket:
+            snapshot = await socket.receive()
+            self.assertEqual(snapshot["type"], "snapshot")
+            self.assertEqual([item["session_id"] for item in snapshot["sessions"]],
+                             [SESSION_ID])
+            socket.send({"action": "rename", "session_id": SESSION_ID,
+                         "name": "renamed"})
+            event = await socket.receive()
+            self.assertEqual(event["type"], "session_updated")
+            self.assertEqual(event["name"], "renamed")

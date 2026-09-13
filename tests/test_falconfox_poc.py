@@ -31,7 +31,7 @@ from falconfox.engine.events import CLOSED, EventBus
 from falconfox.engine.session import AgentSession, PromptPart
 from falconfox.record import SessionRecord
 from falconfox.storage import SessionStore
-from falconfox.web.server import _send_events, create_app
+from falconfox.web.server import _send_events
 from falconfox.watchdog import StallWatchdog
 from falconfox_telegram import bot as bot_module
 from falconfox_telegram.api import ApiError, DaemonApi, _json_request
@@ -966,69 +966,6 @@ class WatchdogTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any("stall" in line for line in captured.output))
         finally:
             dog.stop()
-
-
-class HttpSurfaceTests(unittest.IsolatedAsyncioTestCase):
-    """The two coordinator methods that became coroutines are reached over
-    HTTP, and nothing else in the suite drives that transport at all.
-
-    Deliberately narrow: the action surface as a whole belongs to whoever
-    rewrites it, and this only stands guard over a call that would otherwise
-    fail by returning a coroutine nobody awaited.
-    """
-
-    async def asyncSetUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.config_home = tempfile.TemporaryDirectory()
-        self.addCleanup(self.config_home.cleanup)
-        self.env = patch.dict(os.environ, {"XDG_CONFIG_HOME": self.config_home.name})
-        self.env.start()
-        self.addCleanup(self.env.stop)
-        self.coordinator = SessionCoordinator(Path(self.temporary.name))
-        make_record(self.coordinator, "abcd1234", name="work", auto_named=False)
-        self.app = create_app(coordinator=self.coordinator)
-
-    async def _call(self, method, path, body=None):
-        payload = json.dumps(body).encode() if body is not None else b""
-        scope = {
-            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-            "method": method, "path": path, "raw_path": path.encode(),
-            "query_string": b"", "root_path": "", "scheme": "http",
-            "headers": [(b"content-type", b"application/json"),
-                        (b"content-length", str(len(payload)).encode())],
-            "client": ("127.0.0.1", 5555), "server": ("127.0.0.1", 9721),
-        }
-        incoming = [{"type": "http.request", "body": payload, "more_body": False}]
-        out = []
-
-        async def receive():
-            return incoming.pop(0)
-
-        async def send(message):
-            out.append(message)
-
-        await self.app(scope, receive, send)
-        status = next(m["status"] for m in out if m["type"] == "http.response.start")
-        body = b"".join(m.get("body", b"") for m in out
-                        if m["type"] == "http.response.body")
-        return status, (json.loads(body) if body else None)
-
-    async def test_rename_and_tag_answer_with_the_session(self):
-        status, session = await self._call(
-            "POST", "/api/sessions/abcd1234/rename", {"name": "renamed"})
-        self.assertEqual(status, 200)
-        self.assertEqual(session["name"], "renamed")
-        status, session = await self._call(
-            "POST", "/api/sessions/abcd1234/tag", {"tags": ["urgent"]})
-        self.assertEqual(status, 200)
-        self.assertEqual(session["tags"], ["urgent"])
-
-    async def test_a_refused_rename_is_a_bad_request_not_a_crash(self):
-        status, body = await self._call(
-            "POST", "/api/sessions/abcd1234/rename", {"name": "  "})
-        self.assertEqual(status, 400)
-        self.assertIn("must not be empty", body["error"])
 
 
 class CliTimeoutTests(unittest.TestCase):
