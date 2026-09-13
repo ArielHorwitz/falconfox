@@ -10,6 +10,7 @@ one at a time.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import tempfile
 import unittest
@@ -438,6 +439,29 @@ class TurnPersistenceTests(unittest.IsolatedAsyncioTestCase):
             record = json.loads(bot._turns_file.read_text())["session"]
             self.assertEqual(record["progress"], ["narration", "⚙️ grep"],
                              "what the timer had not reached is on disk anyway")
+
+
+class WebsocketSendTests(unittest.IsolatedAsyncioTestCase):
+    """Every write to the daemon socket goes through one function, so the
+    question of whether it needs a lock has one answer rather than two. It had
+    two: `_forward` held `_ws_lock` and `_report_attachment` did not."""
+
+    def test_nothing_writes_to_the_socket_behind_the_helper(self):
+        source = inspect.getsource(bot_module)
+        self.assertEqual(source.count("self._ws.send("), 1,
+                         "a second writer is a second discipline")
+        self.assertIn("self._ws.send(",
+                      inspect.getsource(FalconFoxTelegramBot._ws_send))
+
+    async def test_a_prompt_and_an_attachment_report_both_reach_the_daemon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = _bot(directory)
+            bot._ws = _EventStream()
+            await asyncio.gather(
+                bot._forward("session", Dest(-1001, 20), "go", prompt_msg=1),
+                bot._report_attachment("request-1", None))
+            self.assertEqual([action["action"] for action in bot._ws.sent],
+                             ["send", "attachment_result"])
 
 
 class _NoWatchdog:

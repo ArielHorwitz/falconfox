@@ -773,7 +773,6 @@ class FalconFoxTelegramBot:
         self._turns_dirty = False
         self._persist_task: Optional[asyncio.Task] = None
         self._ws = None
-        self._ws_lock = asyncio.Lock()
         # The turn→chat map, persisted so it survives the process. A bot
         # restart mid-turn used to orphan the reply: the daemon kept running
         # the turn, but the new process had no idea which chat it belonged to.
@@ -2111,10 +2110,10 @@ class FalconFoxTelegramBot:
         if request_id is None or self._ws is None:
             return
         try:
-            await self._ws.send(json.dumps({
+            await self._ws_send({
                 "action": "attachment_result", "request_id": request_id,
                 "ok": error is None, "error": error,
-            }))
+            })
         except (ConnectionClosed, OSError):
             # Nothing to do: the daemon's wait will time out and say so, which
             # is the same answer arriving more slowly.
@@ -2729,10 +2728,8 @@ class FalconFoxTelegramBot:
         # that as a `starting` state on session_updated, which this client does
         # not consume. That gap is exactly when a turn looks like it hung.
         await self._set_activity(session_id, "working")
-        async with self._ws_lock:
-            await self._ws.send(json.dumps({
-                "action": "send", "session_id": session_id, "text": text,
-            }))
+        await self._ws_send({"action": "send", "session_id": session_id,
+                             "text": text})
         # The progress message exists from the first moment of the turn (user
         # decision, 2026-08-25) -- sent after the prompt so a slow Telegram
         # call never delays the actual work, and silently: progress is
@@ -2746,6 +2743,26 @@ class FalconFoxTelegramBot:
                 self._persist_turns()
         except ApiError as error:
             log.debug("could not create the progress message: %s", error)
+
+    async def _ws_send(self, action: dict) -> None:
+        """Send one action to the daemon. The only writer to the socket.
+
+        No lock, and that is a decision rather than an oversight. There used to
+        be one around the prompt send while the attachment report went out
+        without it, which is the worst of both readings: if a lock were needed
+        the report was already unsafe, and if it were not the prompt was
+        waiting for nothing.
+
+        It is not needed. Every action here is a single string, and
+        `websockets` (16.0) writes an unfragmented message into the protocol's
+        buffer without awaiting -- the await comes after, draining a buffer
+        that already holds the whole frame -- so two concurrent sends cannot
+        interleave. `send` also waits out any fragmented send in progress
+        before it starts, so even mixing the two is the library's problem and
+        not this module's. Nothing here sends an iterable, and this is the
+        function that would have to change for that to stop being true.
+        """
+        await self._ws.send(json.dumps(action))
 
     async def _receive_events(self) -> None:
         """Read the daemon's event stream. Handling one event is total: its
