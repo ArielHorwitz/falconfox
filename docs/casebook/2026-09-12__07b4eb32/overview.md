@@ -199,7 +199,8 @@ These change the work materially and belong to the user:
 
 Decisions taken with the user: structural work first rather than patches,
 since a separate stable instance covers dogfooding while dev is in flux. A
-hand-deleted topic is replaced silently on the next delivery. Rewind, fork
+hand-deleted topic is replaced silently on the next delivery, as a stopgap
+until forum reconciliation is designed as a whole. Rewind, fork
 and per-session config options stay in the daemon, unreachable, and leave
 together with the dead web UI. The interrupted-turn notice is in scope.
 
@@ -228,12 +229,14 @@ fixed).
   This is why the reply retry is capped at a few seconds rather than
   honouring a long `retry_after`. Per-session handling tasks would remove
   the ceiling.
-- **Proactive topic liveness on reconnect.** Editing a topic with unchanged
-  values answers "not modified", which the buglist already measured, and
-  that doubles as a probe. One call per bound session at startup and
-  reconnect would repair dead topics before anything needs them, and would
-  cover renames and tags, which the reactive repair does not. Offered to
-  the user, not yet decided.
+- **Forum reconciliation as a whole.** Deleted topics, renamed topics,
+  changed icons, and the bot's memory of all three drift from Telegram in
+  ways the Bot API gives no way to enumerate. The user's decision,
+  2026-09-13: do not chase any one face of that desync (a proactive
+  liveness probe on reconnect was offered and declined), and design the
+  reconciliation properly in its own case. The reactive dead-topic repair
+  that landed here stays, since it is tested and harmless, but it is a
+  stopgap, not the design.
 - **Rate-limit handling** in the bot's Telegram client (the wishlist entry)
   is still open. The reply retry now honours `retry_after` up to a cap, but
   nothing else does.
