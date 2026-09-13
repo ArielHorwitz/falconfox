@@ -336,6 +336,52 @@ class TurnRecordTests(unittest.IsolatedAsyncioTestCase):
                              "a turn that emitted no usage has no figures to give")
 
 
+class SuspendingTopics(FakeTelegram):
+    """Topic edits that suspend, which is what a real one does and what a fake
+    that never awaits cannot: without a suspension the two callers of an apply
+    never overlap, and the double-apply is invisible."""
+
+    async def rename_topic(self, chat_id, thread, name):
+        await asyncio.sleep(0)
+        await super().rename_topic(chat_id, thread, name)
+
+    async def set_topic_icon(self, chat_id, thread, icon):
+        await asyncio.sleep(0)
+        await super().set_topic_icon(chat_id, thread, icon)
+
+
+class TopicApplyTests(unittest.IsolatedAsyncioTestCase):
+    """Survey F6: `_mirror_session` and the reconciler both check, both await,
+    and both record, so a `session_updated` event and a reconcile pass could
+    both decide a title had changed and both send the edit -- two service
+    messages in the topic, and a burst of icon edits is the one aggravator the
+    buglist names for clients showing a stale icon."""
+
+    def _bot(self, directory):
+        bot = _bot(directory)
+        bot.telegram = SuspendingTopics()
+        bot._bind("session", 20)
+        return bot
+
+    async def test_a_concurrent_title_apply_makes_exactly_one_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            session = {"session_id": "session", "name": "work thing"}
+            await asyncio.gather(bot._apply_title(session, 20),
+                                 bot._apply_title(session, 20))
+            self.assertEqual(getattr(bot.telegram, "renamed", []),
+                             [(20, "work thing")])
+
+    async def test_a_concurrent_icon_apply_makes_exactly_one_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            bot._default_icon = "5001"
+            session = {"session_id": "session", "name": "work thing"}
+            await asyncio.gather(bot._apply_icon(session, 20),
+                                 bot._apply_icon(session, 20))
+            self.assertEqual(getattr(bot.telegram, "icons", []), [(20, "5001")])
+
+
 class _NoWatchdog:
     def __init__(self, logger=None) -> None:
         pass

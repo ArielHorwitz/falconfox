@@ -1442,20 +1442,23 @@ class FalconFoxTelegramBot:
             return False
         session_id = session.get("session_id")
         icon = self._default_icon
-        if self._topic_icons.get(session_id, "") == icon:
-            return False
-        try:
-            await self.telegram.set_topic_icon(self.forum_chat_id, thread, icon)
-        except ApiError as error:
-            if TOPIC_UNCHANGED not in str(error):
-                log.warning("could not set the icon on topic %s", thread,
-                            exc_info=True)
+        # Under the lock for the whole check-await-record, see `_apply_title`.
+        async with self._topic_lock:
+            if self._topic_icons.get(session_id, "") == icon:
                 return False
-            # Already wearing it -- someone set it by hand, or a previous run
-            # did and the memory of it was lost. Record it and stop asking.
-            log.info("topic %s already had the icon asked for", thread)
-        self._topic_icons[session_id] = icon
-        self._persist_topics()
+            try:
+                await self.telegram.set_topic_icon(self.forum_chat_id, thread, icon)
+            except ApiError as error:
+                if TOPIC_UNCHANGED not in str(error):
+                    log.warning("could not set the icon on topic %s", thread,
+                                exc_info=True)
+                    return False
+                # Already wearing it -- someone set it by hand, or a previous
+                # run did and the memory of it was lost. Record it and stop
+                # asking.
+                log.info("topic %s already had the icon asked for", thread)
+            self._topic_icons[session_id] = icon
+            self._persist_topics()
         log.info("topic icon set: session=%s thread=%s icon=%s",
                  session_id, thread, icon or "(none)")
         return True
@@ -2891,21 +2894,38 @@ class FalconFoxTelegramBot:
 
         Returns whether a call was actually made, because the reconciler
         paces itself on work done rather than on topics seen.
+
+        The whole check-await-record runs under `_topic_lock`. Two paths reach
+        here -- a `session_updated` event and the reconciler running beside it
+        -- and without the lock both could read "the title differs", both
+        await the rename, and both act: two service messages in the topic for
+        one change, one of them answered `TOPIC_NOT_MODIFIED`. For the icon it
+        is worse than noise, since a burst of edits is the one aggravator the
+        buglist names for clients showing a stale one.
+
+        The existing topic lock rather than one per topic. These calls are
+        already paced against a budget the whole forum shares
+        (`RECONCILE_PACE`), so per-topic concurrency would buy nothing that the
+        pacing does not immediately give back -- and one lock is one thing to
+        reason about. Nothing here is held across the pace itself.
         """
         session_id = session.get("session_id")
         title = self._title_for(session)
-        if not title or self._topic_names.get(session_id) == title:
+        if not title:
             return False
-        try:
-            await self.telegram.rename_topic(self.forum_chat_id, thread, title)
-        except ApiError as error:
-            if TOPIC_UNCHANGED not in str(error):
-                log.warning("could not retitle topic %s", thread, exc_info=True)
-                return True
-            # Already titled that; remembering it is the whole point.
-            log.info("topic %s already had the title asked for", thread)
-        self._topic_names[session_id] = title
-        self._persist_topics()
+        async with self._topic_lock:
+            if self._topic_names.get(session_id) == title:
+                return False
+            try:
+                await self.telegram.rename_topic(self.forum_chat_id, thread, title)
+            except ApiError as error:
+                if TOPIC_UNCHANGED not in str(error):
+                    log.warning("could not retitle topic %s", thread, exc_info=True)
+                    return True
+                # Already titled that; remembering it is the whole point.
+                log.info("topic %s already had the title asked for", thread)
+            self._topic_names[session_id] = title
+            self._persist_topics()
         return True
 
     async def _finish_turn(self, session_id: str, event: dict | None) -> None:
