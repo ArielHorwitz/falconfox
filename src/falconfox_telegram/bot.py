@@ -772,7 +772,13 @@ class FalconFoxTelegramBot:
         async for websocket in connect(ws_url):
             try:
                 await self._run_connected(websocket)
-            except (ConnectionClosed, ApiError, OSError) as error:
+            # The socket, and nothing else. `ApiError` used to be caught here
+            # too, which made every Telegram refusal a daemon outage: the chat
+            # was told the daemon was lost, the bot reconnected to a daemon
+            # that had never gone anywhere, and the recovered turn was resent
+            # to the destination that had just refused it. Telegram failures
+            # are handled where they happen now -- per event, per send.
+            except (ConnectionClosed, OSError) as error:
                 log.warning("daemon connection lost (%s); reconnecting", error)
                 await self._announce(DAEMON_DOWN)
                 await asyncio.sleep(2)
@@ -2626,8 +2632,24 @@ class FalconFoxTelegramBot:
             log.debug("could not create the progress message: %s", error)
 
     async def _receive_events(self) -> None:
+        """Read the daemon's event stream. Handling one event is total: its
+        failure is that event's alone.
+
+        The same shape as `_poll_telegram`, and for the same reason. An
+        exception here ended the loop, `asyncio.wait` reported it to
+        `_run_connected`, and the connection came down -- taking every other
+        session's turn with it. A Telegram send that refuses is the likeliest
+        way to get one, and it says nothing whatever about the daemon.
+        """
         async for raw in self._ws:
-            await self._handle_event(json.loads(raw))
+            event = {}
+            try:
+                event = json.loads(raw)
+                await self._handle_event(event)
+            except Exception:
+                log.warning("dropping a daemon event that could not be handled:"
+                            " session=%s type=%s", event.get("session_id"),
+                            event.get("type"), exc_info=True)
 
     async def _handle_event(self, event: dict) -> None:
         session_id = event.get("session_id")
