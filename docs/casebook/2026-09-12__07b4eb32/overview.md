@@ -213,14 +213,36 @@ briefs, reports and reviews are filed beside this overview.
 | --- | --- | --- |
 | Telegram client | integrated onto the case branch, 10 commits | 261 to 280 |
 | Daemon core | integrated onto the case branch, 10 commits | 280 to 305 |
-| Wire contract and deploy | in progress on its own branch | |
+| Wire contract and deploy | integrated onto the case branch, 6 commits | 305 to 353 |
 
-Buglist entries closed so far: the stranded session after a hand-deleted
-topic, and the extra "Working..." message after a reply. Bonus fixes found
+Buglist entries closed: the stranded session after a hand-deleted topic,
+the extra "Working..." message after a reply, the deploy units written
+where systemd does not look, and the bot's misleading restart warning.
+Still open there: the intermittent Telegram call hangs, and the two topic
+icon entries, which belong to the forum reconciliation case. Bonus fixes found
 by the implementers and confirmed by tests: a resumed session could show a
 one-event history in place of its transcript, and stopping a never-renamed
 session after a restart deleted it from disk (found by the daemon review,
 fixed).
+
+## State at hand-off
+
+*2026-09-13.* The case branch `hardening-survey` carries 38 commits over
+`dev`: the case files, and the three packages in the order Telegram client,
+daemon core, edges. Every package was reviewed independently and its
+findings fixed before integration. Nothing has run on the dev instance yet.
+The next step is the user's: merge to `dev`, restart the dev daemon and bot,
+and soak. The three package worktrees under `.worktrees/` still exist so
+their implementer sessions can be resumed for anything the soak turns up.
+
+Two things to watch in the soak: the bot now crashes and is restarted by
+systemd on a Telegram error outside its guarded paths, rather than looping
+on a reconnect, so a bot restart in the journal is the signal to read; and
+the deploy health check now compares unit text, so the first stable deploy
+after this lands is the one that exercises it.
+
+Delegated cost for the whole case, all models: about 103 USD. Surveys 6,
+implementations 68, reviews 10, fix rounds 19.
 
 ## Follow-ups surfaced, not taken up here
 
