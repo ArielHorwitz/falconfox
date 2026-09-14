@@ -757,13 +757,23 @@ def _format_elapsed(seconds: float) -> str:
     return f"{int(seconds // 3600)}h{int(seconds % 3600 // 60):02d}m"
 
 
-def _grown_by(now: float | None, before: float | None) -> float | None:
-    """How much a cumulative figure grew over a turn, or None when that cannot
-    be known: nothing to measure against, or a total that went backwards."""
+def _change_from(now: float | None, before: float | None) -> float | None:
+    """How much a cumulative figure moved over a turn, or None when there is
+    nothing to measure it against.
+
+    Signed, and reported as it comes. A figure that went *down* is the backend
+    saying something surprising rather than this client miscounting, and the
+    stamp quotes the backend rather than tidying it: cost restarts near zero
+    when a session respawns, and the context shrinks when a backend compacts
+    it. Both are worth seeing.
+    """
     if now is None or before is None:
         return None
-    grown = now - before
-    return grown if grown > 0 else None
+    return now - before
+
+
+def _signed_count(change: float) -> str:
+    return f"{'+' if change >= 0 else '-'}{_format_count(int(abs(change)))}"
 
 
 def _final_stamp(outcome: str | None, stop: str | None, elapsed: float,
@@ -776,11 +786,12 @@ def _final_stamp(outcome: str | None, stop: str | None, elapsed: float,
     the figures of the turn before it, so the other two lines appear only when
     this turn's own events carried what they need.
 
-    Both deltas are measured against `before`, the figures that stood when the
-    turn began, and a negative one is dropped rather than shown. Cost is
-    cumulative per agent process, so respawning a session -- which FalconFox
-    does routinely, replaying the transcript into a fresh one -- restarts it
-    near zero. That is a restart, not a refund.
+    Cost and context are both cumulative, so what the turn spent is a
+    subtraction against `before`: the figures that stood when it began. Both
+    are signed, so what they are is legible without a label, and both are
+    shown as they come, negatives included (user decision, 2026-09-14). The
+    token figure is not a subtraction -- it is already per-turn -- so it
+    carries no sign.
     """
     if outcome == "error":
         lines = ["⚠️ Turn ended with an error"]
@@ -796,10 +807,11 @@ def _final_stamp(outcome: str | None, stop: str | None, elapsed: float,
     # the window on the line below.
     spent = []
     tokens = usage.get("total_tokens") or usage.get("output_tokens")
-    cost = _grown_by(usage.get("cost_amount"), before.get("cost_amount"))
+    cost = _change_from(usage.get("cost_amount"), before.get("cost_amount"))
     figures = _format_count(tokens) if tokens else ""
-    if cost is not None and cost >= 0.005:
-        figures = f"{figures} (${cost:.2f})" if figures else f"${cost:.2f}"
+    if cost is not None:
+        money = f"{'+' if cost >= 0 else '-'}${abs(cost):.2f}"
+        figures = f"{figures} ({money})" if figures else money
     if figures:
         spent.append(f"Turn: {figures}")
     if tool_calls:
@@ -810,9 +822,9 @@ def _final_stamp(outcome: str | None, stop: str | None, elapsed: float,
     used, size = usage.get("used"), usage.get("size")
     if used and size:
         percent = f"{round(used / size * 100)}%"
-        growth = _grown_by(used, before.get("used"))
-        if growth:
-            percent += f", +{_format_count(int(growth))}"
+        change = _change_from(used, before.get("used"))
+        if change is not None:
+            percent += f", {_signed_count(change)}"
         lines.append(f"Context window: {_format_count(used)}"
                      f"/{_format_count(size)} ({percent})")
     return "\n".join(lines)

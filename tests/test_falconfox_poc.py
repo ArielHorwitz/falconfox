@@ -1443,19 +1443,20 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
                          "✅ Turn finished: 4s")
         self.assertEqual(_final_stamp(None, "end_turn", 4.0, 1, {}, {}),
                          "✅ Turn finished: 4s\n1 tool call")
-        # Cost without a token figure still has a line to sit on, and a cost
-        # too small to round to a cent is not worth one.
+        # A cumulative cost with nothing to subtract it from says nothing
+        # about this turn, so it waits for a baseline. Once there is one,
+        # every movement is quoted, including one too small to reach a cent.
         self.assertEqual(
             _final_stamp(None, "end_turn", 4.0, 2, {"cost_amount": 1.0}, {}),
             "✅ Turn finished: 4s\n2 tool calls")
         self.assertEqual(
             _final_stamp(None, "end_turn", 4.0, 2,
                          {"cost_amount": 1.42}, {"cost_amount": 1.0}),
-            "✅ Turn finished: 4s\nTurn: $0.42 · 2 tool calls")
+            "✅ Turn finished: 4s\nTurn: +$0.42 · 2 tool calls")
         self.assertEqual(
             _final_stamp(None, "end_turn", 4.0, 0,
                          {"cost_amount": 1.001}, {"cost_amount": 1.0}),
-            "✅ Turn finished: 4s")
+            "✅ Turn finished: 4s\nTurn: +$0.00")
 
     async def test_the_reply_threads_to_the_prompt_message(self):
         # Threading is also the notification story: in a group, a reply (like

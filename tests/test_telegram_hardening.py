@@ -572,14 +572,15 @@ class TurnRecordTests(unittest.IsolatedAsyncioTestCase):
                                      "cost_amount": 1.92, "cost_currency": "USD"})
             await self._stream(bot, "another answer")
             await self._end_turn(bot)
-            self.assertIn("Turn: $0.42", bot.telegram.edits[-1][2])
+            self.assertIn("Turn: +$0.42", bot.telegram.edits[-1][2])
             self.assertIn("Context window: 249k/1M (25%, +32k)",
                           bot.telegram.edits[-1][2])
 
-    async def test_a_respawned_session_reports_no_refund(self):
+    async def test_a_respawned_session_reports_the_negative_it_was_given(self):
         """Cost is cumulative per agent process and starts over when one is
-        replaced, so the turn that straddles a respawn shows no cost at all
-        rather than a negative one."""
+        replaced, so the turn that straddles a respawn reports a large
+        negative. Shown as it came: it is the backend saying something
+        surprising, and hiding it would leave the next figure unexplained."""
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             await bot._forward("session", Dest(-1001, 20), "first", prompt_msg=1)
@@ -596,9 +597,28 @@ class TurnRecordTests(unittest.IsolatedAsyncioTestCase):
             await self._stream(bot, "another answer")
             await self._end_turn(bot)
             stamp = bot.telegram.edits[-1][2]
-            self.assertNotIn("$", stamp)
+            self.assertIn("Turn: -$22.07", stamp)
             self.assertIn("Context window: 219k/1M (22%, +2k)", stamp,
                           "the context survived the respawn, so its growth stands")
+
+    async def test_a_compacted_context_shows_the_ground_it_gave_back(self):
+        """The other direction, and the one worth having: a backend that
+        compacts mid-turn ends it holding far less than it started with."""
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            await bot._forward("session", Dest(-1001, 20), "first", prompt_msg=1)
+            await bot._handle_event({"type": "usage", "session_id": "session",
+                                     "used": 332000, "size": 1000000})
+            await self._stream(bot, "the answer")
+            await self._end_turn(bot)
+
+            await bot._forward("session", Dest(-1001, 20), "second", prompt_msg=2)
+            await bot._handle_event({"type": "usage", "session_id": "session",
+                                     "used": 44000, "size": 1000000})
+            await self._stream(bot, "another answer")
+            await self._end_turn(bot)
+            self.assertIn("Context window: 44k/1M (4%, -288k)",
+                          bot.telegram.edits[-1][2])
 
     async def test_a_window_reported_as_empty_is_not_reported_at_all(self):
         """The backend does occasionally report `used` as zero mid-session.
