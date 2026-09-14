@@ -541,13 +541,87 @@ class TurnRecordTests(unittest.IsolatedAsyncioTestCase):
                                      "used": 217034, "size": 1000000})
             await self._stream(bot, "the answer")
             await self._end_turn(bot)
-            self.assertIn("ctx 217k/1M", bot.telegram.edits[-1][2])
+            self.assertIn("Context window: 217k/1M", bot.telegram.edits[-1][2])
 
             await bot._forward("session", Dest(-1001, 20), "second", prompt_msg=2)
             await self._stream(bot, "another answer")
             await self._end_turn(bot)
-            self.assertNotIn("ctx", bot.telegram.edits[-1][2],
+            self.assertNotIn("Context window", bot.telegram.edits[-1][2],
                              "a turn that emitted no usage has no figures to give")
+
+    async def test_the_turn_line_measures_growth_from_where_the_last_one_ended(self):
+        """Context and cost both accumulate across a session, so what the turn
+        spent is a subtraction -- against figures that outlive the turn and so
+        cannot live on it."""
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            await bot._forward("session", Dest(-1001, 20), "first", prompt_msg=1)
+            await bot._handle_event({"type": "usage", "session_id": "session",
+                                     "used": 217034, "size": 1000000,
+                                     "cost_amount": 1.5, "cost_currency": "USD"})
+            await self._stream(bot, "the answer")
+            await self._end_turn(bot)
+            first = bot.telegram.edits[-1][2]
+            self.assertIn("Context window: 217k/1M (22%)", first)
+            self.assertNotIn("$", first,
+                             "the first turn has nothing to measure against")
+
+            await bot._forward("session", Dest(-1001, 20), "second", prompt_msg=2)
+            await bot._handle_event({"type": "usage", "session_id": "session",
+                                     "used": 249034, "size": 1000000,
+                                     "cost_amount": 1.92, "cost_currency": "USD"})
+            await self._stream(bot, "another answer")
+            await self._end_turn(bot)
+            self.assertIn("Turn: $0.42", bot.telegram.edits[-1][2])
+            self.assertIn("Context window: 249k/1M (25%, +32k)",
+                          bot.telegram.edits[-1][2])
+
+    async def test_a_respawned_session_reports_no_refund(self):
+        """Cost is cumulative per agent process and starts over when one is
+        replaced, so the turn that straddles a respawn shows no cost at all
+        rather than a negative one."""
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            await bot._forward("session", Dest(-1001, 20), "first", prompt_msg=1)
+            await bot._handle_event({"type": "usage", "session_id": "session",
+                                     "used": 217034, "size": 1000000,
+                                     "cost_amount": 22.27})
+            await self._stream(bot, "the answer")
+            await self._end_turn(bot)
+
+            await bot._forward("session", Dest(-1001, 20), "second", prompt_msg=2)
+            await bot._handle_event({"type": "usage", "session_id": "session",
+                                     "used": 219402, "size": 1000000,
+                                     "cost_amount": 0.2})
+            await self._stream(bot, "another answer")
+            await self._end_turn(bot)
+            stamp = bot.telegram.edits[-1][2]
+            self.assertNotIn("$", stamp)
+            self.assertIn("Context window: 219k/1M (22%, +2k)", stamp,
+                          "the context survived the respawn, so its growth stands")
+
+    async def test_a_window_reported_as_empty_is_not_reported_at_all(self):
+        """The backend does occasionally report `used` as zero mid-session.
+        Believing it would claim an empty context and then charge the whole
+        window to the next turn as growth."""
+        with tempfile.TemporaryDirectory() as directory:
+            bot = self._bot(directory)
+            await bot._forward("session", Dest(-1001, 20), "first", prompt_msg=1)
+            await bot._handle_event({"type": "usage", "session_id": "session",
+                                     "used": 217034, "size": 1000000})
+            await bot._handle_event({"type": "usage", "session_id": "session",
+                                     "used": 0, "size": 1000000})
+            await self._stream(bot, "the answer")
+            await self._end_turn(bot)
+            self.assertIn("Context window: 217k/1M", bot.telegram.edits[-1][2])
+
+            await bot._forward("session", Dest(-1001, 20), "second", prompt_msg=2)
+            await bot._handle_event({"type": "usage", "session_id": "session",
+                                     "used": 220034, "size": 1000000})
+            await self._stream(bot, "another answer")
+            await self._end_turn(bot)
+            self.assertIn("(22%, +3k)", bot.telegram.edits[-1][2],
+                          "growth is measured from the last figure worth having")
 
 
 class SuspendingTopics(FakeTelegram):

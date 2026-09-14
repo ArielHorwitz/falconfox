@@ -200,6 +200,11 @@ class Turn:
     # Context and token figures, merged from the daemon's usage events for the
     # final stamp. On the turn, so they cannot be reported by the next one.
     usage: dict = field(default_factory=dict)
+    # What the session's cumulative figures stood at when this turn began,
+    # copied off `_session_usage` when the turn's first usage event arrives.
+    # Only ever subtracted, never shown: these figures belong to the turn
+    # before this one, and showing them is the leak described above.
+    usage_before: dict = field(default_factory=dict)
     activity_state: str = ""
     # Whether the daemon has ever reported this turn working, and whether it
     # was adopted from the persisted map rather than started here.
@@ -752,6 +757,67 @@ def _format_elapsed(seconds: float) -> str:
     return f"{int(seconds // 3600)}h{int(seconds % 3600 // 60):02d}m"
 
 
+def _grown_by(now: float | None, before: float | None) -> float | None:
+    """How much a cumulative figure grew over a turn, or None when that cannot
+    be known: nothing to measure against, or a total that went backwards."""
+    if now is None or before is None:
+        return None
+    grown = now - before
+    return grown if grown > 0 else None
+
+
+def _final_stamp(outcome: str | None, stop: str | None, elapsed: float,
+                 tool_calls: int, usage: dict, before: dict) -> str:
+    """What a finished turn leaves standing, in up to three lines: what
+    happened, what the turn spent, and how full the context window is now.
+
+    Only the first line is unconditional. Usage is reported by the claude
+    backend and by nothing else, and a turn that reported none must not borrow
+    the figures of the turn before it, so the other two lines appear only when
+    this turn's own events carried what they need.
+
+    Both deltas are measured against `before`, the figures that stood when the
+    turn began, and a negative one is dropped rather than shown. Cost is
+    cumulative per agent process, so respawning a session -- which FalconFox
+    does routinely, replaying the transcript into a fresh one -- restarts it
+    near zero. That is a restart, not a refund.
+    """
+    if outcome == "error":
+        lines = ["⚠️ Turn ended with an error"]
+    elif stop == "cancelled":
+        lines = ["✖️ Turn cancelled"]
+    else:
+        lines = ["✅ Turn finished"]
+    lines[0] += f": {_format_elapsed(elapsed)}"
+
+    # What the turn cost, in the two currencies there are. The token figure is
+    # the whole volume the turn pushed through, cache reads and all, which is
+    # why it is labelled by the turn rather than left to read as a slice of
+    # the window on the line below.
+    spent = []
+    tokens = usage.get("total_tokens") or usage.get("output_tokens")
+    cost = _grown_by(usage.get("cost_amount"), before.get("cost_amount"))
+    figures = _format_count(tokens) if tokens else ""
+    if cost is not None and cost >= 0.005:
+        figures = f"{figures} (${cost:.2f})" if figures else f"${cost:.2f}"
+    if figures:
+        spent.append(f"Turn: {figures}")
+    if tool_calls:
+        spent.append(f"{tool_calls} tool call" + ("s" if tool_calls != 1 else ""))
+    if spent:
+        lines.append(" · ".join(spent))
+
+    used, size = usage.get("used"), usage.get("size")
+    if used and size:
+        percent = f"{round(used / size * 100)}%"
+        growth = _grown_by(used, before.get("used"))
+        if growth:
+            percent += f", +{_format_count(int(growth))}"
+        lines.append(f"Context window: {_format_count(used)}"
+                     f"/{_format_count(size)} ({percent})")
+    return "\n".join(lines)
+
+
 class FalconFoxTelegramBot:
     def __init__(self, config: BotConfig) -> None:
         self.config = config
@@ -765,6 +831,13 @@ class FalconFoxTelegramBot:
         self.concierge_session_id: str | None = None
         # Every turn this client is carrying, one record each. See `Turn`.
         self._turns: dict[str, Turn] = {}
+        # Last cumulative usage figures seen per session, which is what a
+        # turn's deltas are measured against. Session-scoped because the
+        # figures are: context and cost both accumulate across turns. In
+        # memory only, so a restarted bot shows no deltas until the session
+        # reports usage twice more, which is cheaper than persisting a figure
+        # that is only ever a subtraction.
+        self._session_usage: dict[str, dict] = {}
         # Shell jobs started with /sh. They run detached in tmux, so this is a
         # view of them rather than ownership: a job outlives the bot, and a
         # restarted bot forgets the ids while the tmux sessions carry on.
@@ -2957,10 +3030,25 @@ class FalconFoxTelegramBot:
                 await self._set_activity(session_id, "thinking")
             return
         if event_type == "usage":
-            if turn is not None:
-                for key, value in event.items():
-                    if key not in ("type", "session_id", "ts") and value is not None:
-                        turn.usage[key] = value
+            # Two destinations, and the difference matters. The session store
+            # accumulates so the *next* turn knows where this one left off;
+            # `turn.usage` is what the stamp displays, and stays per-turn so a
+            # turn that reported nothing reports nothing.
+            running = self._session_usage.setdefault(session_id, {})
+            if turn is not None and not turn.usage:
+                turn.usage_before = dict(running)
+            for key, value in event.items():
+                if key in ("type", "session_id", "ts") or value is None:
+                    continue
+                if key in ("used", "size") and not value:
+                    # A zero window is the backend losing count mid-session,
+                    # which the stored transcripts do show. Dropped rather
+                    # than stored: it would claim an empty context now and
+                    # inflate the next turn's growth by the whole window.
+                    continue
+                running[key] = value
+                if turn is not None:
+                    turn.usage[key] = value
             return
         if event_type == "tool_call":
             # A tool call is a block boundary: the text before it was written
@@ -2992,6 +3080,7 @@ class FalconFoxTelegramBot:
             return
         if event_type == "session_removed":
             self._forget_tray(session_id)
+            self._session_usage.pop(session_id, None)
             thread = self._unbind(session_id)
             if thread is not None:
                 try:
@@ -3170,21 +3259,8 @@ class FalconFoxTelegramBot:
             # Stamp the progress message and leave it standing (user decision:
             # the chain of work stays in the chat), then deliver the answer.
             self._close_thought(turn)
-            if outcome == "error":
-                note = "⚠️ Turn ended with an error"
-            elif stop == "cancelled":
-                note = "✖️ Turn cancelled"
-            else:
-                note = "✅ Turn finished"
-            note += f" · {_format_elapsed(elapsed)}"
-            if turn.seen_tools:
-                note += f" · {len(turn.seen_tools)} tool calls"
-            tokens = turn.usage.get("total_tokens") or turn.usage.get("output_tokens")
-            if tokens:
-                note += f" · {_format_count(tokens)} tokens"
-            elif turn.usage.get("used") and turn.usage.get("size"):
-                note += (f" · ctx {_format_count(turn.usage['used'])}"
-                         f"/{_format_count(turn.usage['size'])}")
+            note = _final_stamp(outcome, stop, elapsed, len(turn.seen_tools),
+                                turn.usage, turn.usage_before)
             await self._update_progress(turn, final_note=note)
             # The reply may have had to make a new topic on the way out; what
             # follows it -- the silent-turn notice, the queue flush -- belongs

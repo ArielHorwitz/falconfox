@@ -41,7 +41,8 @@ from falconfox_telegram.bot import (QUEUED_FIRST, Dest, DAEMON_DOWN,
                                     Turn)
 from falconfox_telegram.rendering import TELEGRAM_MESSAGE_LIMIT, render_messages
 from falconfox_telegram.bot import (COMMANDS, PHOTO_LIMIT_BYTES, SECTIONS,
-                                    _inline_code, _upload_kind, _write_atomic)
+                                    _final_stamp, _inline_code, _upload_kind,
+                                    _write_atomic)
 from falconfox_telegram.bot import COMMANDS_HELP
 from falconfox_telegram.shell import ShellRunner, tail
 
@@ -1423,14 +1424,38 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
             bot = self._bot_mid_turn(directory)
             bot._turns["session"].started_at = time.monotonic() - 135
             await bot._handle_event({"type": "usage", "session_id": "session",
-                                     "used": 217034, "size": 1000000})
-            await self._tool_call(bot)
+                                     "used": 217034, "size": 1000000,
+                                     "total_tokens": 877000})
+            await bot._handle_event({"type": "tool_call", "session_id": "session",
+                                     "tool_call_id": "call-1", "title": "hidden"})
             await self._stream(bot, "the answer")
             await self._idle(bot)
             stamp = bot.telegram.messages[-1][1]
-            self.assertIn("✅ Turn finished", stamp)
-            self.assertIn("2m15s", stamp)
-            self.assertIn("ctx 217k/1M", stamp)
+            self.assertIn("✅ Turn finished: 2m15s", stamp)
+            self.assertIn("Turn: 877k · 1 tool call\n", stamp)
+            self.assertIn("Context window: 217k/1M (22%)", stamp)
+
+    def test_the_stamp_drops_the_lines_it_has_no_figures_for(self):
+        """Only the claude backend reports usage; the echo backend and any
+        other reports none, and the stamp is then the one line it can stand
+        behind rather than a row of zeroes."""
+        self.assertEqual(_final_stamp(None, "end_turn", 4.0, 0, {}, {}),
+                         "✅ Turn finished: 4s")
+        self.assertEqual(_final_stamp(None, "end_turn", 4.0, 1, {}, {}),
+                         "✅ Turn finished: 4s\n1 tool call")
+        # Cost without a token figure still has a line to sit on, and a cost
+        # too small to round to a cent is not worth one.
+        self.assertEqual(
+            _final_stamp(None, "end_turn", 4.0, 2, {"cost_amount": 1.0}, {}),
+            "✅ Turn finished: 4s\n2 tool calls")
+        self.assertEqual(
+            _final_stamp(None, "end_turn", 4.0, 2,
+                         {"cost_amount": 1.42}, {"cost_amount": 1.0}),
+            "✅ Turn finished: 4s\nTurn: $0.42 · 2 tool calls")
+        self.assertEqual(
+            _final_stamp(None, "end_turn", 4.0, 0,
+                         {"cost_amount": 1.001}, {"cost_amount": 1.0}),
+            "✅ Turn finished: 4s")
 
     async def test_the_reply_threads_to_the_prompt_message(self):
         # Threading is also the notification story: in a group, a reply (like
