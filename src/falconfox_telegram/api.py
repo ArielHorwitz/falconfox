@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import http.client
 import json
 import logging
 import shutil
+import socket
 import time
 import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+from typing import Optional
 
 log = logging.getLogger("falconfox.telegram.api")
 
@@ -37,6 +40,78 @@ SLOW_REQUEST_SECONDS = 10.0
 # The default read timeout. Generous, because most calls are worth waiting
 # for; the ones that are not pass their own.
 REQUEST_TIMEOUT = 40.0
+# How long one *connection attempt* may take, per address. Telegram's IPv6
+# front end leaves roughly one attempt in ten unanswered (measured from this
+# host on 2026-09-14: 18 of 120 over five minutes, against none to Cloudflare
+# or Google, with no packet loss on the route), and this host tries IPv6
+# first. Under a single timeout that covered connect and read alike, every
+# such attempt cost the full 40 seconds before IPv4 was tried, which is where
+# "the bot took 30 seconds to notice my message" came from: the long poll
+# was blind for that long. IPv4 is now tried first (see _Connection), so this
+# only decides how much an address that does not answer can cost.
+CONNECT_TIMEOUT = 3.0
+# How long Telegram may hold a getUpdates call open waiting for something to
+# report. The read timeout must exceed it.
+POLL_HOLD_SECONDS = 30
+
+
+class _Connection(http.client.HTTPSConnection):
+    """An HTTPS connection that prefers IPv4 and gives each attempt a short
+    timeout of its own.
+
+    `http.client` applies one timeout to both connecting and reading, and
+    connects in the order the resolver returns, which on this host is IPv6
+    first. The two timeouts are different questions: a read may legitimately
+    wait 30 seconds on a long poll, while a connect that has not completed in
+    a few seconds has been dropped. And the order is the wrong way round for
+    Telegram, whose IPv6 side drops attempts and whose IPv4 side never did.
+    So: every resolved address, IPv4 first, each given CONNECT_TIMEOUT, the
+    first to answer wins. IPv6 stays as the fallback rather than being cut,
+    so an IPv4 problem would cost seconds, not the bot.
+    """
+
+    def connect(self) -> None:
+        addresses = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM)
+        addresses.sort(key=lambda info: info[0] != socket.AF_INET)
+        failure: Optional[OSError] = None
+        for family, kind, proto, _canonical, sockaddr in addresses:
+            sock = socket.socket(family, kind, proto)
+            try:
+                sock.settimeout(CONNECT_TIMEOUT)
+                if self.source_address:
+                    sock.bind(self.source_address)
+                sock.connect(sockaddr)
+            except OSError as error:
+                failure = error
+                sock.close()
+                continue
+            break
+        else:
+            raise failure or OSError(f"no address for {self.host}")
+        sock.settimeout(self.timeout)
+        self.sock = sock
+        if self._tunnel_host:
+            self._tunnel()
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+class _Handler(urllib.request.HTTPSHandler):
+    def https_open(self, request):
+        return self.do_open(_Connection, request, context=self._context)
+
+
+# One opener for every call the client makes, so the connect policy above is
+# not something a call site can forget.
+_OPENER = urllib.request.build_opener(_Handler)
+
+
+def _open(request: urllib.request.Request, timeout: float):
+    return _OPENER.open(request, timeout=timeout)
+
+
+# The clock behind the slow-request measurement, replaceable by a test without
+# touching the one the event loop runs on.
+_now = time.monotonic
 
 
 class ApiError(Exception):
@@ -68,7 +143,8 @@ def _multipart(fields: dict, file_field: str, file_path: Path) -> tuple[bytes, s
 
 
 async def _json_request(url: str, method: str = "GET", body: dict | None = None,
-                        timeout: float = REQUEST_TIMEOUT):
+                        timeout: float = REQUEST_TIMEOUT,
+                        slow_after: float = SLOW_REQUEST_SECONDS):
     def perform():
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(
@@ -76,7 +152,7 @@ async def _json_request(url: str, method: str = "GET", body: dict | None = None,
             headers={"Content-Type": "application/json"} if data is not None else {},
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with _open(request, timeout) as response:
                 payload = response.read()
                 return json.loads(payload) if payload else None
         except urllib.error.HTTPError as error:
@@ -102,12 +178,12 @@ async def _json_request(url: str, method: str = "GET", body: dict | None = None,
             # on the daemon, which was healthy throughout.
             raise ApiError(f"{type(error).__name__}: {error}") from error
 
-    started = time.monotonic()
+    started = _now()
     try:
         return await asyncio.get_running_loop().run_in_executor(_REQUESTS, perform)
     finally:
-        elapsed = time.monotonic() - started
-        if elapsed >= SLOW_REQUEST_SECONDS:
+        elapsed = _now() - started
+        if elapsed >= slow_after:
             # The method only, never the url: a Telegram url carries the bot
             # token in its path, and a log line is exactly where that must not
             # end up.
@@ -195,9 +271,11 @@ class TelegramApi:
         self.file_url = f"https://api.telegram.org/file/bot{token}"
 
     async def call(self, method: str, body: dict | None = None,
-                   timeout: float = REQUEST_TIMEOUT):
+                   timeout: float = REQUEST_TIMEOUT,
+                   slow_after: float = SLOW_REQUEST_SECONDS):
         payload = await _json_request(f"{self.base_url}/{method}", "POST",
-                                      body or {}, timeout=timeout)
+                                      body or {}, timeout=timeout,
+                                      slow_after=slow_after)
         if not payload.get("ok"):
             raise ApiError(payload.get("description", f"Telegram {method} failed"))
         return payload.get("result")
@@ -206,11 +284,16 @@ class TelegramApi:
         # my_chat_member reports being added to a group and promoted in it,
         # which is how the forum is discovered without the operator reading a
         # log. A plain `message` subscription never delivers it.
-        body = {"timeout": 30,
+        body = {"timeout": POLL_HOLD_SECONDS,
                 "allowed_updates": ["message", "my_chat_member"]}
         if offset is not None:
             body["offset"] = offset
-        return await self.call("getUpdates", body)
+        # A quiet poll is *meant* to take the whole hold, so "slow" for this
+        # one call starts after it. Before this, every quiet poll logged a
+        # slow-request warning, some 2300 lines a day around the 240 that
+        # were real.
+        return await self.call("getUpdates", body,
+                               slow_after=POLL_HOLD_SECONDS + SLOW_REQUEST_SECONDS)
 
     @staticmethod
     def _reply(body: dict, reply_to: int | None) -> dict:
@@ -270,7 +353,7 @@ class TelegramApi:
             try:
                 # Longer than the JSON timeout: this is an upload, and the
                 # limit is 50MB of it.
-                with urllib.request.urlopen(request, timeout=110) as response:
+                with _open(request, 110) as response:
                     payload = json.loads(response.read() or b"{}")
             except urllib.error.HTTPError as error:
                 try:
@@ -311,7 +394,7 @@ class TelegramApi:
             try:
                 # A download, sized like the upload timeout rather than the
                 # JSON one, and streamed so a 20MB file is never held twice.
-                with urllib.request.urlopen(request, timeout=110) as response:
+                with _open(request, 110) as response:
                     with into.open("wb") as sink:
                         shutil.copyfileobj(response, sink)
             except urllib.error.HTTPError as error:

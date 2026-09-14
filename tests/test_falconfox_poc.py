@@ -1779,7 +1779,7 @@ class TelegramEventTests(unittest.IsolatedAsyncioTestCase):
         def raise_timeout(*_args, **_kwargs):
             raise TimeoutError("The read operation timed out")
 
-        with patch("urllib.request.urlopen", raise_timeout):
+        with patch("falconfox_telegram.api._open", raise_timeout):
             with self.assertRaises(ApiError):
                 await _json_request("http://localhost/nowhere")
 

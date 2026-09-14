@@ -8,31 +8,40 @@ Record what fails, under what conditions, and how bad it is — enough that
 whoever picks it up does not have to rediscover it. Delete the entry when the
 fix lands.
 
-## Telegram calls from this host intermittently hang until the read timeout
+## Telegram's IPv6 front end ignores about one connection attempt in ten
 
-*Diagnosed while dogfooding the turn-feedback simplification, 2026-09-12.
-Cause unknown; the symptom is now contained rather than fixed.*
+*Symptom recorded 2026-08-25 and 2026-09-12 as calls that "hang until the
+read timeout, cause unknown". Cause measured 2026-09-14. Contained the same
+day: the client now connects over IPv4 first, with IPv6 as the fallback, and
+gives each attempt a three-second timeout of its own. The underlying loss is
+Telegram's and remains.*
 
-A call to the Bot API occasionally stops responding and sits there until
-`urlopen`'s read timeout (40s, `REQUEST_TIMEOUT`). It is not load: the host
-was idle, the bot's run-queue wait across a CPU-heavy stretch measured 0ms,
-and round trips to `api.telegram.org` measure ~50ms when they work at all.
-Today's journal has it on `getUpdates` ("Telegram polling failed:
-TimeoutError"), and the comment in `_send_action` records it from 2026-08-25
-on `sendChatAction`.
+What is wrong: a plain TCP connection attempt from this host to
+`api.telegram.org` over IPv6 goes unanswered roughly one time in ten, at a
+steady rate of about one lost attempt every ten seconds regardless of how
+many are made. Over five minutes of interleaved attempts, 18 of 120 to
+Telegram were lost against 0 of 120 each to Cloudflare and Google, and an
+IPv6 traceroute to Telegram shows no packet loss, so it is their connection
+handling rather than the route. IPv4 never lost one.
 
-How it was found: "typing…" died mid-turn and the progress message arrived in
-a 48-second batch. Watching the bot's sockets for 62s of a live turn showed
-about six connections where a 4-second tick should produce fifteen — the
-indicator loop was blocked inside one hung call.
+What it did: this host prefers IPv6, and the client applied one 40-second
+timeout to connecting and reading alike. An unanswered IPv6 attempt
+therefore cost the full 40 seconds before the fallback to IPv4, after which
+the call completed normally. That is why the journal showed some 240 polls a
+day taking exactly 70 seconds (40 lost, then the 30-second hold) and
+succeeding, and only 31 failing. During each of those 40 seconds the bot was
+blind, which is where "the bot took 30 seconds to notice my /help" came
+from. A reply or a progress edit that drew the same short straw sat for 40
+seconds too.
 
-What has been done about it: the chat action and the progress edit no longer
-share a task, so one hang can no longer take the other down; the action gets
-an 8-second timeout, since one older than that is worthless anyway; and
-`_json_request` logs any call over 10s at WARNING, so the next occurrence
-leaves a trace. None of that explains why the calls hang. If the WARNING lines
-show a pattern (one method, one time of day, one IPv6 route — the bot reaches
-Telegram over v6 here), that is the thread to pull.
+Ruled out on the way: DNS (400 lookups, none slow), the bot's event loop
+(one daemon reconnect in a day, not hundreds), and thread starvation (the
+pool has 32 workers).
+
+Left as it is: the loss itself. Nothing on this host can fix Telegram's
+IPv6 ingress. With IPv4 tried first it costs nothing in normal operation,
+and if IPv4 ever stops answering, the fallback to IPv6 costs three seconds
+per call rather than the bot.
 
 ## A lost topic icon cannot be repaired by setting the same tag again
 

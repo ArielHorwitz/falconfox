@@ -919,3 +919,163 @@ async def _no_wait(seconds: float) -> None:
     """asyncio.sleep, without the wait: the reconnect backoff is not what any
     of these tests are about."""
     return None
+
+
+class ConnectTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    """A connection attempt has its own short timeout, per address, so an
+    unanswered IPv6 attempt falls through to IPv4 in seconds rather than
+    costing the whole read timeout. Measured cause of the 70-second polls
+    and the 40-second stalls before the bot noticed a message."""
+
+    def _connect(self, resolved, refuse):
+        """Drive _Connection.connect against a fake resolver and fake sockets.
+        `refuse` names the families whose connect fails. Returns the attempts
+        made, in order, and the socket that won."""
+        from falconfox_telegram import api
+        attempts = []
+
+        class FakeSocket:
+            def __init__(self, family, kind, proto):
+                self.family = family
+                self.timeouts = []
+                self.closed = False
+
+            def settimeout(self, value):
+                self.timeouts.append(value)
+
+            def bind(self, address):
+                pass
+
+            def connect(self, sockaddr):
+                attempts.append(self.family)
+                if self.family in refuse:
+                    raise TimeoutError("timed out")
+
+            def close(self):
+                self.closed = True
+
+        class FakeContext:
+            def wrap_socket(self, sock, server_hostname=None):
+                sock.server_hostname = server_hostname
+                return sock
+
+        connection = api._Connection("api.telegram.org", timeout=40.0,
+                                     context=FakeContext())
+        with patch.object(api.socket, "getaddrinfo", lambda *a, **k: resolved), \
+                patch.object(api.socket, "socket", FakeSocket):
+            connection.connect()
+        return attempts, connection.sock
+
+    def test_ipv4_is_tried_first_even_when_the_resolver_lists_ipv6_first(self):
+        from falconfox_telegram import api
+        socket_module = api.socket
+        resolved = [
+            (socket_module.AF_INET6, socket_module.SOCK_STREAM, 6, "", ("2001:db8::9", 443, 0, 0)),
+            (socket_module.AF_INET, socket_module.SOCK_STREAM, 6, "", ("192.0.2.9", 443)),
+        ]
+        attempts, sock = self._connect(resolved, refuse=set())
+        self.assertEqual(attempts, [socket_module.AF_INET])
+        # The connect used the short timeout, then reads got the long one.
+        self.assertEqual(sock.timeouts, [api.CONNECT_TIMEOUT, 40.0])
+        self.assertEqual(sock.server_hostname, "api.telegram.org")
+        self.assertLess(api.CONNECT_TIMEOUT, api.REQUEST_TIMEOUT)
+
+    def test_ipv6_remains_the_fallback_when_ipv4_does_not_answer(self):
+        from falconfox_telegram import api
+        socket_module = api.socket
+        resolved = [
+            (socket_module.AF_INET6, socket_module.SOCK_STREAM, 6, "", ("2001:db8::9", 443, 0, 0)),
+            (socket_module.AF_INET, socket_module.SOCK_STREAM, 6, "", ("192.0.2.9", 443)),
+        ]
+        attempts, sock = self._connect(resolved, refuse={socket_module.AF_INET})
+        self.assertEqual(attempts, [socket_module.AF_INET, socket_module.AF_INET6])
+        self.assertEqual(sock.family, socket_module.AF_INET6)
+
+    def test_no_address_answering_is_one_error_not_a_hang(self):
+        from falconfox_telegram import api
+        socket_module = api.socket
+        resolved = [
+            (socket_module.AF_INET, socket_module.SOCK_STREAM, 6, "", ("192.0.2.9", 443)),
+        ]
+        with self.assertRaises(OSError):
+            self._connect(resolved, refuse={socket_module.AF_INET})
+
+    async def test_every_call_goes_through_the_one_opener(self):
+        from falconfox_telegram import api
+        calls = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def read(self):
+                return b'{"ok": true, "result": []}'
+
+        def fake_open(request, timeout):
+            calls.append((request.full_url.rsplit("/", 1)[-1], timeout))
+            return FakeResponse()
+
+        with patch("falconfox_telegram.api._open", fake_open):
+            await api.TelegramApi("token").updates(None)
+            await api.TelegramApi("token").call("getMe", timeout=7)
+        self.assertEqual(calls, [("getUpdates", api.REQUEST_TIMEOUT), ("getMe", 7)])
+
+
+class SlowRequestThresholdTests(unittest.IsolatedAsyncioTestCase):
+    """A quiet long poll takes its whole hold by design, so it is only slow
+    once it has outlasted that. Every other call is slow after the usual
+    threshold."""
+
+    async def _run(self, slow_after, elapsed):
+        from falconfox_telegram import api
+        clock = iter([100.0, 100.0 + elapsed])
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        with patch("falconfox_telegram.api._open", lambda request, timeout: FakeResponse()), \
+                patch("falconfox_telegram.api._now", lambda: next(clock)):
+            with self.assertLogs("falconfox.telegram.api", level="DEBUG") as logs:
+                api.log.debug("marker")
+                await api._json_request("https://x/bot-token/getUpdates", "POST", {},
+                                        slow_after=slow_after)
+        return [line for line in logs.output if "slow request" in line]
+
+    async def test_a_quiet_poll_is_not_slow(self):
+        from falconfox_telegram import api
+        threshold = api.POLL_HOLD_SECONDS + api.SLOW_REQUEST_SECONDS
+        self.assertEqual(await self._run(threshold, 30.5), [])
+
+    async def test_a_poll_that_outlasts_its_hold_is_slow(self):
+        from falconfox_telegram import api
+        threshold = api.POLL_HOLD_SECONDS + api.SLOW_REQUEST_SECONDS
+        lines = await self._run(threshold, 70.1)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("getUpdates took 70.1s", lines[0])
+        self.assertNotIn("bot-token", lines[0])
+
+    async def test_the_poll_asks_for_its_own_threshold(self):
+        from falconfox_telegram import api
+        seen = {}
+
+        async def fake_call(self, method, body=None, timeout=api.REQUEST_TIMEOUT,
+                            slow_after=api.SLOW_REQUEST_SECONDS):
+            seen["slow_after"] = slow_after
+            seen["hold"] = body["timeout"]
+            return []
+
+        with patch.object(api.TelegramApi, "call", fake_call):
+            await api.TelegramApi("token").updates(None)
+        self.assertEqual(seen["hold"], api.POLL_HOLD_SECONDS)
+        self.assertEqual(seen["slow_after"], api.POLL_HOLD_SECONDS + api.SLOW_REQUEST_SECONDS)
+        self.assertLess(api.POLL_HOLD_SECONDS, api.REQUEST_TIMEOUT)
