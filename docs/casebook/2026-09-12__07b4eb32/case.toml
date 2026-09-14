@@ -1,5 +1,5 @@
-title = "Hardening survey: where the daemon and the Telegram client can lose a turn, strand a session, or exceed their own limits, and what structure removes each class"
-status = "open"
+title = "Hardening: a session is one record, a turn is one record, every transition is serialised, state is written atomically, and one action table serves both transports"
+status = "closed"
 created = "2026-09-12T21:30:00.000000"
 keywords = ["hardening", "maintainability", "architecture", "refactoring", "tech-debt",
             "concurrency", "race", "crash-consistency", "atomic-write", "session-lifecycle",

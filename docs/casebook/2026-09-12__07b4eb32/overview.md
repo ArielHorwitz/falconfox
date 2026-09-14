@@ -6,7 +6,9 @@ state that can tear, and shapes that make the next change expensive. It is
 explicitly **not** about style, naming, or idiom. A finding earns its place
 only by naming a concrete consequence.
 
-Opened 2026-09-12 against `dev` at 9b43889.
+Opened 2026-09-12 against `dev` at 9b43889. Merged to `dev` on 2026-09-13
+and closed on 2026-09-14 after the dev instance came up clean on it: both
+units active, no restarts, no errors in the journal, sessions intact.
 
 ## Method
 
