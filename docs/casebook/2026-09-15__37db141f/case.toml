@@ -1,0 +1,7 @@
+title = "Unprompted agent turns: output an agent produces outside a user-initiated turn reaches nobody, and the turn should become the episode"
+status = "open"
+created = "2026-09-15T00:00:00.000000"
+keywords = ["telegram", "telegram-bot", "turn", "episode", "unprompted", "background-task",
+            "progress-message", "reply", "final-response", "narration", "tool-call",
+            "quiescence", "idle-detection", "agent-initiated", "notification",
+            "orientation", "acp", "session_update", "transcript", "falconfox"]
