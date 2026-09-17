@@ -288,6 +288,21 @@ said.
 ACP is not ours, so the likely shape is a protocol proposal first, with
 whatever a given backend already offers as the interim.
 
+## Show the full narration of every turn, not just the last
+
+*From the phone, 2026-09-11.*
+
+Wanted: rework the progress message so it shows the full messages of all
+turns rather than only the most recent one.
+
+Which of two things this is aimed at is not settled, and it may be both.
+`PROGRESS_LIMIT` caps a progress message at 3500 characters by trimming its
+oldest lines, and `THOUGHT_PREVIEW_CHARS` cuts each thought to its opening 280
+— so a talkative turn loses its own beginning and the detail of its thinking.
+Separately, a progress message belongs to one turn: `_forward` makes a new one
+per turn and leaves the old one standing, so earlier turns survive only as
+however far up the chat they have scrolled, never gathered anywhere.
+
 ## Deliberately not planned
 
 **Off-loopback remote access + bearer token.** Listed in the pivot case as the
