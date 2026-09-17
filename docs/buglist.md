@@ -114,6 +114,29 @@ CLI formats the same way whether a terminal or a phone is asking. A thinner
 default layout, a configured width, or a narrow human form alongside `--json`
 for the agent — undecided, and worth deciding before any of it is built.
 
+## A restart prepends the previous round's turns
+
+*Reported from use, 2026-09-11. Not investigated.*
+
+After a daemon restart, a session's next turn appears to carry the previous
+round's turns in front of it, and in a more verbose form than the original
+exchange was.
+
+The mechanism that would do exactly this is `_context_prompt`: a session whose
+backend did not load natively gets its saved transcript prepended to the next
+prompt, wrapped in `=== prior conversation ===`. It goes out with
+`record=False`, so it never lands in the transcript itself, and it is
+announced by a notice saying the context was re-sent imperfectly.
+
+That notice is the cheap thing to look for. If it is there, the replay is
+working as designed and the complaint is what it costs. If it is not,
+something else is doing the prepending.
+
+Worth settling either way whether the path should fire at all here. It is
+conditioned on the resume having failed to load, so a backend that does resume
+natively reaching it means the real defect is a silent resume failure, with
+the replay only the symptom.
+
 ## Known-broken by design
 
 **The web UI does not work against the flat session model.** Flattening removed
