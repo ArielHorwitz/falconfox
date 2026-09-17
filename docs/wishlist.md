@@ -271,6 +271,23 @@ them.
 Reconcile the forum against the sessions it is meant to reflect: fix topic
 names and icons, handle deleted topics, and the rest of what drifts.
 
+## Deliver orientation as system instructions, not as user-voice context
+
+*From the phone, 2026-09-11.*
+
+Orientation reaches a session as ordinary prompt content blocks. `PromptPart`
+carries a `system` flag, but the flag is ours rather than ACP's, which has no
+notion of a system turn: it tells clients to hide the text, and the agent
+receives it in the user's voice like anything else.
+
+Wanted: a better mechanism than that. Ideally a set-or-append system
+instructions lever on the ACP surface itself, so what a session is told about
+itself arrives as what it is instead of as something the user appears to have
+said.
+
+ACP is not ours, so the likely shape is a protocol proposal first, with
+whatever a given backend already offers as the interim.
+
 ## Deliberately not planned
 
 **Off-loopback remote access + bearer token.** Listed in the pivot case as the
