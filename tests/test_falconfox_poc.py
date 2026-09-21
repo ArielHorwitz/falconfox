@@ -590,6 +590,20 @@ class LiveSessionCapTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.coordinator._ensure_slot())
         self.assertEqual(self.stopped, ["stale"])
 
+    async def test_eviction_says_nothing_to_the_user(self):
+        # It used to announce itself, from when eviction also closed the
+        # session's topic. Nothing closes now and `send` auto-resumes, so the
+        # user sees a slower first turn and nothing else -- a notice about
+        # that is noise in a chat they are reading on a phone.
+        emitted = []
+        self.coordinator._emit = emitted.append
+        self._limit(1)
+        self._live("stale", last_active="1")
+        self.assertTrue(await self.coordinator._ensure_slot())
+        self.assertEqual(self.stopped, ["stale"])
+        self.assertEqual([event for event in emitted
+                          if event.get("kind") == "capacity"], [])
+
     async def test_a_working_session_is_never_evicted(self):
         # At the floor with everything busy: no candidate, and no turn in
         # flight is destroyed to make one.
@@ -2534,7 +2548,7 @@ class ForumTopicTests(unittest.IsolatedAsyncioTestCase):
     async def test_stopping_a_session_leaves_its_topic_open(self):
         # Closing would discourage the action that recovers -- `send`
         # auto-resumes -- and its bookkeeping did not survive a bot restart,
-        # leaving topics shut for good. The capacity notice says it instead.
+        # leaving topics shut for good. An open topic needs no explaining.
         with tempfile.TemporaryDirectory() as directory:
             bot = self._bot(directory)
             await bot._handle_event({

@@ -512,18 +512,12 @@ class SessionCoordinator:
         victim = candidates[0]
         self.log.info("session limit %d reached: stopping least-recently-used %s (%s)",
                       limit, victim, self._records[victim].name)
-        # Said before the stop, in the victim's own words, so a topic that
-        # closes under the user reads as the system managing memory rather
-        # than as their session mysteriously dying. `kind` marks the notices a
-        # client should surface: most notices are internal chatter.
-        self._emit({
-            "type": "notice", "session_id": victim, "level": "info",
-            "kind": "capacity",
-            "message": f"Stopped to free a session slot — {limit} of {limit} of "
-                       f"your sessions were active and this one was idle "
-                       f"longest. Nothing is lost: send a message here to pick "
-                       f"it up again.",
-        })
+        # Deliberately silent. This once announced itself in the victim's own
+        # words, back when eviction also closed the session's topic and the
+        # user needed telling why. It no longer closes anything: the next
+        # message resumes the session by itself, so from the user's seat an
+        # eviction is a slower first turn and nothing else. A notice about an
+        # invisible event is noise, and the log line above keeps the record.
         await self.stop_session(victim)
         return True
 
@@ -535,6 +529,9 @@ class SessionCoordinator:
         live = len(self.live_session_ids())
         self.log.info("session %s queued for a slot (%d live, limit %d)",
                       record.session_id, live, self.config.max_live_sessions)
+        # Worth saying, unlike eviction: the user has written and nothing is
+        # happening, and only this explains the silence. `kind` marks the
+        # notices a client should surface; most are internal chatter.
         self._emit({"type": "notice", "session_id": record.session_id, "level": "info",
                     "kind": "capacity",
                     "message": f"Waiting for a free session slot — {live} of "

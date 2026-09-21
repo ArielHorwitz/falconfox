@@ -3181,7 +3181,8 @@ class FalconFoxTelegramBot:
         stored session, so closing would discourage the very action that
         recovers it, and the closed state needed bookkeeping that outlived a
         bot restart badly (a reopen owed but forgotten left topics shut for
-        good). The capacity notice already says what happened.
+        good). Leaving it open is also why eviction says nothing: with the
+        topic untouched there is nothing for the user to explain away.
         """
         session_id = session.get("session_id")
         thread = self._topics.get(session_id)
