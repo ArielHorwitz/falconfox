@@ -43,49 +43,6 @@ IPv6 ingress. With IPv4 tried first it costs nothing in normal operation,
 and if IPv4 ever stops answering, the fallback to IPv6 costs three seconds
 per call rather than the bot.
 
-## A lost topic icon cannot be repaired by setting the same tag again
-
-`_apply_icon` skips the API call when the icon it remembers for a session
-already matches the one the tags ask for. That is deliberate -- every edit
-posts a service message into the topic, so acting on non-changes would be
-chat noise -- but it means the bot's memory, not the topic, decides whether
-the call happens.
-
-So if an icon change is ever genuinely lost on the way to a client, re-setting
-the same tag does nothing: the bot believes the topic already wears it. The
-workaround is to tag through a different value and back, which forces two real
-edits.
-
-Seen first on 2026-09-09 and read then as client-side render lag. That
-reading was wrong, see below.
-
-## Topic icons intermittently do not reach clients
-
-A tag change sometimes leaves a client showing the previous icon, at random:
-most changes land, some do not. Measured on 2026-09-10, the half we own is
-provably healthy. The daemon emits `session_updated`, the bot applies the
-icon in well under a second, and Telegram accepts the edit. Re-sending the
-same icon afterwards answers `TOPIC_NOT_MODIFIED`, which is the only way to
-read a topic's icon back, since `getForumTopic` and `getForumTopics` do not
-exist (re-measured 2026-09-10, still 404). So the server holds what the bot
-believes it holds, and the divergence is downstream of that.
-
-Two things were ruled out. It is not render lag: a stale icon survived a
-full client cache clear, so the client was being served the stale value
-rather than failing to draw the fresh one. It is not lost service messages
-being replayed either, since the topic history contains none.
-
-One aggravator is known. Several icon edits in quick succession (three in
-1.3 seconds, while testing) left the authoritative icon correct but clients
-stuck on the *first* of the burst, which suggests Telegram's own topic-list
-index races rapid edits. Ordinary tagging does not usually burst like that,
-so this explains a test artifact rather than the reported symptom.
-
-The bot used to delete the "changed the topic icon" notice about 60ms after
-causing it, which starved clients of the one durable record of the change.
-That sweep was dropped on 2026-09-10 to take it out of the picture, and
-whether the intermittency survives without it is the open question.
-
 ## Command output is too wide for a phone
 
 *Reported from use, 2026-09-10. Narrowed to mobile the same day.*
