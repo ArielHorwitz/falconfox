@@ -166,25 +166,6 @@ since the agent finds them and follows them. Pick it up when the shape has
 settled. The surface half can land earlier and independently, since it adds a
 capability rather than a description, so it does not rot.
 
-## Tell a session when its turn was interrupted
-
-*From the session-context discussion, 2026-09-04.*
-
-A turn killed mid-flight by a daemon restart or an eviction leaves no trace
-the agent can see. Its next turn opens on the user's next message as if
-nothing happened, so it cannot tell whether the work it was doing finished,
-half-finished, or never started, and it will often assert one of those
-confidently.
-
-FalconFox knows what the session cannot: it had a turn in flight when it
-stopped, and roughly how far in. The fix is to say so on the next send, in the
-same hidden-context channel that already re-sends a transcript to a backend
-without native resume.
-
-It was deferred behind the FalconFox session context, which needed the same
-channel and landed first (2026-09-07). That reason is spent: the channel
-exists, and this is a second producer for it.
-
 ## Say something when an infrastructure session is tagged
 
 *From the /help environments case, 2026-09-08.*
@@ -229,11 +210,13 @@ so there is capability negotiation to write, with a text fallback for every
 backend that says no. The motivating case is an attached image arriving as an
 `ImageContentBlock` the model sees directly, rather than a path it must open.
 
-**The producers still gluing text together.** Orientation was moved
-deliberately; these were not, and each is a string where structure would do:
-the interrupted-turn notice, the `attached: <path>` lines the tray adds, and
-the re-sent transcript, which is a whole prior conversation flattened into one
-block. The tray composes its lines in the client rather than the daemon
+**The producer still gluing text together.** The re-sent transcript became a
+`PromptPart` of its own with the orientation case's array, and the
+interrupted-turn notice was built as one by the hardening case
+([2026-09-12__07b4eb32](casebook/2026-09-12__07b4eb32/overview.md)), so both
+are blocks now, if text ones. What remains glued is
+the `attached: <path>` lines the tray adds to the user's own message. The tray
+composes them in the client rather than the daemon
 ([2026-09-09__33198985](casebook/2026-09-09__33198985/overview.md)), so its
 half of this lands when the `send` action grows an array a client can fill.
 

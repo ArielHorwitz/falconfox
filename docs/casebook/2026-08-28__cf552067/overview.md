@@ -1,5 +1,13 @@
 # Overview
 
+**Status: CLOSED (2026-09-24).** Route B was built and merged the day after
+this case opened (`120463f`, 2026-08-29) and has carried every session on
+both instances since. The session that ran this case ended before it wrote
+the closure, so this one is written from the record. What was built, how the
+open decisions came out, and what was deferred is in ["What was
+built"](#what-was-built-closed-2026-09-24) at the end. Everything between is
+the investigation as it was written.
+
 FalconFox's Telegram client speaks to **one session at a time**. Two chats are
 configured — a focus chat backed by a rotating ephemeral manager session, and
 a work chat that forwards to whichever session a pointer file names — so
@@ -231,3 +239,62 @@ Adjacent but separate: **"Make use of Telegram message streaming"**
 (`sendMessageDraft`, also Bot API 9.3). It arrived in the same API version and
 touches the same messages, but it is a question about what a *turn* looks
 like, not about where turns live. Keep the two apart.
+
+## What was built (closed 2026-09-24)
+
+**A topic per session, on route B.** `120463f` (2026-08-29) replaced the
+focus/work divide with a supergroup forum: routing is (chat, thread) to
+session, the pointer file, `/switch` and the work chat id are gone, and the
+session list is the topic list. The same day the bot learned to adopt a forum
+from being added to it and to follow it when it moves (`5edf5e7`), to take an
+owner id instead of two chat ids (`9cd0acd`), and to run the private chat as
+a session of its own (`85cabcf`), which is the "setup and meta session" this
+case proposed. The bootstrap step that needed `journalctl` is gone with it.
+
+**The open decisions, as they came out.**
+
+1. Route B. Settled here, and built.
+2. The manager lives in General. It is the daemon's own role, composed into
+   orientation by the orientation case
+   ([2026-09-09__1071993a](../2026-09-09__1071993a/overview.md)), and General
+   is not a topic the bot makes: it is the one that comes with the forum.
+3. The bot owns the topic namespace. Settled here.
+4. Notifications kept the turn-feedback balance: the progress message is sent
+   silently and the reply pings. Per-topic muting was left to the user's own
+   client settings and never became a lever the bot pulls.
+5. The topic icon did **not** become the state channel. Tags were first drawn
+   as icons (`255f809`, 2026-09-08), then moved into the topic title with the
+   icon becoming one constant per topic (`2731629`, 2026-09-12), for the
+   reasons measured in
+   [what-a-topic-displays-tags-in-the-title-a-constant-icon.md](what-a-topic-displays-tags-in-the-title-a-constant-icon.md).
+   Idle, working and stuck live in the progress message instead, which the
+   turn-feedback simplification
+   ([2026-09-12__c716ca46](../2026-09-12__c716ca46/overview.md)) made the one
+   account of a turn.
+
+**Eviction stopped closing topics.** The count cap shipped with this case
+(`d2d959d`) and at first closed an evicted session's topic and said why.
+Since `send` auto-resumes, closing discouraged the very action that recovers,
+exactly as ["What the user's own hands do to a
+topic"](#what-the-users-own-hands-do-to-a-topic) suspected: `ebba986`
+(2026-08-31) stopped closing, and `5a19e81` (2026-09-21) dropped the notice
+too, since a slower first turn is now the only trace. The memory ceiling
+itself went to its own case
+([2026-08-30__32fb1959](../2026-08-30__32fb1959/overview.md)).
+
+**Deferred: reconciliation.** Nothing mirrors back from Telegram, and the Bot
+API still cannot enumerate topics. The hardening case
+([2026-09-12__07b4eb32](../2026-09-12__07b4eb32/overview.md)) built the
+reactive half, a dead topic is replaced rather than mourned, and by the
+user's decision of 2026-09-13 the rest was not chased one face at a time. It
+is recorded in [wishlist.md](../../wishlist.md) as "Telegram forum desync
+reconciliation" for a case of its own.
+
+**The two wishlist entries named above are both gone.** The pointer-rename
+entry was obsoleted, since the pointer no longer exists. The mid-turn-message
+entry was completed: a message sent mid-turn is queued, the queue explains
+itself once, and `/unqueue` drops it.
+
+Not recorded here: whether threaded mode was ever turned back off on the
+private chat. Both instances run a forum, and the private chat is the setup
+and meta session as designed.

@@ -7,10 +7,16 @@ converged on a single principle: **every option a backend advertises (model,
 reasoning effort, approval mode, toggles) is handled identically; the model is not
 special.** Implemented and merged to `dev` as commit `35e747f`.
 
-**Status: paused.** Config options and slash commands have shipped, documented, and
-written up below. The remaining ACP surface (see
-[Roadmap](#roadmap--remaining-acp-surface-future-sessions)) is on hold — the threads
-stand ready to be picked up, each in its own session, when work resumes.
+**Status: CLOSED (2026-09-24).** Paused from 2026-07-16 with config options
+and slash commands shipped. Closed without resuming: the project has since
+become FalconFox (see
+[2026-07-24__d53a46fd](../2026-07-24__d53a46fd/overview.md)), the web UI this
+case built its popover and palette into is dead, and the sessions are driven
+from Telegram. Of the roadmap threads below, prompt capabilities lives on as
+the wishlist entry on typed content blocks, the terminal question is moot
+since agents run their own commands and the chat has `/sh`, and fork and
+per-session config persistence were never wanted enough to pick up. Kept as
+the record of how the ACP surface was read at the time.
 
 ## Background: the ACP finding
 

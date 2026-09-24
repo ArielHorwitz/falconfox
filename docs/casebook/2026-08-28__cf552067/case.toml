@@ -1,5 +1,5 @@
 title = "Parallel sessions in Telegram: a topic per session, and the end of the focus/work chat divide"
-status = "open"
+status = "closed"
 created = "2026-08-28T19:01:43.212676"
 keywords = ["telegram", "telegram-bot", "forum-topics", "topics", "threaded-mode",
             "message-thread-id", "botfather", "supergroup", "parallel-sessions",

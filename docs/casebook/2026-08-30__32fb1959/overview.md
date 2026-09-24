@@ -1,5 +1,14 @@
 # Overview
 
+**Status: CLOSED (2026-09-24).** Of the three layers, the count cap is built
+and has held since 2026-08-29, and the sleepable infrastructure that the
+handoff describes as "already done" is done. The inactivity and memory
+layers were never started, and the session that opened this handoff is gone.
+By the user's decision they are **deferred and recorded here rather than on
+the wishlist**: this case is the context for them, and future work on either
+should start by reading it. What shipped, what moved, and what stays deferred
+is in ["Where this closed"](#where-this-closed-2026-09-24) at the end.
+
 The daemon was **OOM-killed carrying ten sessions** on a 951 MB / 1 vCPU host
 on 2026-08-29, nineteen minutes into a turn, after the watchdog had logged
 sustained thrashing for minutes. Every session runs its own ACP backend
@@ -223,3 +232,44 @@ and **different messages for different causes**, so the reason stays legible.
   user's only phone interface. Use it.
 - The daemon runs as a **systemd user unit**, which is what makes per-unit
   cgroup accounting and `MemoryHigh=` available at all.
+
+## Where this closed (2026-09-24)
+
+**Built.** The count cap (`d2d959d`, 2026-08-29): `_ensure_slot`,
+`_drain_queue` and `live_session_ids` in `src/falconfox/coordinator.py`,
+least-recently-used among idle sessions by `last_active`, with a spawn that
+finds no room queued and the user told so. Sleepable infrastructure
+(`9765843`, 2026-08-30): `hidden` split from `ephemeral`, the manager and the
+private chat persist and resume, and the bot remembers which sessions they
+are across its own restarts.
+
+**Moved since, and worth knowing before reading the handoff.**
+
+- The config key the handoff names, `max_active_sessions`, is now
+  `max_live_sessions` (`4b9e598`, 2026-09-10), and the compatibility read for
+  the old name is gone (`78411f8`).
+- Every rule that privileged infrastructure has been undone, as the handoff
+  itself records. The one ordering question it left open, where a *working*
+  infrastructure session sorts, is dissolved with it: nothing sorts by class,
+  and a working session of any kind is never a candidate.
+- Eviction no longer closes the topic (`ebba986`, 2026-08-31) and no longer
+  announces itself (`5a19e81`, 2026-09-21). The legibility requirement below
+  was written when eviction closed a topic under the user; with `send`
+  auto-resuming and nothing closing, a slower first turn is the only trace,
+  and a notice for it was noise. The queue notice stays.
+- Per-session state was folded into one `SessionRecord` by the hardening case
+  ([2026-09-12__07b4eb32](../2026-09-12__07b4eb32/overview.md)), and the
+  hardening also made slot handling one transition at a time (`658d59c`), so
+  the "one shared policy" the three layers were to fire into is a single
+  serialised path now.
+
+**Deferred, recorded here.** The inactivity layer and the memory layer, as
+designed above, are not built and are not wishlisted. Everything a future
+case needs is in this file: the three-layer shape, the eviction policy being
+orthogonal to the trigger, the measurements on the host (threshold on `anon`,
+PSI per unit, `MemoryHigh=` as the portable budget), the two traps, and the
+give-up rule. Since the closure the only memory signal in the code is the
+watchdog reading `/proc/pressure/memory` as evidence for its own log line;
+nothing acts on it. The count cap has been enough on this host at the
+session counts actually in use, which is why neither layer was reached for,
+not a judgement that they are unneeded.
