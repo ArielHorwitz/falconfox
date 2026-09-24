@@ -237,33 +237,6 @@ block. The tray composes its lines in the client rather than the daemon
 ([2026-09-09__33198985](casebook/2026-09-09__33198985/overview.md)), so its
 half of this lands when the `send` action grows an array a client can fill.
 
-## Remove the reactions mechanism
-
-*From the phone, 2026-09-11.*
-
-The bot marks each message the user sends with one of six state emoji — 👀
-held, 🫡 handed to the daemon, ✍ being worked on, 👌 delivered, 💔 dropped, 😱
-failed. Wanted: that the mechanism goes away.
-
-No reason is recorded with the request. Whoever picks this up should get one
-first, because the marker was a deliberate choice and what it buys is listed
-below.
-
-Removal touches the `REACT_*` constants in `bot.py`, `_react` and its fourteen
-call sites, and `Telegram.set_reaction` in `api.py`. It is outbound only:
-`message_reaction` is not in `allowed_updates` and nothing reads a reaction
-back, so no input path can break.
-
-The cost is that a reaction spends neither a message nor a service message,
-which is why it was chosen for a chat where every line is clutter on a phone
-screen. Three things lean on it. The queue marks every held message, while
-`QUEUED_FIRST` deliberately explains itself only once. The attachment tray
-marks each file 👀, which the inbound-attachments case built as what stays true
-after its one-shot receipt has scrolled away. And the end of a turn is the
-only per-message record that it delivered, was cancelled, or failed. Dropping
-the mechanism means either leaving those unsaid or paying messages to say
-them.
-
 ## Telegram forum desync reconciliation
 
 *From the phone, 2026-09-11. Recorded as stated, not worked out.*

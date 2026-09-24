@@ -1,5 +1,13 @@
 # Overview
 
+**Status: CLOSED (2026-09-24).** Opened and built 2026-09-12 against `dev` at
+6450b8c, merged the same day as 2fa389d and 9b43889, and in continuous use on
+the dev instance since. Closed on use rather than on tests, which is the
+standard the case it supersedes set: twelve days of phone use, no complaint
+against any of the three removals, and the one desk guess it named
+(`PROGRESS_CLOCK_SECONDS`) never touched. See ["Where this
+stands"](#where-this-stands-closed-2026-09-24).
+
 The turn-feedback case
 ([2026-08-24__165f0606](../2026-08-24__165f0606/overview.md)) built three
 answers to one question, and said so plainly at the time: "fault 2 (idle /
@@ -161,25 +169,77 @@ stuck. An earlier draft of this case deleted that entry, on the reasoning that
 one action for the whole turn leaves no state to lag. That reasoning was
 wrong — the lag was never about which action was being sent.
 
-It is back on the list, rewritten around what is actually known: Telegram
-calls from this host hang until the read timeout, cause unknown. The symptom
-is contained now, not explained.
+It went back on the list, rewritten around what was known at the time:
+Telegram calls from this host hang until the read timeout, cause unknown. The
+symptom was contained, not explained.
 
-The unexplained ["extra 'Working...' message appears after the
-reply"](../../buglist.md) is *not* fixed here and stays on the list too.
+**It has since been explained, and the explanation came out of this case's one
+line of logging.** The `slow request` WARNING added here is what turned a
+40-second stall from something a reader had to notice on a phone into something
+the journal counts, and two days later the hardening case measured it: a TCP
+connection attempt from this host to `api.telegram.org` over IPv6 goes
+unanswered about one time in ten, and the client applied a single 40-second
+timeout to connecting and reading alike. The buglist entry is now ["Telegram's
+IPv6 front end ignores about one connection attempt in
+ten"](../../buglist.md), and the containment there is to try IPv4 first and cap
+each connection attempt at three seconds.
 
-## Where this stands
+The numbers, from the journal, are the clearest thing this case produced:
 
-Built 2026-09-12, dogfooded the same day (see above), suite green at 261
-tests. **Open until it has been used further**,
-which is the standard the case it supersedes set for itself: the 2026-08-24
-case closed on a couple of days of phone use, not on a green suite, and the
-things it got wrong were the desk guesses it named as desk guesses.
+| | `slow request` lines |
+| --- | --- |
+| 12 Sep (logging added, IPv6 still preferred) | 936 |
+| 13 Sep | 2557 |
+| 14 Sep (IPv4-first lands) | 2199 |
+| 17–24 Sep | 1 to 4 a day |
 
-Two of those guesses are gone with this change (`TURN_ACTIONS` and
-`QUIET_TURN_SECONDS` were both listed there as unproven). The new one is
-`PROGRESS_CLOCK_SECONDS` (15), which is a one-line change if four refreshes a
-minute turns out to read as stalled or as churn.
+Two thousand a day was the rate at which this deployment had been silently
+losing forty seconds at a time, before and during this case, with nothing
+anywhere saying so.
 
-The open follow-up, filed rather than built: 429 handling in `api.py`, so the
-budget question stops being a matter of reasoning.
+The ["extra 'Working...' message appears after the reply"](../../buglist.md)
+entry, left open here, was also closed by the hardening case: `_finish_turn`
+tore a turn down by session key across three awaits, so a message arriving in
+that window had the id of its own progress message erased under it. Turns are
+torn down by identity now.
+
+## Where this stands (closed 2026-09-24)
+
+Built 2026-09-12, dogfooded the same day (see above), suite green at 261 tests
+on merge. Twelve days of use later, all of it still standing:
+
+- **One chat action, `typing`, for the whole turn.** No complaint since, and
+  the buglist entry about actions lagging the state is gone for a reason that
+  turned out to be the network rather than the mapping.
+- **No reactions.** The two things they carried alone are carried where this
+  case put them: the queue depth in the header, the tray by its own threaded
+  receipt and `/tray`.
+- **The clock instead of the quiet notice.** `PROGRESS_CLOCK_SECONDS` was the
+  one desk guess this case named as unproven, and it has not been touched.
+  Four refreshes a minute reads as live.
+
+The code has moved since, and survived the move. The hardening case
+([2026-09-12__07b4eb32](../2026-09-12__07b4eb32/overview.md)) opened against
+9b43889, this case's last commit, and rebuilt per-turn state as a single `Turn`
+record — so the two loops are `turn.activity_task` and `turn.progress_task`,
+the header's clock reads off `turn.started_at`, and the stale-tick guards ask
+whether a tick's turn is still the session's current turn rather than whether
+the session is mid-turn at all. One behaviour of this case's was refined there:
+the header always carries a clock now, where `_progress_header` used to omit
+one for a turn with no recorded start.
+
+This case also answers a wishlist entry it never referenced, and they are the
+same want a day apart: "Remove the reactions mechanism" (from the phone,
+2026-09-11) recorded that the mechanism should go, said no reason had been
+given, and asked that whoever picked it up get one first. The request that
+opened this case, the next day, is that reason — the markers are "more
+confusing or annoying than helpful" beside a progress message that says the
+same things in words. That entry is deleted here, per the wishlist's own rule
+that a picked-up item goes.
+
+One follow-up stays filed rather than built: ["Notice when Telegram
+rate-limits us"](../../wishlist.md). Half of it landed here as the slow-request
+WARNING; the 429 itself is still unhandled, so `retry_after` is still
+unparsed and the edit budget this case declined to guess at is still unmeasured.
+Nothing has hit it — one 429 in the week before this case, on `getUpdates` —
+which is why it is a wish and not a bug.

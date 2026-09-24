@@ -1,5 +1,5 @@
 title = "One account of a turn, not three: the reactions and the five chat actions come out, and the progress message absorbs what they said"
-status = "open"
+status = "closed"
 created = "2026-09-12T14:16:02.000000"
 keywords = ["telegram", "telegram-bot", "turn-feedback", "reactions",
             "setMessageReaction", "chat-action", "sendChatAction", "typing-indicator",
