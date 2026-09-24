@@ -6,9 +6,16 @@ settles a structure: **orientation is composed from named pieces, all of it
 delivered through the prompt channel, and each client owns the text that
 describes it.**
 
-Opened in discussion, 2026-09-09. Nothing below is built.
+Designed in discussion and built the same day. Merged to `dev` on
+2026-09-09 and **proven in use from the phone**; closed 2026-09-17. What was
+built is recorded at the end, including the three things the design did not
+anticipate.
 
-## Where it stands today
+Everything between here and that section is the reasoning as it was settled,
+written before the code existed. It is kept in the present tense it was
+written in.
+
+## Where it stood before this case
 
 Three texts exist, and a session gets at most two of them.
 
@@ -206,7 +213,7 @@ commands they describe. Hardcoding client text daemon-side would move them
 away from that code, which is a regression from the current state rather than
 a neutral choice.
 
-## Resume: the orientation is lost today
+## Resume: the orientation was being lost
 
 `_pending_context` is a single slot holding what gets prepended to the next
 prompt. At spawn it holds the orientation. On resume, when the backend cannot
@@ -406,6 +413,68 @@ Two consequences to expect. Existing sessions keep their old orientation until
 `/clear`, which is accepted. And `system: true`, dead until now, goes live and
 changes how the web UI renders those events.
 
+## What was built
+
+All eight steps, on `dev`, in two commits plus follow-ups: `b81b1c4` for
+orientation and `c051b0a` for help.
+
+- `src/falconfox/help.py` is new. `falconfox help [module]` walks the tree,
+  prints a module, or lists a branch.
+- `PromptPart` in `engine/session.py` carries `text`, `system` and `record`.
+  `AgentSession.send` takes a sequence of them and prompts with one block
+  each. `display_text` is gone, along with the concatenation it served.
+- `state.py` grew `run_dir`, `clients_dir` and `prepare_clients_dir`, and
+  `server.json` publishes the path.
+- The coordinator composes: `_orientation`, `_orientation_parts`,
+  `_role_orientation`, `_client_registrations`, `_help_index`.
+- `config.py` holds the global piece and `MANAGER_ORIENTATION` under
+  `ROLE_ORIENTATIONS`. The Telegram client holds `CLIENT_ORIENTATION`,
+  `CONCIERGE_ORIENTATION` and `COMMANDS_HELP`, and writes all three at
+  registration.
+- `_prepare_workspace` and its two callers are gone; no `AGENTS.md` or
+  `CLAUDE.md` is written anywhere.
+- `spawn` takes repeatable `--role`, and roles persist in `meta.toml`.
+
+Names have moved since: the hardening case
+([2026-09-12__07b4eb32](../2026-09-12__07b4eb32/overview.md)) folded per-session
+dictionaries into a `SessionRecord`, so `_pending_context[session_id]` is now
+`record.pending_context`. The design is unchanged -- producers still append,
+and a transcript replay is still the one part not recorded.
+
+## Three things the design did not anticipate
+
+**A piece that ends mid-line collides with the next one.** Blocks reach a
+backend as an array and are joined by it. The generated help index ended the
+global piece without a trailing newline, so a live session read
+`telegram.commands  Telegram commands# Talking through Telegram`. Fixed by
+normalising at composition rather than asking each author, since registered
+files are read stripped and their authors are other people's clients
+(`fcce64a`).
+
+**A listing is not an invitation.** `falconfox help telegram` printed bare
+module paths, which reads as output rather than as something to call again.
+Every listing now leads with how to open an entry (`769a84e`). The reader is
+usually an agent deciding whether a second turn is worth spending.
+
+**`system: true` was already there, and dead.** The flag existed on the
+message event, the web UI already styled it, `_transcript_text` already
+skipped it, and nothing had ever set it. Orientation adopted it rather than
+inventing a marker, and the skip -- harmless while nothing produced these
+events -- became exactly backwards and was removed.
+
+## Proven in use
+
+The user tested from the phone on the day it merged, and the strongest check
+was behavioural rather than recall: **tag a session that already has a tag**.
+Only orientation says a session may tag itself and that the call replaces the
+whole list, so an unoriented session silently drops the existing tag. It
+carried it forward.
+
+Also confirmed live: `falconfox help` and `falconfox help telegram.commands`
+from a session, and a work session answering a question about stopping a turn
+by reaching for the help module -- the whole chain, since a session cannot run
+`/help` itself.
+
 ## Related work
 
 - **`ed379c4`** wishlists using more than one prompt content block. **Pulled
@@ -415,6 +484,11 @@ changes how the web UI renders those events.
   another's single slot, and an array is what stops that being possible.
 - **`_context_prompt` replaces pending context on resume.** Settled below; it
   turned out to be a live fault rather than a future risk.
-- The **attachment tray** work is paused pending this case, and will need a
-  client-orientation section of its own. Its design is recorded in
-  [wishlist.md](../../wishlist.md).
+- The **attachment tray** was paused pending this case. It became its own
+  case ([2026-09-09__33198985](../2026-09-09__33198985/overview.md)), which is
+  built and closed; its wishlist entry went with it.
+- **Wishlisted afterwards**: delivering orientation as *system instructions*
+  rather than as user-voice content blocks. The `system` flag this case made
+  live is ours and not ACP's, so it hides the text from clients without
+  changing what the agent receives. The successor wants a lever on the ACP
+  surface itself, which is an upstream ask rather than a local change.

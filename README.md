@@ -150,7 +150,7 @@ both offer a "concierge" without colliding, and a client that stops running
 stops describing itself to new sessions.
 
 Orientation is what a session cannot work without and is told once, unasked.
-The other half is **help**: `falconfox help <topic>` reads nested markdown that
+The other half is **help**: `falconfox help <module>` reads nested markdown that
 clients register in the same directory, so detail can grow without every
 session paying for it. `falconfox help` lists what is registered, namespaced
 the same way roles are, and the daemon composes that listing into the global

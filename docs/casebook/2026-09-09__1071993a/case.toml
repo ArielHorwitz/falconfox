@@ -1,5 +1,5 @@
 title = "Orientation: compose what a session is told from named pieces, deliver it all through the prompt channel, and let each client own its own text"
-status = "open"
+status = "closed"
 created = "2026-09-09T00:00:00.000000"
 keywords = ["orientation", "system-instructions", "session-context", "SESSION_CONTEXT",
             "AGENTS.md", "CLAUDE.md", "workspace", "manager", "concierge", "role",
