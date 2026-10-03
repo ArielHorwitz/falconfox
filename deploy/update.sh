@@ -17,6 +17,12 @@
 {
 set -euo pipefail
 
+# This script deploys the default instance, but a dev agent session inherits
+# FALCONFOX_INSTANCE=dev from its daemon. Run inline from there, the health
+# check's `falconfox list` would find the dev daemon instead, and pass for a
+# deployment that never came up.
+unset FALCONFOX_INSTANCE
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/falconfox"
 LOG_FILE="$STATE_DIR/update.log"
