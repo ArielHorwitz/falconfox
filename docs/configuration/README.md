@@ -3,6 +3,8 @@
 FalconFox reads one daemon-global TOML file:
 `$XDG_CONFIG_HOME/falconfox/config.toml`, or
 `~/.config/falconfox/config.toml` when `$XDG_CONFIG_HOME` is unset.
+A named instance (`FALCONFOX_INSTANCE=dev`) reads
+`falconfox-dev/falconfox/config.toml` beneath the same base instead.
 There are no per-working-directory overrides: a session's `path` is metadata,
 not a configuration scope.
 

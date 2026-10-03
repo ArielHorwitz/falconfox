@@ -109,20 +109,27 @@ role rather than for a workload, which is why it carries a much smaller
 `max_live_sessions` than dev does.
 
 The two instances are separated by more than the branch: the dev units set
-`XDG_STATE_HOME`/`XDG_CONFIG_HOME` to `~/.local/state/falconfox-dev` and
-`~/.config/falconfox-dev`, so dev has its own config, its own state, its own
-bot token and its own port. Stable owns the `falconfox` and
-`falconfox-telegram` shims in `~/.local/bin`, so a bare `falconfox` in a shell
-always means stable, which is worth remembering now that dev is the one being
-worked in. Dev has its own pair in
+`FALCONFOX_INSTANCE=dev`, which moves every directory FalconFox derives under
+`~/.local/state/falconfox-dev/falconfox` and `~/.config/falconfox-dev/falconfox`,
+so dev has its own config, its own state, its own bot token and its own port.
+It is FalconFox's own variable rather than `XDG_STATE_HOME`/`XDG_CONFIG_HOME`,
+which is what the units used to set: agent sessions inherit the daemon's
+environment, so the XDG variables redirected every tool an agent ran too (git
+lost its global ignore file, for one). The instance name is meant to be
+inherited, since it is what points a session's `falconfox` at its own daemon.
+The doubled `falconfox-dev/falconfox` is the layout the XDG variables produced,
+kept because session files, transcripts and the agents' own histories record
+absolute paths beneath it.
+
+Stable owns the `falconfox` and `falconfox-telegram` shims in `~/.local/bin`,
+so a bare `falconfox` in a shell always means stable, which is worth
+remembering now that dev is the one being worked in. Dev has its own pair in
 `~/.local/state/falconfox-dev/bin`, prepended to its units' `PATH` and
 therefore to every dev session's, so an agent there runs the dev CLI against
 the dev daemon rather than the deployment's CLI against it:
 
 ```sh
-XDG_STATE_HOME=~/.local/state/falconfox-dev \
-XDG_CONFIG_HOME=~/.config/falconfox-dev \
-    ~/projects/falconfox/.venv/bin/falconfox list
+FALCONFOX_INSTANCE=dev ~/projects/falconfox/.venv/bin/falconfox list
 ```
 
 **Ports are pinned, not searched.** Stable binds 9721 and dev binds 9725,

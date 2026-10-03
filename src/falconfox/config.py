@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import logsetup
+from .state import instance_dir
 
 log = logsetup.get_logger("config")
 
@@ -239,8 +240,7 @@ class Backend:
 def global_config_dir() -> Path:
     """`$XDG_CONFIG_HOME/falconfox`, or `~/.config/falconfox` if unset."""
     base = os.environ.get("XDG_CONFIG_HOME")
-    root = Path(base) if base else Path.home().joinpath(".config")
-    return root.joinpath("falconfox")
+    return instance_dir(Path(base) if base else Path.home().joinpath(".config"))
 
 
 def global_config_path() -> Path:

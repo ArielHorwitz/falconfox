@@ -4781,3 +4781,33 @@ class RenderingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstanceTest(unittest.TestCase):
+    """A named instance moves FalconFox's own directories and nothing else."""
+
+    def test_default_is_the_plain_layout(self) -> None:
+        with patch.dict(os.environ, {"XDG_STATE_HOME": "/s", "XDG_CONFIG_HOME": "/c",
+                                     "XDG_RUNTIME_DIR": "/r"}):
+            os.environ.pop(falconfox_state.INSTANCE_VARIABLE, None)
+            self.assertEqual(falconfox_state.state_dir(), Path("/s/falconfox"))
+            self.assertEqual(config.global_config_dir(), Path("/c/falconfox"))
+            self.assertEqual(falconfox_state.runtime_dir(), Path("/r/falconfox"))
+
+    def test_named_instance_nests_every_directory(self) -> None:
+        with patch.dict(os.environ, {"XDG_STATE_HOME": "/s", "XDG_CONFIG_HOME": "/c",
+                                     "XDG_RUNTIME_DIR": "/r",
+                                     falconfox_state.INSTANCE_VARIABLE: "dev"}):
+            self.assertEqual(falconfox_state.state_dir(),
+                             Path("/s/falconfox-dev/falconfox"))
+            self.assertEqual(config.global_config_dir(),
+                             Path("/c/falconfox-dev/falconfox"))
+            self.assertEqual(falconfox_state.runtime_dir(),
+                             Path("/r/falconfox-dev/falconfox"))
+            self.assertEqual(bot_module.BotConfig("token", 7).state_dir,
+                             Path("/s/falconfox-dev/falconfox/telegram"))
+
+    def test_a_name_that_is_a_path_is_refused(self) -> None:
+        with patch.dict(os.environ, {falconfox_state.INSTANCE_VARIABLE: "../x"}):
+            with self.assertRaises(ValueError):
+                falconfox_state.state_dir()

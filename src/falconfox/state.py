@@ -3,7 +3,8 @@
 The server info file (``server.json``) lives in
 ``$XDG_STATE_HOME/falconfox/`` (falling back to
 ``~/.local/state/falconfox/``) and records the PID and port of the running
-daemon so that subsequent CLI invocations can discover it.
+daemon so that subsequent CLI invocations can discover it. A named instance
+nests one level deeper, see ``instance_dir``.
 """
 
 from __future__ import annotations
@@ -28,11 +29,32 @@ SERVER_INFO_FILENAME = "server.json"
 LOG_FILENAME = "falconfox.log"
 
 
+INSTANCE_VARIABLE = "FALCONFOX_INSTANCE"
+
+
+def instance_dir(base: Path) -> Path:
+    """``base/falconfox``, or ``base/falconfox-<name>/falconfox`` when named.
+
+    A named instance (``FALCONFOX_INSTANCE``) is a second copy of the stack on
+    the same account, kept apart from the deployment by owning every directory
+    FalconFox derives. It is FalconFox's own variable on purpose: the XDG
+    variables would do the same job, but every agent session inherits the
+    daemon's environment, and redirecting XDG there redirects every tool the
+    agent runs along with it.
+    """
+    instance = os.environ.get(INSTANCE_VARIABLE)
+    if instance:
+        if not instance.replace("-", "").isalnum():
+            raise ValueError(f"{INSTANCE_VARIABLE} must be letters, digits "
+                             f"and dashes, not {instance!r}")
+        base = base.joinpath(f"falconfox-{instance}")
+    return base.joinpath("falconfox")
+
+
 def state_dir() -> Path:
     """``$XDG_STATE_HOME/falconfox``, or ``~/.local/state/falconfox`` if unset."""
     base = os.environ.get("XDG_STATE_HOME")
-    root = Path(base) if base else Path.home().joinpath(".local", "state")
-    return root.joinpath("falconfox")
+    return instance_dir(Path(base) if base else Path.home().joinpath(".local", "state"))
 
 
 def server_info_path() -> Path:
@@ -47,7 +69,7 @@ def runtime_dir() -> Path:
     the daemon that published it.
     """
     base = os.environ.get("XDG_RUNTIME_DIR")
-    return Path(base).joinpath("falconfox") if base else state_dir()
+    return instance_dir(Path(base)) if base else state_dir()
 
 
 def clients_dir(pid: Optional[int] = None) -> Path:

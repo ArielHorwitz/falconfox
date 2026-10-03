@@ -301,7 +301,8 @@ class BotConfig:
     # anything learned.
     forum_chat_id: int | None = None
     daemon_url: str = "http://127.0.0.1:9721"
-    state_dir: Path = Path.home().joinpath(".local/state/falconfox/telegram")
+    state_dir: Path = field(
+        default_factory=lambda: falconfox_state.state_dir().joinpath("telegram"))
     manager_backend: str | None = None
     default_path: Path = Path.home()
 
@@ -322,7 +323,7 @@ class BotConfig:
             daemon_url=os.environ.get("FALCONFOX_URL", "http://127.0.0.1:9721"),
             state_dir=Path(os.environ.get(
                 "FALCONFOX_TELEGRAM_STATE_DIR",
-                str(Path.home().joinpath(".local/state/falconfox/telegram")),
+                str(falconfox_state.state_dir().joinpath("telegram")),
             )).expanduser(),
             manager_backend=os.environ.get("FALCONFOX_TELEGRAM_MANAGER_BACKEND") or None,
             default_path=Path(os.environ.get(
