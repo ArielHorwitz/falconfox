@@ -5,3 +5,4 @@ __pycache__/
 .worktrees/
 src/falconfox/_version.py
 .env
+.claude/settings.local.json
